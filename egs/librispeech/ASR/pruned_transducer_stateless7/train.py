@@ -371,6 +371,12 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--self-align-loss-scale",
+        type=float,
+        default=0.5
+    )
 
     add_model_arguments(parser)
 
@@ -667,13 +673,14 @@ def compute_loss(
     y = k2.RaggedTensor(y).to(device)
 
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss = model(
+        simple_loss, pruned_loss, one_best_loss = model(
             x=feature,
             x_lens=feature_lens,
             y=y,
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
+            self_align=is_training
         )
 
         s = params.simple_loss_scale
@@ -691,6 +698,9 @@ def compute_loss(
         )
 
         loss = simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
+        
+        if one_best_loss is not None:
+            loss += one_best_loss * params.self_align_loss_scale
 
     assert loss.requires_grad == is_training
 
@@ -705,6 +715,8 @@ def compute_loss(
     info["loss"] = loss.detach().cpu().item()
     info["simple_loss"] = simple_loss.detach().cpu().item()
     info["pruned_loss"] = pruned_loss.detach().cpu().item()
+    if is_training and one_best_loss is not None:
+        info["1best_loss"] = one_best_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1098,14 +1110,14 @@ def run(rank, world_size, args):
     valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
