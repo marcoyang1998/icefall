@@ -395,7 +395,6 @@ def self_alignment_loss2(logits: torch.Tensor, ranges: torch.Tensor, x_lens: tor
     t = one_best.t.long()
     u = one_best.u.long()
     n = one_best.n.long()
-    nodes = logits[n,t,u]
     
     pseudo_emitted = nodes.argmax(-1)
     mask = pseudo_emitted == labels
@@ -436,17 +435,32 @@ def self_alignment_loss3(logits: torch.Tensor, ranges: torch.Tensor, x_lens: tor
     t = one_best.t.long()
     u = one_best.u.long()
     n = one_best.n.long()
+    # emission_mask = labels > 0
+    # emitted_n = n[emission_mask]
+    # emitted_t = t[emission_mask]
+    # emitted_u = u[emission_mask]
+    
     nodes = logits[n,t,u]
+    # emitted_nodes = logits[emitted_n, emitted_t, emitted_u]
     
     pseudo_emitted = nodes.argmax(-1)
+    
     mask = pseudo_emitted == labels
+    #CE = nn.CrossEntropyLoss(reduction="none", label_smoothing=0.02)
+    
     if random.random() > 0.9:
         print(f" {sum(mask).item()}/{len(mask)} = {sum(mask).item()/len(mask)} tokens are the same")
+        non_blank_mask = labels > 0
+        pseudo_emitted_nb = pseudo_emitted[non_blank_mask]
+        label_nb = labels[non_blank_mask]
+        mask = pseudo_emitted_nb == label_nb
+        print(f" {sum(mask).item()}/{len(mask)} = {sum(mask).item()/len(mask)} non-blank tokens are the same")
     
     only_non_blank = False
     if only_non_blank:
         non_blank_mask = labels > 0
         loss = -one_best.scores[non_blank_mask].sum()
+        #loss = CE(nodes[non_blank_mask], labels[non_blank_mask].long()).sum()
     else:
         loss = -one_best.scores.sum()
     
