@@ -17,6 +17,7 @@
 
 import random
 
+import numpy as np
 import k2
 import torch
 import torch.nn as nn
@@ -79,6 +80,7 @@ class Transducer(nn.Module):
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
+        text_sampling_prob: float=0.1
     ) -> torch.Tensor:
         """
         Args:
@@ -142,6 +144,15 @@ class Transducer(nn.Module):
         lm = self.simple_lm_proj(decoder_out)
         am = self.simple_am_proj(encoder_out)
 
+        # scheduled sampling
+        if text_sampling_prob > 0:
+            noisy_y = scheduled_sampling(sos_y_padded, lm, text_sampling_prob)
+            if random.random() > 0.95:
+                mask = noisy_y == sos_y_padded
+                print(f"{mask.sum()}/{noisy_y.numel()} tokens are un-changed.")
+            decoder_out = self.decoder(sos_y_padded)
+            lm = self.simple_lm_proj(decoder_out)
+
         # if self.training and random.random() < 0.25:
         #    lm = penalize_abs_values_gt(lm, 100.0, 1.0e-04)
         # if self.training and random.random() < 0.25:
@@ -193,3 +204,60 @@ class Transducer(nn.Module):
             )
 
         return (simple_loss, pruned_loss)
+
+def scheduled_sampling(y: torch.Tensor, simple_lm_score: torch.Tensor, sample_prob: float = 0.1, vocab_size: int = 500):
+    # Adding noise to a few token's history states (this version achieves this by replacing tokens)
+    # by replacing the history states with randomly selected incorrect symbol
+    #
+    # y: (B, L)
+    # simple_lm_score: (B,L,V)
+
+    bs = y.size(0)
+    if simple_lm_score is None:
+        L = y.size(1)
+        simple_lm_score = torch.zeros(bs, L, vocab_size).to(y.device)
+
+    vocab_size = simple_lm_score.size(-1)
+    y_out = y.clone().detach()
+
+    batch_idx = []
+    pos_idx = []
+    new_tokens = []
+    for i in range(bs):
+        y_len = sum(y[i] > 0).item()
+        num_replacement = int(y_len * sample_prob)
+        if num_replacement == 0:
+            continue
+        # get the position for replacement, avoid choosing the first token as it is <sos>
+        pos_replace = np.random.choice(y_len - 1, num_replacement, replace=False) + 1 
+        #print(f"Pos replace: {pos_replace}")
+
+        for p in range(num_replacement):
+            pos = pos_replace[p]
+            dist = torch.distributions.categorical.Categorical(logits=simple_lm_score[i, pos-1])
+            new_token = dist.sample()
+            #while new_token < 3:
+            #    new_token = dist.sample()
+            batch_idx.append(i)
+            pos_idx.append(pos)
+            new_tokens.append(new_token)
+    y_out[batch_idx, pos_idx] = torch.tensor(new_tokens).to(y.device).to(y.dtype)
+
+    return y_out
+
+if __name__=="__main__":
+    #y = torch.ones(32,100).to(torch.int64)
+    y = torch.tensor([0,1,1,1,1,1,1]).unsqueeze(0)
+    lm_scores = torch.zeros(1,7,10)
+    for i in range(7):
+        lm_scores[:,i,i] = 100
+    print(lm_scores)
+    #lm_scores = torch.randn(32,100,500)
+    #print(lm_scores.softmax(-1))
+    import time
+    start = time.time()
+    y_out = scheduled_sampling(y, lm_scores, 0.5)
+    print(y)
+    print(y_out)
+    print(f"Elapsed: {time.time() - start}")
+    

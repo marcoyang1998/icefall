@@ -100,3 +100,13 @@ class Decoder(nn.Module):
             embedding_out = embedding_out.permute(0, 2, 1)
         embedding_out = F.relu(embedding_out)
         return embedding_out
+
+
+if __name__=="__main__":
+    decoder = Decoder(500, 512, 0, 2)
+    decoder.eval()
+
+    y = torch.tensor([[0, 5, 18], [0, 2, 18]]).to(torch.int64)
+
+    y_out = decoder(y, need_pad=True)
+    

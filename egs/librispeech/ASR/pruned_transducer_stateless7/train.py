@@ -279,6 +279,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--scheduled-sampling-prob",
+        type=float,
+        default=0.0,
+        help="The probability of scheduled sampling"
+    )
+
+    parser.add_argument(
         "--lm-scale",
         type=float,
         default=0.25,
@@ -666,6 +673,7 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
+            text_sampling_prob=params.scheduled_sampling_prob
         )
 
         s = params.simple_loss_scale
