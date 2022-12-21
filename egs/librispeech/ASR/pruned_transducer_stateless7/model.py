@@ -80,6 +80,7 @@ class Transducer(nn.Module):
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
+        warmup: float = 1.0,
         text_sampling_prob: float=0.1
     ) -> torch.Tensor:
         """
@@ -145,11 +146,16 @@ class Transducer(nn.Module):
         am = self.simple_am_proj(encoder_out)
 
         # scheduled sampling
+        random_sampling = True
         if text_sampling_prob > 0:
-            noisy_y = scheduled_sampling(sos_y_padded, lm, text_sampling_prob)
+            if random_sampling:
+                noisy_y = scheduled_sampling(sos_y_padded, None, text_sampling_prob)
+            else:
+                noisy_y = scheduled_sampling(sos_y_padded, lm, text_sampling_prob)
             if random.random() > 0.95:
                 mask = noisy_y == sos_y_padded
                 print(f"{mask.sum()}/{noisy_y.numel()} tokens are un-changed.")
+                print(f"Samping prob: {text_sampling_prob} Random sampling: {random_sampling}")
             decoder_out = self.decoder(sos_y_padded)
             lm = self.simple_lm_proj(decoder_out)
 
@@ -205,7 +211,12 @@ class Transducer(nn.Module):
 
         return (simple_loss, pruned_loss)
 
-def scheduled_sampling(y: torch.Tensor, simple_lm_score: torch.Tensor, sample_prob: float = 0.1, vocab_size: int = 500):
+def scheduled_sampling(
+    y: torch.Tensor, 
+    simple_lm_score: torch.Tensor, 
+    sample_prob: float = 0.1, 
+    vocab_size: int = 500
+):
     # Adding noise to a few token's history states (this version achieves this by replacing tokens)
     # by replacing the history states with randomly selected incorrect symbol
     #
@@ -234,13 +245,16 @@ def scheduled_sampling(y: torch.Tensor, simple_lm_score: torch.Tensor, sample_pr
 
         for p in range(num_replacement):
             pos = pos_replace[p]
+            # use pos-1 because the score at pos-1 is for the next token
             dist = torch.distributions.categorical.Categorical(logits=simple_lm_score[i, pos-1])
             new_token = dist.sample()
-            #while new_token < 3:
-            #    new_token = dist.sample()
+            while new_token < 3:
+               new_token = dist.sample()
             batch_idx.append(i)
             pos_idx.append(pos)
-            new_tokens.append(new_token)
+            new_tokens.append(new_token.item())
+    if random.random() > 0.9:
+        print(f"New tokens: {new_tokens}")
     y_out[batch_idx, pos_idx] = torch.tensor(new_tokens).to(y.device).to(y.dtype)
 
     return y_out
