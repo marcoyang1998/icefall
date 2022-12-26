@@ -81,7 +81,8 @@ class Transducer(nn.Module):
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
         warmup: float = 1.0,
-        text_sampling_prob: float=0.1
+        text_sampling_prob: float=0.1,
+        random_sampling: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -146,7 +147,6 @@ class Transducer(nn.Module):
         am = self.simple_am_proj(encoder_out)
 
         # scheduled sampling
-        random_sampling = True
         if text_sampling_prob > 0:
             if random_sampling:
                 noisy_y = scheduled_sampling(sos_y_padded, None, text_sampling_prob)
@@ -221,14 +221,20 @@ def scheduled_sampling(
     # by replacing the history states with randomly selected incorrect symbol
     #
     # y: (B, L)
-    # simple_lm_score: (B,L,V)
+    # simple_lm_score: (B,L,V), un-normalised probabilities (before softmax)
 
     bs = y.size(0)
     if simple_lm_score is None:
         L = y.size(1)
         simple_lm_score = torch.zeros(bs, L, vocab_size).to(y.device)
 
-    vocab_size = simple_lm_score.size(-1)
+    # remove the influence of blank in simple_lm_score
+    lm_scores = simple_lm_score.clone()
+    non_blank_lm_scores = lm_scores[:,:,1:].log_softmax(-1)
+    lm_scores[:,:,1:] = non_blank_lm_scores
+    lm_scores[:,:,0] = -torch.inf
+
+    vocab_size = lm_scores.size(-1)
     y_out = y.clone().detach()
 
     batch_idx = []
@@ -246,14 +252,14 @@ def scheduled_sampling(
         for p in range(num_replacement):
             pos = pos_replace[p]
             # use pos-1 because the score at pos-1 is for the next token
-            dist = torch.distributions.categorical.Categorical(logits=simple_lm_score[i, pos-1])
+            dist = torch.distributions.categorical.Categorical(logits=lm_scores[i, pos-1])
             new_token = dist.sample()
             while new_token < 3:
                new_token = dist.sample()
             batch_idx.append(i)
             pos_idx.append(pos)
             new_tokens.append(new_token.item())
-    if random.random() > 0.9:
+    if random.random() > 0.95:
         print(f"New tokens: {new_tokens}")
     y_out[batch_idx, pos_idx] = torch.tensor(new_tokens).to(y.device).to(y.dtype)
 
