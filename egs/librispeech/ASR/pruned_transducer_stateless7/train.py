@@ -440,6 +440,7 @@ def get_params() -> AttributeDict:
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "sampling_warm_step": 3000,
+            "random_sampling": 1, # a boolean number
             "env_info": get_env_info(),
         }
     )
@@ -675,7 +676,8 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
-            text_sampling_prob=params.scheduled_sampling_prob * min(1.0, warmup)
+            text_sampling_prob=params.scheduled_sampling_prob * min(1.0, warmup),
+            random_sampling=params.random_sampling,
         )
 
         s = params.simple_loss_scale
