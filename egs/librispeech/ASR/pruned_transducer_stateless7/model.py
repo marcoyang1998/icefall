@@ -79,6 +79,7 @@ class Transducer(nn.Module):
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
         self_align: bool = True,
+        warmup: float = 1.0,
     ) -> torch.Tensor:
         """
         Args:
@@ -184,17 +185,25 @@ class Transducer(nn.Module):
         # prior to do_rnnt_pruning (this is an optimization for speed).
         logits = self.joiner(am_pruned, lm_pruned, project_input=False)
         
-        if self_align:
+        if self_align and warmup >= 1.0:
             start = time.time()
-            one_best_loss = self_alignment_loss3(
-                logits=logits,
-                ranges=ranges,
-                y=y_padded,
-                x_lens=x_lens
+            logp = logits.log_softmax(dim=-1).to(torch.float32)
+            self_ali, arc_map  = k2.self_alignment(
+                ranges.to(torch.int32),
+                x_lens, 
+                y_padded.to(torch.int32),
+                logp,
             )
-            print(f"Time for calculating one best loss is: {time.time() - start}")
+            lattice = k2.Fsa(self_ali)
+            scores_tracked_by_autograd = k2.index_select(logp.to(torch.float32).reshape(-1), arc_map)                                                                                                   
+            assert torch.all(lattice.scores == scores_tracked_by_autograd)
+            one_best = k2.shortest_path(lattice, use_double_scores=True)
+
+            one_best_loss = -one_best.scores.sum()
+            if random.random() > 0.9:
+                print(f"Time for calculating one best loss is: {time.time() - start}. Current warmup is {warmup}")
         else:
-            one_best_loss = None
+            one_best_loss = torch.tensor(0.0).to(logits.device)
           
         with torch.cuda.amp.autocast(enabled=False):
             pruned_loss = k2.rnnt_loss_pruned(
@@ -229,243 +238,7 @@ def get_blank_connection(ranges: torch.Tensor, x_lens: torch.Tensor):
         blk_connections.append(connections)                                                                               
                                                                                                                             
     return torch.stack(blk_connections)  
-  
-def build_logp_fsa(N, T, U, C, blank_connextions, x_lens) -> 'k2.Fsa':
-    # now only test for N == 1. support N > 1 later.
-    # assert N == 1
-    assert U == 5
-    # n = 0
-    logp_vec = []
-    stride_N = T * U * C
-    for n in range(N):
-      tot_states = T * U # T * 5
-      arcs = ""
-      for t in range(x_lens[n]):
-        for s in range(U):
-          cur_state_idx = t * U + s
-          if (s < U - 1):
-            for arc_idx in range(1, C):
-                score_index = cur_state_idx * C + arc_idx + stride_N * n
-                arcs += f"{cur_state_idx} {cur_state_idx + 1} {arc_idx} {score_index} {n} {t} {s} 0.0\n"
 
-          next_state_idx1 = blank_connextions[n, t, s]
-          if next_state_idx1 >= 0:
-            score_index = cur_state_idx * C + stride_N * n
-            next_state_idx01 = next_state_idx1 + (t + 1) * 5 
-            arcs += f"{cur_state_idx} {next_state_idx01} {0} {score_index} {n} {t} {s} 0.0\n"
-        
-
-      # set super-final arc
-      final_state = tot_states
-      # for s in range(U):
-      cur_state_idx = final_state - 1
-      arcs += f"{cur_state_idx} {final_state} {-1} -1 {n} 0 0 0.0\n"
-
-
-      arcs += f"{final_state}"
-      # ans = k2.Fsa.from_str(arcs, aux_label_names=['aux_labels', 'score_index'])
-      ans = k2.Fsa.from_str(arcs, aux_label_names=['score_index', 'n', 't', 'u'])
-
-      # print(ans)
-      ans = k2.arc_sort(ans)
-      logp_vec.append(ans)
-    return k2.create_fsa_vec(logp_vec)
-  
-  
-def build_logp_fsa2(N, T, U, C, blank_connextions, ranges, y, x_lens) -> 'k2.Fsa':
-    # now only test for N == 1. support N > 1 later.
-    # assert N == 1
-    assert U == 5
-    # n = 0
-    logp_vec = []
-    stride_N = T * U * C
-    for n in range(N):
-      tot_states = T * U # T * 5
-      arcs = ""
-      for t in range(x_lens[n]):
-        lower_bound = ranges[n,t,0]
-        for s in range(U):
-          cur_state_idx = t * U + s
-          if (s < U - 1):
-            #actual_u = s + lower_bound
-            actual_u = ranges[n,t,s]
-            arc_idx = y[n, actual_u]
-            score_index = cur_state_idx * C + arc_idx + stride_N * n
-            arcs += f"{cur_state_idx} {cur_state_idx + 1} {arc_idx} {score_index} {n} {t} {s} 0.0\n"
-          # if (s < U - 1):
-          #   for arc_idx in range(1, C):
-          #       score_index = cur_state_idx * C + arc_idx + stride_N * n
-          #       arcs += f"{cur_state_idx} {cur_state_idx + 1} {arc_idx} {score_index} {n} {t} {s} 0.0\n"
-
-          next_state_idx1 = blank_connextions[n, t, s]
-          if next_state_idx1 >= 0:
-            score_index = cur_state_idx * C + stride_N * n
-            next_state_idx01 = next_state_idx1 + (t + 1) * 5 
-            arcs += f"{cur_state_idx} {next_state_idx01} {0} {score_index} {n} {t} {s} 0.0\n"
-        
-
-      # set super-final arc
-      final_state = tot_states
-      # for s in range(U):
-      cur_state_idx = final_state - 1
-      arcs += f"{cur_state_idx} {final_state} {-1} -1 {n} 0 0 0.0\n"
-
-
-      arcs += f"{final_state}"
-      # ans = k2.Fsa.from_str(arcs, aux_label_names=['aux_labels', 'score_index'])
-      ans = k2.Fsa.from_str(arcs, aux_label_names=['score_index', 'n', 't', 'u'])
-
-      # print(ans)
-      ans = k2.arc_sort(ans)
-      logp_vec.append(ans)
-    return k2.create_fsa_vec(logp_vec)
-
-def build_rnnt_topology(y: k2.RaggedTensor, bs: int):
-    target_fsas = []
-    
-    for b in range(bs):
-        linear_fsa = k2.add_epsilon_self_loops(k2.linear_fsa(y[b].tolist()))
-        target_fsas.append(linear_fsa)
-    
-    return k2.create_fsa_vec(target_fsas)
-
-def self_alignment_loss(logits: torch.Tensor, ranges: torch.Tensor, x_lens: torch.Tensor, y: k2.RaggedTensor):
-    # logits: (B,T,S,V), pruned lattice
-    # ranges: (B,T,S), valid range in the pruned lattice
-    # y: groundtruth output tokens
-    device = logits.device
-    N,T,U,C = logits.size()
-    blank_connextions = get_blank_connection(ranges, x_lens)
-    logp = logits.log_softmax(dim=-1)
-    logp_graph = build_logp_fsa(N, T, U, C, blank_connextions, x_lens)
-    logp_graph = logp_graph.to(device)
-    prefix_logp = torch.cat([torch.tensor([0]).to(device), logp.reshape(-1)])
-    logp_graph.scores = torch.index_select(prefix_logp.to(torch.float32), dim=0, index=logp_graph.score_index.to(torch.int64) + 1)
-    target_fsa = build_rnnt_topology(y, N)
-    target_fsa = target_fsa.to(device)
-    
-    lattice = k2.intersect(target_fsa, logp_graph, treat_epsilons_specially=False)
-    one_best = k2.shortest_path(lattice, use_double_scores=True)
-    
-    alignment = one_best.score_index
-    labels = one_best.labels
-    scores = one_best.scores
-    
-    t = one_best.t.long()
-    u = one_best.u.long()
-    n = one_best.n.long()
-    nodes = logits[n,t,u]
-    
-    pseudo_emitted = nodes.argmax(-1)
-    mask = pseudo_emitted == labels
-    if random.random() > 0.9:
-        print(f" {sum(mask).item()}/{len(mask)} = {sum(mask).item()/len(mask)} tokens are the same")
-    
-    only_non_blank = False
-    if only_non_blank:
-        non_blank_mask = labels > 0
-        loss = -one_best.scores[non_blank_mask].sum()
-    else:
-        loss = -one_best.scores.sum()
-    
-    return loss
-  
-def self_alignment_loss2(logits: torch.Tensor, ranges: torch.Tensor, x_lens: torch.Tensor, y: k2.RaggedTensor):
-    # logits: (B,T,S,V), pruned lattice
-    # ranges: (B,T,S), valid range in the pruned lattice
-    # y: groundtruth output tokens
-    device = logits.device
-    N,T,U,C = logits.size()
-    blank_connextions = get_blank_connection(ranges, x_lens)
-    logp = logits.log_softmax(dim=-1)
-    logp_graph = build_logp_fsa2(N, T, U, C, blank_connextions, ranges, y, x_lens)
-    logp_graph = logp_graph.to(device)
-    prefix_logp = torch.cat([torch.tensor([0]).to(device), logp.reshape(-1)])
-    logp_graph.scores = torch.index_select(prefix_logp.to(torch.float32), dim=0, index=logp_graph.score_index.to(torch.int64) + 1)
-    target_fsa = build_rnnt_topology(y, N)
-    target_fsa = target_fsa.to(device)
-    
-    lattice = k2.intersect(target_fsa, logp_graph, treat_epsilons_specially=False)
-    one_best = k2.shortest_path(lattice, use_double_scores=True)
-    
-    alignment = one_best.score_index
-    labels = one_best.labels
-    scores = one_best.scores
-    
-    t = one_best.t.long()
-    u = one_best.u.long()
-    n = one_best.n.long()
-    
-    pseudo_emitted = nodes.argmax(-1)
-    mask = pseudo_emitted == labels
-    if random.random() > 0.9:
-        print(f" {sum(mask).item()}/{len(mask)} = {sum(mask).item()/len(mask)} tokens are the same")
-    
-    only_non_blank = False
-    if only_non_blank:
-        non_blank_mask = labels > 0
-        loss = -one_best.scores[non_blank_mask].sum()
-    else:
-        loss = -one_best.scores.sum()
-    
-    return loss
-  
-def self_alignment_loss3(logits: torch.Tensor, ranges: torch.Tensor, x_lens: torch.Tensor, y: k2.RaggedTensor):
-    # logits: (B,T,S,V), pruned lattice
-    # ranges: (B,T,S), valid range in the pruned lattice
-    # y: groundtruth output tokens
-    device = logits.device
-    N,T,U,C = logits.size()
-    blank_connextions = get_blank_connection(ranges, x_lens)
-    logp = logits.log_softmax(dim=-1)
-    logp_graph = build_logp_fsa2(N, T, U, C, blank_connextions, ranges, y, x_lens)
-    logp_graph = logp_graph.to(device)
-    prefix_logp = torch.cat([torch.tensor([0]).to(device), logp.reshape(-1)])
-    logp_graph.scores = torch.index_select(prefix_logp.to(torch.float32), dim=0, index=logp_graph.score_index.to(torch.int64) + 1)
-    #target_fsa = build_rnnt_topology(y, N)
-    #target_fsa = target_fsa.to(device)
-    
-    #lattice = k2.intersect(target_fsa, logp_graph, treat_epsilons_specially=False)
-    one_best = k2.shortest_path(logp_graph, use_double_scores=True)
-    
-    alignment = one_best.score_index
-    labels = one_best.labels
-    scores = one_best.scores
-    
-    t = one_best.t.long()
-    u = one_best.u.long()
-    n = one_best.n.long()
-    # emission_mask = labels > 0
-    # emitted_n = n[emission_mask]
-    # emitted_t = t[emission_mask]
-    # emitted_u = u[emission_mask]
-    
-    nodes = logits[n,t,u]
-    # emitted_nodes = logits[emitted_n, emitted_t, emitted_u]
-    
-    pseudo_emitted = nodes.argmax(-1)
-    
-    mask = pseudo_emitted == labels
-    #CE = nn.CrossEntropyLoss(reduction="none", label_smoothing=0.02)
-    
-    if random.random() > 0.9:
-        print(f" {sum(mask).item()}/{len(mask)} = {sum(mask).item()/len(mask)} tokens are the same")
-        non_blank_mask = labels > 0
-        pseudo_emitted_nb = pseudo_emitted[non_blank_mask]
-        label_nb = labels[non_blank_mask]
-        mask = pseudo_emitted_nb == label_nb
-        print(f" {sum(mask).item()}/{len(mask)} = {sum(mask).item()/len(mask)} non-blank tokens are the same")
-    
-    only_non_blank = False
-    if only_non_blank:
-        non_blank_mask = labels > 0
-        loss = -one_best.scores[non_blank_mask].sum()
-        #loss = CE(nodes[non_blank_mask], labels[non_blank_mask].long()).sum()
-    else:
-        loss = -one_best.scores.sum()
-    
-    return loss
-  
 if __name__=="__main__":
     ranges = torch.tensor([[0,1,2,3,4],                                                                                         
                            [0,1,2,3,4],                                                                                         

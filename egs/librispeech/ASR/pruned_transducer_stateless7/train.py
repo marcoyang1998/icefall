@@ -442,6 +442,7 @@ def get_params() -> AttributeDict:
             "feature_dim": 80,
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
+            "model_warm_step": 3000,
             "env_info": get_env_info(),
         }
     )
@@ -633,6 +634,7 @@ def compute_loss(
     sp: spm.SentencePieceProcessor,
     batch: dict,
     is_training: bool,
+    warmup: float,
 ) -> Tuple[Tensor, MetricsTracker]:
     """
     Compute transducer loss given the model and its inputs.
@@ -680,7 +682,8 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
-            self_align=is_training
+            self_align=is_training and (params.self_align_loss_scale > 0),
+            warmup=warmup,
         )
 
         s = params.simple_loss_scale
@@ -699,7 +702,7 @@ def compute_loss(
 
         loss = simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
         
-        if one_best_loss is not None:
+        if one_best_loss > 0.0:
             loss += one_best_loss * params.self_align_loss_scale
 
     assert loss.requires_grad == is_training
@@ -740,6 +743,7 @@ def compute_validation_loss(
             sp=sp,
             batch=batch,
             is_training=False,
+            warmup=0.0,
         )
         assert loss.requires_grad is False
         tot_loss = tot_loss + loss_info
@@ -822,6 +826,7 @@ def train_one_epoch(
                     sp=sp,
                     batch=batch,
                     is_training=True,
+                    warmup=(params.batch_idx_train / params.model_warm_step),
                 )
             # summary stats
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
@@ -1226,6 +1231,7 @@ def scan_pessimistic_batches_for_oom(
                     sp=sp,
                     batch=batch,
                     is_training=True,
+                    warmup=0.0,
                 )
             loss.backward()
             optimizer.zero_grad()
