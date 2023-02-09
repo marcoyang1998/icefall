@@ -479,6 +479,7 @@ class EmformerAttention(nn.Module):
         self.out_proj = ScaledLinear(
             embed_dim, embed_dim, bias=True, initial_scale=0.25
         )
+        self.attention_masker = ApplyPaddingMask(self.nhead)
 
     def _gen_attention_probs(
         self,
@@ -513,17 +514,11 @@ class EmformerAttention(nn.Module):
         attention_weights_float = attention_weights_float.masked_fill(
             attention_mask.unsqueeze(0), self.negative_inf
         )
-        if padding_mask is not None:
-            Q = attention_weights.size(1)
-            B = attention_weights.size(0) // self.nhead
-            attention_weights_float = attention_weights_float.view(B, self.nhead, Q, -1)
-            attention_weights_float = attention_weights_float.masked_fill(
-                padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
-                self.negative_inf,
-            )
-            attention_weights_float = attention_weights_float.view(
-                B * self.nhead, Q, -1
-            )
+
+        attention_weights_float = self.attention_masker(
+            padding_mask=padding_mask,
+            attention_weights=attention_weights
+        )
 
         attention_probs = nn.functional.softmax(
             attention_weights_float, dim=-1
@@ -1267,6 +1262,12 @@ class EmformerEncoder(nn.Module):
         self.chunk_length = chunk_length
         self.memory_size = memory_size
         self.cnn_module_kernel = cnn_module_kernel
+        self.padding_mask_maker = ComputePaddingMask(
+            right_context_length=self.right_context_length,
+            left_context_length=self.left_context_length,
+            shift=self.shift,
+            memory_size=self.memory_size,
+        )
 
     def _gen_right_context(self, x: torch.Tensor) -> torch.Tensor:
         """Hard copy each chunk's right context and concat them."""
@@ -1461,6 +1462,7 @@ class EmformerEncoder(nn.Module):
         self,
         x: torch.Tensor,
         states: List[torch.Tensor],
+        num_processed_frames: torch.Tensor,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """Forward pass for streaming inference.
 
@@ -1495,6 +1497,12 @@ class EmformerEncoder(nn.Module):
         right_context = x[self.chunk_length :]
         #  right_context_utterance = torch.cat([right_context, utterance])
 
+        x_lens = torch.tensor([x.size(0)]).to(x.device)
+        padding_mask = self.padding_mask_maker(
+            length=x_lens,
+            num_processed_frames=num_processed_frames
+        )
+        
         output = utterance
         output_states: List[torch.Tensor] = []
         for layer_idx, layer in enumerate(self.emformer_layers):
@@ -1505,7 +1513,7 @@ class EmformerEncoder(nn.Module):
             (output, right_context, output_cache,) = layer.infer(
                 output,
                 right_context,
-                padding_mask=None,
+                padding_mask=padding_mask,
                 cache=cache,
             )
             output_states.extend(output_cache)
@@ -1663,6 +1671,7 @@ class Emformer(EncoderInterface):
         self,
         x: torch.Tensor,
         states: List[torch.Tensor],
+        num_processed_frames: torch.Tensor,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """Forward pass for streaming inference.
 
@@ -1698,9 +1707,10 @@ class Emformer(EncoderInterface):
         x = x[:, 1:-1, :]
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
+        # need to ask
+        num_processed_frames = num_processed_frames >> 2
         # Caution: We assume the subsampling factor is 4!
-
-        output, output_states = self.encoder.infer(x, states)
+        output, output_states = self.encoder.infer(x, states, num_processed_frames)
 
         output = output.permute(1, 0, 2)  # (T, N, C) -> (N, T, C)
 
@@ -1819,3 +1829,98 @@ class Conv2dSubsampling(nn.Module):
         x = self.out_norm(x)
         x = self.out_balancer(x)
         return x
+
+class ComputePaddingMask(nn.Module):
+  """A wrapper function to compute the padding mask
+  """
+  def __init__(
+      self,
+      right_context_length: int=2,
+      left_context_length: int=8,
+      shift: int=3,
+      memory_size: int=32,
+  ):
+      self.right_context_length = right_context_length
+      self.left_context_length = left_context_length
+      self.shift = shift
+      self.memory_size = memory_size
+      self.use_memory = memory_size > 0
+  
+  def forward(
+      self,
+      lengths: torch.Tensor,
+      num_processed_frames: torch.Tensor,
+  ):
+    """Create a padding mask for emformer attention
+
+    Args:
+        lengths (torch.Tensor): 
+            lengths (torch.Tensor):
+            With shape (B,) and i-th element representing number of valid
+            utterance frames for i-th batch element in x, which contains the
+            right_context at the end.
+        num_processed_frames (int): 
+
+    """
+    output_lengths = torch.clamp(lengths - self.right_context_length, min=0)
+    # calcualte padding mask to mask out initial zero caches
+    chunk_mask = make_pad_mask(output_lengths).to(x.device)
+    memory_mask = (
+        (
+            (num_processed_frames >> self.shift).view(x.size(1), 1)
+            <= torch.arange(self.memory_size, device=x.device).expand(
+              x.size(1), self.memory_size
+            )
+        ).flip(1)
+        if self.use_memory
+        else torch.empty(0).to(dtype=torch.bool, device=x.device)
+    )
+    left_context_mask = (
+        num_processed_frames.view(x.size(1), 1)
+        <= torch.arange(self.left_context_length, device=x.device).expand(
+            x.size(1), self.left_context_length
+        )
+    ).flip(1)
+    right_context_mask = torch.zeros(
+        x.size(1),
+        self.right_context_length,
+        dtype=torch.bool,
+        device=x.device,
+    )
+    padding_mask = torch.cat(
+        [memory_mask, right_context_mask, left_context_mask, chunk_mask],
+        dim=1,
+    )
+      
+    return padding_mask
+      
+
+class ApplyPaddingMask(nn.Module):
+    def __init__(
+        self,
+        nhead: int,
+    ):
+        self.nhead = nhead
+        self.negative_inf = -1e8
+  
+    def forward(
+        self,
+        padding_mask=torch.Tensor,
+        attention_weights=torch.Tensor,
+    ):
+        Q = attention_weights.size(1)
+        B = attention_weights.size(0) // self.nhead
+        attention_weights_float = attention_weights_float.view(B, self.nhead, Q, -1)
+        attention_weights_float = attention_weights_float.masked_fill(
+            padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
+            self.negative_inf,
+        )
+        attention_weights_float = attention_weights_float.view(
+            B * self.nhead, Q, -1
+        )
+        return attention_weights_float
+        
+
+  
+    
+    
