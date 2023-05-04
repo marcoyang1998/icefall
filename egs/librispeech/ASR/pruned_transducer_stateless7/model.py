@@ -26,10 +26,12 @@ from icefall.utils import add_sos, make_pad_mask
 from scaling import penalize_abs_values_gt, ScaledLinear
 from torch import Tensor
 
+
 class PromptedTransducer(nn.Module):
     """It implements https://arxiv.org/pdf/1211.3711.pdf
     "Sequence Transduction with Recurrent Neural Networks"
     """
+
     def __init__(
         self,
         encoder_embed: nn.Module,
@@ -152,19 +154,24 @@ class PromptedTransducer(nn.Module):
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
         text = text.t()  # now (T, N)
-        text = self.text_embed(text) # now (T, N, C)
+        text = self.text_embed(text)  # now (T, N, C)
         text_key_padding_mask = make_pad_mask(text_lens)
 
         text = self._add_style_indicator(text, style_lens)
 
-        memory, text_lens = self.text_encoder(text, text_lens,
-                                              text_key_padding_mask)
+        memory, text_lens = self.text_encoder(
+            text, text_lens, text_key_padding_mask
+        )
 
         memory_key_padding_mask = make_pad_mask(text_lens)
 
-        encoder_out, x_lens = self.encoder(x, x_lens, src_key_padding_mask,
-                                           memory=memory,
-                                           memory_key_padding_mask=memory_key_padding_mask)
+        encoder_out, x_lens = self.encoder(
+            x,
+            x_lens,
+            src_key_padding_mask,
+            memory=memory,
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
         encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
 
         assert torch.all(x_lens > 0)
@@ -250,7 +257,6 @@ class PromptedTransducer(nn.Module):
 
         return (simple_loss, pruned_loss)
 
-
     def _add_style_indicator(self, memory: Tensor, style_lens: Tensor):
         """
         Adds to `memory` an indicator that is 1.0 for positions that correspond to
@@ -264,13 +270,16 @@ class PromptedTransducer(nn.Module):
 
         (memory_len, batch_size, embed_dim) = memory.shape
 
-
-        indicator = torch.arange(memory_len, device=memory.device).unsqueeze(-1) < style_lens
+        indicator = (
+            torch.arange(memory_len, device=memory.device).unsqueeze(-1)
+            < style_lens
+        )
         indicator = indicator.to(memory.dtype)
 
         extra_term = torch.zeros_like(memory)
         extra_term[..., 0] += indicator
 
         return memory + extra_term
+
 
 Transducer = PromptedTransducer  # for decoding
