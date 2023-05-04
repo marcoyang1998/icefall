@@ -146,7 +146,6 @@ class PromptedTransducer(nn.Module):
 
         assert x.size(0) == x_lens.size(0) == y.dim0
 
-        import pdb; pdb.set_trace()
         x, x_lens = self.encoder_embed(x, x_lens)
 
         src_key_padding_mask = make_pad_mask(x_lens)
@@ -156,7 +155,7 @@ class PromptedTransducer(nn.Module):
         text = self.text_embed(text) # now (T, N, C)
         text_key_padding_mask = make_pad_mask(text_lens)
 
-        memory = self._add_style_indicator(memory, style_lens)
+        text = self._add_style_indicator(text, style_lens)
 
         memory, text_lens = self.text_encoder(text, text_lens,
                                               text_key_padding_mask)
