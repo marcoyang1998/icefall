@@ -566,7 +566,6 @@ class TextEmbedding(nn.Module):
         bias: bool=True,
     ):
         super().__init__()
-        import pdb; pdb.set_trace()
         self.embed = nn.Embedding(
             num_embeddings=num_embeddings,  # we encode the text as UTF-8 bytes
             embedding_dim=embedding_dim, #
@@ -596,14 +595,12 @@ class TextEmbedding(nn.Module):
         Returns:
             The embeddings of text (T,N,C)
         """
-        import pdb; pdb.set_trace()
         text = self.embed(text) # (T,N,C)
         
         text = text.permute(1,2,0) # (T,N,C) -> (N,C,T)
         text = self.depth_conv(text)
         text = self.activation(text)
         text = text.permute(2,0,1) # (N,C,T) -> (T,N,C)
-        
         
         return text
         
