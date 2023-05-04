@@ -146,6 +146,7 @@ class PromptedTransducer(nn.Module):
 
         assert x.size(0) == x_lens.size(0) == y.dim0
 
+        import pdb; pdb.set_trace()
         x, x_lens = self.encoder_embed(x, x_lens)
 
         src_key_padding_mask = make_pad_mask(x_lens)

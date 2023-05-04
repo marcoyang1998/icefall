@@ -557,12 +557,62 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     return encoder_embed
 
 
+class TextEmbedding(nn.Module):
+    def __init__(
+        self,
+        num_embeddings: int=256,
+        embedding_dim: int=256,
+        kernel_size: int=3,
+        bias: bool=True,
+    ):
+        super().__init__()
+        import pdb; pdb.set_trace()
+        self.embed = nn.Embedding(
+            num_embeddings=num_embeddings,  # we encode the text as UTF-8 bytes
+            embedding_dim=embedding_dim, #
+        )
+        
+        channels = embedding_dim
+        kernel_size = 3
+        
+        logging.info(f"Configuration for text_embed: Num channels: {channels}, kernel_size: {kernel_size}")
+    
+        self.depth_conv = nn.Conv1d(
+            channels,
+            channels,
+            kernel_size,
+            stride=1,
+            padding=(kernel_size - 1) // 2,
+            groups=channels,
+            bias=True,
+        )
+        self.activation = nn.ReLU()
+        
+    def forward(self, text: torch.Tensor) -> torch.Tensor:
+        """Forward function of the text embedding
+
+        Args:
+            text (torch.Tensor): Text in UTF-8 bytes (T,N)
+        Returns:
+            The embeddings of text (T,N,C)
+        """
+        import pdb; pdb.set_trace()
+        text = self.embed(text) # (T,N,C)
+        
+        text = text.permute(1,2,0) # (T,N,C) -> (N,C,T)
+        text = self.depth_conv(text)
+        text = self.activation(text)
+        text = text.permute(2,0,1) # (N,C,T) -> (T,N,C)
+        
+        
+        return text
+        
 def get_text_embed(params: AttributeDict) -> nn.Module:
-    return nn.Embedding(
-        num_embeddings=256,  # we encode the text as UTF-8 bytes
+    return TextEmbedding(
+        num_embeddings=256,
         embedding_dim=_to_int_tuple(params.text_encoder_dim)[0],
     )
-
+    
 
 def get_text_encoder(params: AttributeDict) -> nn.Module:
     return Zipformer2(
@@ -637,6 +687,7 @@ def get_transducer_model(params: AttributeDict) -> nn.Module:
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
     text_embed = get_text_embed(params)
+    logging.info(f"Text_embed: {text_embed}")
     text_encoder = get_text_encoder(params)
     decoder = get_decoder_model(params)
     joiner = get_joiner_model(params)
