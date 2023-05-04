@@ -51,7 +51,9 @@ class PromptASRDataset(torch.utils.data.Dataset):
         # a text sampling function
         self.text_sampling_func = text_sampling_func
 
-    def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
+    def __getitem__(
+        self, cuts: CutSet
+    ) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
         Return a new batch, with the batch size automatically determined using the constraints
         of max_frames and max_cuts.
@@ -96,10 +98,13 @@ class PromptASRDataset(torch.utils.data.Dataset):
             "supervisions": default_collate(
                 [
                     self.text_sampling_func(
-                        texts=supervision.texts,
-                        pre_texts=supervision.pre_texts
-                    ) if self.text_sampling_func is not None
-                    else {"text": supervision.texts[0], "pre_text": supervision.pre_texts[0]}
+                        texts=supervision.texts, pre_texts=supervision.pre_texts
+                    )
+                    if self.text_sampling_func is not None
+                    else {
+                        "text": supervision.texts[0],
+                        "pre_text": supervision.pre_texts[0],
+                    }
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions
                 ]
