@@ -95,11 +95,11 @@ class PromptASRDataset(torch.utils.data.Dataset):
             "inputs": inputs,
             "supervisions": default_collate(
                 [
-                    {
-                        "text": supervision.texts[0]
-                        if self.text_sampling_func is None
-                        else self.text_sampling_func(supervision.texts),
-                    }
+                    self.text_sampling_func(
+                        texts=supervision.texts,
+                        pre_texts=supervision.pre_texts
+                    ) if self.text_sampling_func is not None
+                    else {"text": supervision.texts[0], "pre_text": supervision.pre_texts[0]}
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions
                 ]
