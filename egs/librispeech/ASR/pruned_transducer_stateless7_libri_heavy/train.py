@@ -102,6 +102,13 @@ LRSchedulerType = Union[
 def random_sampling(texts: List[str]) -> str:
     return random.choice(texts)
 
+def joint_random_sampling(texts: List[str], pre_texts: List[str]) -> str:
+    i = random.randint(0, 1)
+    out = {
+        "text": texts[i],
+        "pre_text": pre_texts[i]
+    }
+    return out
 
 def get_adjusted_batch_count(params: AttributeDict) -> float:
     # returns the number of batches we would have used so far if we had used the reference
@@ -844,7 +851,7 @@ def compute_loss(
     warm_step = params.warm_step
 
     texts = batch["supervisions"]["text"]
-    pre_texts = batch["supervisions"]["pre_texts"]
+    pre_texts = batch["supervisions"]["pre_text"]
     y = sp.encode(texts, out_type=int)
     y = k2.RaggedTensor(y).to(device)
 
@@ -1250,7 +1257,7 @@ def run(rank, world_size, args):
     libriheavy = LibriHeavyAsrDataModule(args)
 
     train_cuts = libriheavy.train_cuts()
-
+    
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
         #
@@ -1260,10 +1267,7 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
-        if c.duration < 1.0 or c.duration > 20.0:
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            )
+        if c.duration < 1.0 or c.duration > 30.0:
             return False
 
         # In pruned RNN-T, we require that T >= S
@@ -1273,14 +1277,14 @@ def run(rank, world_size, args):
         # In ./zipformer.py, the conv module uses the following expression
         # for subsampling
         T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
+        tokens = sp.encode(c.supervisions[0].texts[0], out_type=str)
 
         if T < len(tokens):
             logging.warning(
                 f"Exclude cut with ID {c.id} from training. "
                 f"Number of frames (before subsampling): {c.num_frames}. "
                 f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
+                f"Text: {c.supervisions[0].texts[0]}. "
                 f"Tokens: {tokens}. "
                 f"Number of tokens: {len(tokens)}"
             )
@@ -1300,20 +1304,20 @@ def run(rank, world_size, args):
     train_dl = libriheavy.train_dataloaders(
         train_cuts,
         sampler_state_dict=sampler_state_dict,
-        text_sampling_func=random_sampling,
+        text_sampling_func=joint_random_sampling,
     )
 
     valid_cuts = libriheavy.dev_cuts()
     valid_dl = libriheavy.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
