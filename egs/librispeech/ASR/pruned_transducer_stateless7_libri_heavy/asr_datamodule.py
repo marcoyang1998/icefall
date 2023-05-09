@@ -337,7 +337,10 @@ class LibriHeavyAsrDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+    def valid_dataloaders(self,
+        cuts_valid: CutSet,
+        text_sampling_func: Callable[[List[str]], str] = None, 
+    ) -> DataLoader:
         transforms = []
         if self.args.random_left_padding:
             logging.info("Enable random left padding")
@@ -360,11 +363,13 @@ class LibriHeavyAsrDataModule:
                     Fbank(FbankConfig(num_mel_bins=80))
                 ),
                 return_cuts=self.args.return_cuts,
+                text_sampling_func=text_sampling_func,
             )
         else:
             validate = PromptASRDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
+                text_sampling_func=text_sampling_func,
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -409,7 +414,7 @@ class LibriHeavyAsrDataModule:
         logging.info(f"About to get {self.args.subset} cuts")
         path = (
             self.args.manifest_dir
-            / f"librilight_cuts_{self.args.subset}.jsonl.gz"
+            / f"librilight_cuts_train_{self.args.subset}.jsonl.gz"
         )
         cuts_train = CutSet.from_jsonl_lazy(path)
         return cuts_train
@@ -421,6 +426,14 @@ class LibriHeavyAsrDataModule:
             self.args.manifest_dir / "librilight_cuts_dev.jsonl.gz"
         )
         return cuts_valid
+    
+    @lru_cache()
+    def test_medium_cuts(self) -> CutSet:
+        logging.info("About to get 2000 cuts from the medium set")
+        cuts_medium_2k = load_manifest_lazy(
+            self.args.manifest_dir / "librilight_cuts_medium_2000.jsonl.gz"
+        )
+        return cuts_medium_2k
 
     @lru_cache()
     def test_clean_cuts(self) -> CutSet:
