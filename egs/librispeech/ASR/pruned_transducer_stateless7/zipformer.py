@@ -502,9 +502,15 @@ class Zipformer2EncoderLayer(nn.Module):
                                                feedforward_dim,
                                                dropout)
 
-        self.feed_forward3 = FeedforwardModule(embed_dim,
-                                               (feedforward_dim * 5) // 4,
-                                               dropout)
+        feed_forward3a = FeedforwardModule(embed_dim,
+                                           (feedforward_dim * 5) // 4,
+                                           dropout)
+        feed_forward3b = FeedforwardModule(embed_dim,
+                                           (feedforward_dim * 5) // 4,
+                                           dropout)
+        self.feed_forward3 = ChoiceModule(embed_dim,
+                                          feed_forward3a,
+                                          feed_forward3b)
 
         self.nonlin_attention = NonlinAttention(embed_dim,
                                                 hidden_channels=3 * embed_dim // 4)
@@ -1574,6 +1580,227 @@ class MultiheadAttentionWeights(nn.Module):
                     dim=-1).mean(dim=(1,2))
                 logging.info(f"name={self.name}, attn_weights_entropy = {attn_weights_entropy}")
 
+
+class ChoiceModule(nn.Module):
+    """
+    This module multiplexes frames between two submodules that are passed into it, in a
+    learnable way.  The submodules passed into it should have the same number of channels in
+    their input and output, and should not have any sequence-wise operation, i.e. they
+    should operated independently per "frame" where a "frame" is just a vector of activations with
+    `num_channels` channels.
+
+    The idea is that you might have two versions of a feedforward module, for instance, and
+    allocate about half of the frames to each verison; this would allow you in principle to
+    use double the parameters without using very much more memory or time for training.
+    """
+    def __init__(self,
+                 num_channels: int,
+                 module1: nn.Module,
+                 module2: nn.Module,
+                 min_proportion2: FloatLike = 0.2,
+                 max_proportion2: FloatLike = 0.8,
+                 intermediate_rate: FloatLike = 0.05):
+        super().__init__()
+        # the min_abs and max_abs constraints are very arbitrary just to keep it in
+        # a consistent range for model averaging, since it's only going to be the
+        # relative values of the scores that matter.
+        self.score_balancer = Balancer(1,
+                                       channel_dim=-1,
+                                       min_positive=min_proportion2,
+                                       max_positive=max_proportion2,
+                                       min_abs=0.8,
+                                       max_abs=1.2)
+
+        # self.params is the projection to the scores.
+        self.to_scores = nn.Linear(num_channels, 1, bias=False)
+
+        # intermediate_rate is the target proportion of the activations that we
+        # aim to have intermediate weights between 0 and 1; this requires that
+        # we evaluate both sub-networks for them, and we don't want this to be
+        # too many or it would be slow; but we also can't let it be zero or we
+        # wouldn't be able to train the score projection.
+        self.intermediate_rate = copy.deepcopy(intermediate_rate)
+
+        self.module1 = module1
+        self.module2 = module2
+
+    def forward(self,
+                x: Tensor):
+        """
+        Forward function.
+          x: a Tensor of shape (*, num_channels)
+        Returns:
+         a Tensor with the same shape as x.
+        """
+        x_shape = x.shape
+        num_channels = x_shape[-1]
+        x = x.reshape(-1, num_channels)
+
+        scores = self.to_scores(x)  # (num_frames, 1)
+
+        scores = self.score_balancer(scores)
+
+        scores = scores.flatten() # (num_frames,)
+
+        module1_indexes, module2_indexes, module2_weight, reverse_indexes = self.process_scores(scores)
+
+        self._test_indexes(module1_indexes, module2_indexes, module2_weight, reverse_indexes)
+
+        x1 = torch.index_select(x, dim=0, index=module1_indexes)
+        x2 = torch.index_select(x, dim=0, index=module2_indexes)
+
+        x1 = self.module1(x1)
+        x2 = self.module1(x2)
+
+        num_overlapping = module2_weight.numel()
+        if num_overlapping > 0:
+            module1_weight = 1.0 - module2_weight
+            x_overlapping = (x1[-num_overlapping:] * module1_weight.unsqueeze(-1) +
+                             x2[:num_overlapping] * module2_weight.unsqueeze(-1))
+            x = torch.cat((x1[:-num_overlapping],
+                           x_overlapping,
+                           x2[num_overlapping:]),
+                          dim=0)
+        else:
+            x = torch.cat((x1, x2),
+                          dim=0)
+
+        x = torch.index_select(x, dim=0, index=reverse_indexes)
+        x = x.reshape(x_shape)
+        return x
+
+
+    def choose_modules(self, x: Tensor, module1: nn.Module, module2: nn.Module,
+                       module1_indexes: Tensor, module2_indexes: Tensor,
+                       module2_weight: Tensor, reverse_indexes: Tensor):
+        """
+        Pass x through two modules according to provided indexes and possibly weights.
+        Args:
+                       x: the input Tensor, of shape (num_frames, num_channels)
+          module1_indexes: the subset of frame indexes 0..num_frames-1 that should be passed through
+                         module1
+          module2_indexes: the subset of frame indexes 0..num_frames-1 that should be passed through
+                         module2.  In training mode there may be some overlap between the two; the
+                         overlapping elements should be at the end of module1 and the beginning of module2.
+        """
+
+
+
+    def _test_indexes(self, module1_indexes, module2_indexes,
+                      module2_weight, reverse_indexes):
+        if __name__ != '__main__' and random.random() > 0.025:
+            return
+        num_frames = reverse_indexes.numel()
+        num_overlap = module2_weight.numel()
+        assert module1_indexes.numel() + module2_indexes.numel() - num_overlap == num_frames
+        if num_overlap > 0:
+            assert torch.all(module1_indexes[-num_overlap:] == module2_indexes[:num_overlap])
+        forward_indexes = torch.cat((module1_indexes,
+                                     module2_indexes[num_overlap:]))
+        # make sure that forward_indexes and reverse_indexes are inverse permutations.
+        assert torch.all(reverse_indexes[forward_indexes] == torch.arange(num_frames,
+                                                                          device=forward_indexes.device))
+        assert torch.all(module2_weight >= 0)
+        assert torch.all(module2_weight <= 1)
+        if module2_weight.numel() > 0:
+            assert module2_weight[-1] >= module2_weight[0]
+
+
+
+    def process_scores(self,
+                       scores: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        """
+        Process a tensor of `scores` into 3 tensors that indicate which frames to
+        evaluate for the two sub-modules; and for those that are evaluated for both
+        sub-modules, the weights to use for module 2 (subtract this from 1.0
+        to get the weights for module 1).
+
+        Args:
+           score: a Tensor of shape (num_frames,), where negative values0 are supposed to
+               indicate "use module 1" and positive values indicate "use module 2".  The
+               average-absolute-value of these scores is expected to be
+         Returns:
+             (module1_indexes, module2_indexes, module2_weight, reverse_indexes)
+
+           module1_indexes is a Tensor of frame-indexes (equivalent to indexes into `scores`)
+                of shape (num_indexes1,) with 0 <= num_indexes1 <= num_frames, indicating which
+                frames must be evaluated with module 1.
+           module2_indexes is a Tensor of frame-indexes (equivalent to indexes into `scores`)
+                of shape (num_indexes2,) with 0 <= num_indexes2 <= num_frames, indicating which
+                frames must be evaluated with module 2.
+           module2_weight is possibly-empty Tensor with elements 0 <= module2_weight <= 1
+                giving the weights for module2 for the small proportion of frames that have
+                intermediate weights (needed during training to train the scores).  In
+                test-time this will be an empty Tensor.
+           reverse_indexes is a Tensor containing a permutation of the range 0..num_frames-1,
+                that is to be used when combining the outputs of the two modules back
+
+        """
+        num_frames = scores.numel()
+
+        sscores, indexes = scores.sort()
+
+        if self.training:
+            intermediate_rate = float(self.intermediate_rate)
+            collar = (0.5 * intermediate_rate)
+
+            # intermediate_sindexes is the indexes within the sorted scores ("s"
+            # for sorted) of the frames that have scores close to zero (within
+            # "collar").
+            intermediate_sindexes, = (sscores.abs() < collar).nonzero(as_tuple=True)
+
+        def get_reverse_indexes():
+            # num_intermediate is the number of elements in module1_indexes and module2_indexes
+            # that are the same (these indentical elements will be at the end of
+            # module1_indexes and the beginning of module2_indexes
+            num_intermediate = module2_weight.numel()
+            forward_indexes = torch.cat((module1_indexes, module2_indexes[num_intermediate:]))
+            # invert the permutation `forward_indexes`
+            arange = torch.arange(num_frames, device=forward_indexes.device)
+            reverse_indexes = torch.empty(num_frames, dtype=torch.long,
+                                          device=forward_indexes.device)
+            reverse_indexes.scatter_(dim=0, index=forward_indexes, src=arange)
+            return reverse_indexes
+
+
+        if not self.training or intermediate_sindexes.numel() == 0:
+            module1_indexes = indexes[(sscores < 0).nonzero(as_tuple=True)[0]]
+            module2_indexes = indexes[(sscores >= 0).nonzero(as_tuple=True)[0]]
+            module2_weight = torch.zeros(0, device=scores.device)
+            return module1_indexes, module2_indexes, module2_weight, get_reverse_indexes()
+
+
+        # max_intermediate is to prevent exhausting memory.
+        max_intermediate = int(2 * intermediate_rate * num_frames) + 10
+
+        # the number of intermediate_sindexes is not huge, so we won't run into memory
+        # problems if we evaluate both modules with this many indexes.
+        intermediate_sindexes = intermediate_sindexes.to('cpu')
+
+        first_in_collar = intermediate_sindexes[0]
+        last_in_collar = intermediate_sindexes[-1]
+
+        if last_in_collar - first_in_collar > max_intermediate:
+            n = (max_intermediate - (last_in_collar - first_in_collar)) // 2
+            first_in_collar += n
+            last_in_collar -= n
+            # note, this way of doing it is not super-ideal, but the balancer
+            # should prevent this kind of thing from happening except
+            # at at the early stages of training.
+
+        # module1_indexes includes those to the left of the collar and
+        # inside the collar
+        module1_indexes = indexes[:last_in_collar+1]
+        # module2_indexes includes those inside the collar and those to the
+        # right of the collar.
+        module2_indexes = indexes[first_in_collar:]
+
+        module2_weight = sscores[first_in_collar:last_in_collar+1]
+
+        # note, collar == 0.5 * intermediate_rate.
+        module2_weight = (module2_weight + collar) * (1.0 / intermediate_rate)
+
+        return module1_indexes, module2_indexes, module2_weight, get_reverse_indexes()
 
 
 class FeedforwardModule(nn.Module):
