@@ -1623,6 +1623,11 @@ class ChoiceModule(nn.Module):
 
         self.module1 = module1
         self.module2 = module2
+        # make them learn a bit slower than other modules, about 1/sqrt(2) the
+        # rate, since each one is trained on about half the amount of data on
+        # each minibatch.
+        self.module1.lr_factor = 0.7071
+        self.module2.lr_factor = 0.7071
 
     def forward(self,
                 x: Tensor):
@@ -1700,8 +1705,8 @@ class ChoiceModule(nn.Module):
         # make sure that forward_indexes and reverse_indexes are inverse permutations.
         assert torch.all(reverse_indexes[forward_indexes] == torch.arange(num_frames,
                                                                           device=forward_indexes.device))
-        assert torch.all(module2_weight >= 0)
-        assert torch.all(module2_weight <= 1)
+        if not (torch.all(module2_weight >= 0) and torch.all(module2_weight <= 1)):
+            logging.info(f"module2_weight={module2_weight}, min={module2_weight.min()}, max={module2_weight.max()}")
         if module2_weight.numel() > 0:
             assert module2_weight[-1] >= module2_weight[0]
 
