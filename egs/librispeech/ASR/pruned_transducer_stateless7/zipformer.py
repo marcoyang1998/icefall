@@ -1623,11 +1623,6 @@ class ChoiceModule(nn.Module):
 
         self.module1 = module1
         self.module2 = module2
-        # make them learn a bit slower than other modules, about 1/sqrt(2) the
-        # rate, since each one is trained on about half the amount of data on
-        # each minibatch.
-        self.module1.lr_factor = 0.7071
-        self.module2.lr_factor = 0.7071
 
     def forward(self,
                 x: Tensor):
