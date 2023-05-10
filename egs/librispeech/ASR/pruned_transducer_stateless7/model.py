@@ -25,6 +25,7 @@ from encoder_interface import EncoderInterface
 from icefall.utils import add_sos, make_pad_mask
 from scaling import penalize_abs_values_gt, ScaledLinear
 from torch import Tensor
+from typing import Optional, Tuple
 
 
 class PromptedTransducer(nn.Module):
@@ -98,6 +99,7 @@ class PromptedTransducer(nn.Module):
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
+        use_pre_text: bool = True,
     ) -> torch.Tensor:
         """
         Args:
@@ -153,17 +155,21 @@ class PromptedTransducer(nn.Module):
         src_key_padding_mask = make_pad_mask(x_lens)
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
-        text = text.t()  # now (T, N)
-        text = self.text_embed(text)  # now (T, N, C)
-        text_key_padding_mask = make_pad_mask(text_lens)
+        if use_pre_text:
+            text = text.t()  # now (T, N)
+            text = self.text_embed(text)  # now (T, N, C)
+            text_key_padding_mask = make_pad_mask(text_lens)
 
-        text = self._add_style_indicator(text, style_lens)
+            text = self._add_style_indicator(text, style_lens)
 
-        memory, text_lens = self.text_encoder(
-            text, text_lens, text_key_padding_mask
-        )
+            memory, text_lens = self.text_encoder(
+                text, text_lens, text_key_padding_mask
+            )
 
-        memory_key_padding_mask = make_pad_mask(text_lens)
+            memory_key_padding_mask = make_pad_mask(text_lens)
+        else:
+            memory = None
+            memory_key_padding_mask = None
 
         encoder_out, x_lens = self.encoder(
             x,
@@ -280,6 +286,69 @@ class PromptedTransducer(nn.Module):
         extra_term[..., 0] += indicator
 
         return memory + extra_term
+      
+    def encode_text(
+        self,
+        text: Tensor,
+        text_lens: Tensor,
+        style_lens: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Get the embeddings of text
+
+        Args:
+            text (Tensor): The input text data in utf-8 bytes
+            text_lens (Tensor): The length of the input text 
+            style_lens (Tensor): The length of the style prompt
+
+        Returns:
+            Tuple[Tensor, Tensor]: Returns the text embeddings encoded by the
+            text_encoder and the attention mask 
+        """
+        text = text.t()  # now (T, N)
+        text = self.text_embed(text)  # now (T, N, C)
+        text_key_padding_mask = make_pad_mask(text_lens)
+
+        text = self._add_style_indicator(text, style_lens)
+
+        memory, text_lens = self.text_encoder(
+            text, text_lens, text_key_padding_mask
+        )
+
+        memory_key_padding_mask = make_pad_mask(text_lens)
+        
+        return memory, memory_key_padding_mask
+      
+    def encode_audio(
+        self,
+        feature: Tensor,
+        feature_lens: Tensor,
+        memory: Optional[Tensor],
+        memory_key_padding_mask: Optional[Tensor],
+    ) -> Tuple[Tensor, Tensor]:
+        """Encode the input audio features
+
+        Args:
+            feature (Tensor): Input audio (N,T,C)
+            feature_lens (Tensor): Length of input audio (N,)
+            memory (Tensor): Embeddings from the text encoder
+            memory_key_padding_mask (Tensor): _description_
+
+        Returns:
+            Tuple[Tensor, Tensor]: _description_
+        """
+        x, x_lens = self.encoder_embed(feature, feature_lens)
+        src_key_padding_mask = make_pad_mask(x_lens)
+        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+
+        encoder_out, encoder_out_lens = self.encoder(
+            x=x, 
+            x_lens=x_lens,
+            memory=memory,
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
+        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
+        
+        return encoder_out, encoder_out_lens
 
 
 Transducer = PromptedTransducer  # for decoding
