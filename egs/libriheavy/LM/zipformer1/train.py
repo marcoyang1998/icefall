@@ -144,7 +144,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--num-heads",
         type=str,
-        default="4,4,8",
+        default="4,4,4",
         help="Number of attention heads in the zipformer encoder layers: a single int or comma-separated list.",
     )
 
@@ -481,7 +481,7 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             "bytes_per_segment": 2048,
-            "batch_size": 32,
+            "batch_size": 12,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
             "num_workers": 4,
@@ -529,13 +529,36 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
 
 
 def get_decoder_model(params: AttributeDict) -> nn.Module:
+
+    embed_dim = 384  # may decrease this
+
+    decoder = Zipformer2(
+        output_downsampling_factor=1,
+        downsampling_factor=(1,),
+        num_encoder_layers=(4,),
+        encoder_dim=(embed_dim,),
+        encoder_unmasked_dim=(256,),
+        query_head_dim=_to_int_tuple(params.query_head_dim),
+        pos_head_dim=_to_int_tuple(params.pos_head_dim),
+        value_head_dim=_to_int_tuple(params.value_head_dim),
+        pos_dim=params.pos_dim,
+        num_heads=8,
+        feedforward_dim=1024,
+        cnn_module_kernel=31,
+        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
+        warmup_batches=4000.0,
+        causal=True,
+        chunk_size=(1,),
+        left_context_frames=(-1,),
+    )
+
+
     chunk_size = _to_int_tuple(params.downsampling_factor)[-1]
     decoder = ChunkDecoder(
-        embed_dim=max(_to_int_tuple(params.encoder_dim)),
+        embed_dim=embed_dim,
         chunk_size=chunk_size,
         vocab_size=256, # bytes
-        hidden_size=params.decoder_hidden_size,
-        num_layers=params.decoder_num_layers,
+        decoder=decoder,
     )
     return decoder
 

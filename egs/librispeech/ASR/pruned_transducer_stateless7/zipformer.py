@@ -1650,7 +1650,7 @@ class ChoiceModule(nn.Module):
         x2 = torch.index_select(x, dim=0, index=module2_indexes)
 
         x1 = self.module1(x1)
-        x2 = self.module1(x2)
+        x2 = self.module2(x2)
 
         num_overlapping = module2_weight.numel()
         if num_overlapping > 0:

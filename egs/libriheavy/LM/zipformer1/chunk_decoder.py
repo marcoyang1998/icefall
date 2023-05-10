@@ -20,6 +20,7 @@ import logging
 import random
 import torch
 from torch import nn, Tensor
+from scaling import convert_num_channels
 
 
 class ChunkDecoder(nn.Module):
@@ -29,38 +30,29 @@ class ChunkDecoder(nn.Module):
                  embed_dim: int,
                  chunk_size: int,
                  vocab_size: int,
-                 hidden_size: int,
-                 num_layers: int = 2):
+                 decoder: nn.Module):
         """
         A 'decoder' that computes the probability of symbols in a language modeling task.
         Conceptually it computes the probability of `chunk_size` symbols (e.g. 8 symbols)
         based on an embedding derived from all symbols preceding this chunk of 8 symbols.
         Also, within the chunk, we always see all previous symbols (plus the last symbol
         of the previous chunk).
+
+        Args:
+          embed_dim: embedding dim used internally, does not have to correspond to input
+       features' embed dim.
+
         """
         super().__init__()
         self.chunk_size = chunk_size
-        self.num_layers = num_layers
-        self.hidden_size = hidden_size
 
-        self.lstm = nn.LSTM(input_size=embed_dim,
-                            hidden_size=hidden_size,
-                            num_layers=num_layers)
+        self.embed_dim = embed_dim
+
+        self.decoder = decoder
 
         self.label_embed = nn.Embedding(
             num_embeddings=vocab_size,
             embedding_dim=embed_dim)
-
-        # project to hidden state and cell state at the beginning of each chunk.
-        # (we don't run the lstm contiuously over the sequence, for both
-        # training speed and stability; instead, we reconstruct the hidden
-        # state for each chunk.)
-        # the factor of 2 is to cover hidden state and cell state.
-        self.init_proj = nn.Linear(embed_dim,
-                                   2 * hidden_size * num_layers)
-
-        self.out_proj = nn.Linear(hidden_size,
-                                  vocab_size)
 
 
     def forward(self,
@@ -76,6 +68,7 @@ class ChunkDecoder(nn.Module):
         Returns:
             returns the log-probs for each symbol, in a Tensor of shape (batch_size, seq_len).
         """
+        encoder_embed = convert_num_channels(encoder_embed, self.embed_dim)
         (batch_size, seq_len) = labels.shape
         (num_chunks, _batch_size, embed_dim) = encoder_embed.shape
         chunk_size = self.chunk_size
@@ -87,31 +80,16 @@ class ChunkDecoder(nn.Module):
 
         labels_embed = self.label_embed(labels_shifted.t())  # (seq_len, batch_size, embed_dim)
 
-        init = self.init_proj(encoder_embed).reshape(num_chunks, batch_size,
-                                                     2, self.num_layers, self.hidden_size)
-        init = init.permute(2, 3, 0, 1, 4).reshape(2, self.num_layers,
-                                                   num_chunks * batch_size,
-                                                   self.hidden_size).contiguous()
-        hidden = init[0]
-        cell = init[1]
 
+        encoder_embed = encoder_embed.unsqueeze(1).expand(num_chunks, chunk_size, batch_size, embed_dim)
+        encoder_embed = encoder_embed.contiguous().reshape(seq_len, batch_size, embed_dim)
 
-        labels_embed = labels_embed.reshape(num_chunks, chunk_size, batch_size, embed_dim).transpose(0, 1)
-        labels_embed = labels_embed.contiguous().reshape(chunk_size, num_chunks * batch_size, embed_dim)
-        encoder_embed = encoder_embed.reshape(1, num_chunks * batch_size, embed_dim)
+        x = labels_embed + encoder_embed
 
-        x = labels_embed + encoder_embed  # broadcasts encoder_embed over the chunk_size
+        x_lens = torch.full((batch_size,), seq_len, dtype=torch.long, device=x.device)
+        x, x_lens = self.decoder(x, x_lens)  # (seq_len, batch_size, embed_dim)
 
-        (x, _hidden) = self.lstm(x, hx=(hidden, cell))
-
-        x = self.out_proj(x)
-
-        vocab_size = x.shape[-1]
-        # x: (chunk_size, num_chunks * batch_size, vocab_size)
-        x = x.reshape(chunk_size, num_chunks, batch_size, vocab_size)
-        x = x.permute(2, 1, 0, 3).contiguous().reshape(batch_size, num_chunks * chunk_size, vocab_size)
-
-        x = x.log_softmax(dim=-1)
+        x = x.log_softmax(dim=-1).transpose(0, 1)
 
         logprobs = torch.gather(x, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # (batch_size, seq_len)
 
