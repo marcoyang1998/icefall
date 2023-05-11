@@ -1781,7 +1781,7 @@ class ChoiceModule(nn.Module):
         last_in_collar = intermediate_sindexes[-1]
 
         if last_in_collar - first_in_collar > max_intermediate:
-            n = (max_intermediate - (last_in_collar - first_in_collar)) // 2
+            n = ((last_in_collar - first_in_collar) - max_intermediate) // 2
             first_in_collar += n
             last_in_collar -= n
             # note, this way of doing it is not super-ideal, but the balancer
