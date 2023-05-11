@@ -1609,7 +1609,8 @@ class ChoiceModule(nn.Module):
                                        min_positive=min_proportion2,
                                        max_positive=max_proportion2,
                                        min_abs=0.8,
-                                       max_abs=1.2)
+                                       max_abs=1.2,
+                                       prob=0.5)
 
         # self.params is the projection to the scores.
         self.to_scores = nn.Linear(num_channels, 1, bias=False)
