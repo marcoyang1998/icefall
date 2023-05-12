@@ -503,10 +503,10 @@ class Zipformer2EncoderLayer(nn.Module):
                                                dropout)
 
         feed_forward3a = FeedforwardModule(embed_dim,
-                                           (feedforward_dim * 5) // 4,
+                                           feedforward_dim,
                                            dropout=0.0)
         feed_forward3b = FeedforwardModule(embed_dim,
-                                           (feedforward_dim * 5) // 4,
+                                           feedforward_dim,
                                            dropout=0.0)
         self.feed_forward3 = ChoiceModule(embed_dim,
                                           feed_forward3a,
