@@ -1666,6 +1666,7 @@ class ChoiceModule(nn.Module):
             x = torch.cat((x1, x2),
                           dim=0)
 
+        assert x.shape == (reverse_indexes.numel(), num_channels)
         x = torch.index_select(x, dim=0, index=reverse_indexes)
         x = x.reshape(x_shape)
         return x
