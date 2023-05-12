@@ -1599,7 +1599,7 @@ class ChoiceModule(nn.Module):
                  module2: nn.Module,
                  min_proportion2: FloatLike = 0.2,
                  max_proportion2: FloatLike = 0.8,
-                 intermediate_rate: FloatLike = 0.2):
+                 intermediate_rate: FloatLike = 0.15):
         super().__init__()
         # the min_abs and max_abs constraints are very arbitrary just to keep it in
         # a consistent range for model averaging, since it's only going to be the
