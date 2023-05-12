@@ -1599,7 +1599,7 @@ class ChoiceModule(nn.Module):
                  module2: nn.Module,
                  min_proportion2: FloatLike = 0.2,
                  max_proportion2: FloatLike = 0.8,
-                 intermediate_rate: FloatLike = 0.05):
+                 intermediate_rate: FloatLike = 0.2):
         super().__init__()
         # the min_abs and max_abs constraints are very arbitrary just to keep it in
         # a consistent range for model averaging, since it's only going to be the
@@ -1670,21 +1670,6 @@ class ChoiceModule(nn.Module):
         x = torch.index_select(x, dim=0, index=reverse_indexes)
         x = x.reshape(x_shape)
         return x
-
-
-    def choose_modules(self, x: Tensor, module1: nn.Module, module2: nn.Module,
-                       module1_indexes: Tensor, module2_indexes: Tensor,
-                       module2_weight: Tensor, reverse_indexes: Tensor):
-        """
-        Pass x through two modules according to provided indexes and possibly weights.
-        Args:
-                       x: the input Tensor, of shape (num_frames, num_channels)
-          module1_indexes: the subset of frame indexes 0..num_frames-1 that should be passed through
-                         module1
-          module2_indexes: the subset of frame indexes 0..num_frames-1 that should be passed through
-                         module2.  In training mode there may be some overlap between the two; the
-                         overlapping elements should be at the end of module1 and the beginning of module2.
-        """
 
 
 
