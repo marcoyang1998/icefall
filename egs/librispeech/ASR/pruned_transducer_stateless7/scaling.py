@@ -708,16 +708,21 @@ class BalancerFunction(torch.autograd.Function):
                     loss = (m_loss + r_loss)
 
                     loss.backward(gradient=torch.ones_like(loss))
-                    loss_grad = x.grad
-                    loss_grad_rms = (loss_grad ** 2).mean(dim=mean_dims, keepdim=True).sqrt().clamp(min=1.0e-20)
+                    loss_grad = x.grad  # grad of the auxiliary loss
+                    x_grad_float = x_grad.to(torch.float32)  # original grad
 
-                    loss_grad = loss_grad * (grad_scale / loss_grad_rms)
+                    x_grad_float_abs = x_grad_float.abs()
+                    # scale the loss grad for each element by the actual gradient absolute value, which
+                    # is a kind of heuristic we found to work well, it makes sure the model can't "cheat"
+                    # by only modifying the parts of the activations that it doesn't care about.
+                    loss_grad = loss_grad * x_grad_float_abs
 
-                    x_grad_float = x_grad.to(torch.float32)
-                    # scale each element of loss_grad by the absolute value of the corresponding
-                    # element of x_grad, which we view as a noisy estimate of its magnitude for that
-                    # (frame and dimension).  later we can consider factored versions.
-                    x_grad_mod = x_grad_float + (x_grad_float.abs() * loss_grad)
+                    loss_grad_mean_abs = loss_grad.abs().mean(dim=mean_dims, keepdim=True).clamp(min=1.0e-20)
+                    x_grad_mean_abs = x_grad_float_abs.mean(dim=mean_dims, keepdim=True)
+
+                    loss_grad = loss_grad * (grad_scale * x_grad_mean_abs / loss_grad_mean_abs)
+
+                    x_grad_mod = x_grad_float + loss_grad
                     x_grad = x_grad_mod.to(x_grad.dtype)
         except Exception as e:
             logging.info(f"Caught exception in Balancer backward: {e}, size={list(x_grad.shape)}, will continue.")
