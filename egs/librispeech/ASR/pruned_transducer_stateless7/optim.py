@@ -866,12 +866,16 @@ class Eden(LRScheduler):
         lr_batches: Union[int, float],
         lr_epochs: Union[int, float],
         warmup_batches: Union[int, float] = 500.0,
+        warmup_start: float = 0.5,
         verbose: bool = False,
     ):
         super(Eden, self).__init__(optimizer, verbose)
         self.lr_batches = lr_batches
         self.lr_epochs = lr_epochs
         self.warmup_batches = warmup_batches
+        
+        assert 0.0 <= warmup_start <= 1.0, warmup_start
+        self.warmup_start = warmup_start
 
     def get_lr(self):
         factor = (
@@ -882,7 +886,8 @@ class Eden(LRScheduler):
         warmup_factor = (
             1.0
             if self.batch >= self.warmup_batches
-            else 0.5 + 0.5 * (self.batch / self.warmup_batches)
+            else self.warmup_start + (1.0 - self.warmup_start) * (self.batch / self.warmup_batches)
+            #else 0.5 + 0.5 * (self.batch / self.warmup_batches)
         )
 
         return [x * factor * warmup_factor for x in self.base_lrs]
