@@ -107,6 +107,13 @@ def evaluate_dataset(
     """
     tot_loss = 0
     tot_frames = 0
+    num_cuts = 0
+    
+    log_interval = 50
+    try:
+        num_batches = len(dl)
+    except TypeError:
+        num_batches = "?"
     
     device = next(model.parameters()).device
 
@@ -119,10 +126,17 @@ def evaluate_dataset(
             loss = -loglikes.sum()
             
             assert loss.requires_grad is False
+            
+            num_cuts += labels.size(0)
             tot_loss += loss
             tot_frames += labels.numel()
+        
+            if batch_idx % log_interval == 0:
+                batch_str = f"{batch_idx}/{num_batches}"
 
-    return tot_loss.item(), tot_frames.item()
+                logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
+
+    return tot_loss.item(), tot_frames
     
 
 def main():
@@ -145,11 +159,14 @@ def main():
         params.suffix += "-use-averaged-model"
     
     setup_logger(f"{params.res_dir}/log-validation-{params.suffix}")
+    logging.info(params)
     logging.info("Evaluation started")
     
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda", 0)
+        
+    logging.info(f"Device: {device}")
     
     model = get_model(params)
     num_param = sum([p.numel() for p in model.parameters()])
