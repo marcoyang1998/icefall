@@ -235,6 +235,12 @@ def get_parser():
         help="""Number of steps that affects how rapidly the learning rate
         decreases. We suggest not to change this.""",
     )
+    
+    parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.5,
+    )
 
     parser.add_argument(
         "--lr-tokens",
@@ -389,6 +395,7 @@ def get_params() -> AttributeDict:
             "env_info": get_env_info(),
             "vocab_size": 256, # bytes
             "batch_size": 12,
+            "bytes_per_segment": 1024,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
             "num_workers": 4,
@@ -919,7 +926,7 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_tokens)
+    scheduler = Eden(optimizer, params.lr_batches, params.lr_tokens, warmup_start=params.warmup_start)
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")

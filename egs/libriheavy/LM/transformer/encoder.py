@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from icefall.transformer_lm.attention import RelPositionMultiheadAttention
+from attention import RelPositionMultiheadAttention
 from icefall.utils import is_jit_tracing, make_pad_mask
 
 
@@ -53,7 +53,7 @@ class Transformer(torch.nn.Module):
         self.encoder_layers = num_layers
         self.d_model = d_model
 
-        self.embed = nn.linear(input_dim, d_model)
+        self.embed = nn.Linear(input_dim, d_model)
         self.norm_before = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -182,7 +182,7 @@ class TransformerEncoderLayer(torch.nn.Module):
             nn.Linear(d_model, dim_feedforward),
             nn.GELU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(dim_feedforward, d_model, initial_scale=0.25),
+            nn.Linear(dim_feedforward, d_model),
         )
 
         self.norm_before = nn.LayerNorm(d_model)

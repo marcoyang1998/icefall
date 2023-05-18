@@ -22,8 +22,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from icefall.transformer_lm.attention import RelPositionMultiheadAttention
+from zipformer import BypassModule
+from attention import RelPositionMultiheadAttention
 from icefall.utils import is_jit_tracing, make_pad_mask
+
+from scaling import FloatLike, ScheduledFloat
 
 
 class Transformer(torch.nn.Module):
@@ -47,6 +50,7 @@ class Transformer(torch.nn.Module):
         num_layers: int = 6,
         dropout_rate: float = 0.1,
         att_dropout: float = 0.0,
+        warmup_batches: float = 4000.0
     ):
         super().__init__()
 
@@ -64,6 +68,9 @@ class Transformer(torch.nn.Module):
             dim_feedforward=dim_feedforward,
             nhead=nhead,
             dropout_rate=dropout_rate,
+            warmup_begin=0.5 * warmup_batches,
+            warmup_end=warmup_batches,
+            final_layerdrop_rate=0.035 # copied from zipformer2.py
         )
 
         self.encoder = TransformerEncoder(encoder_layer, num_layers)
@@ -89,7 +96,7 @@ class Transformer(torch.nn.Module):
             - x: output feature of the transformer (B,T,d_model)
             - x_lens: output feature lens of the transformer
         """
-
+        x_orig = x # (B,T,C)
         attention_mask = self._create_attention_mask(x_lens)
         src_key_padding_mask = make_pad_mask(x_lens)
 
@@ -104,27 +111,48 @@ class Transformer(torch.nn.Module):
             pos_emb,
             mask=attention_mask,  # pass the attention mast
             src_key_padding_mask=src_key_padding_mask,
-        )  # (T, N, C)
+        )  # (T, B, C)
         
         x = self.dropout(x)
 
-        x = x.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
+        x = x.permute(1, 0, 2)  # (T, B, C) ->(B, T, C)
+        x = self.bypass(x_orig, x)
+        
         return x, x_lens
 
 
 class TransformerEncoder(torch.nn.Module):
-    def __init__(self, encoder_layer: torch.nn.Module, num_layers: int) -> None:
+    def __init__(self, 
+        encoder_layer: torch.nn.Module,
+        num_layers: int,
+        warmup_begin: int,
+        warmup_end: int,
+        initial_layerdrop_rate: float = 0.5,
+        final_layerdrop_rate: float = 0.05,
+    ) -> None:
         """TransformerEncoder is a stack of N encoder layers
 
         Args:
             encoder_layer (torch.nn.Module): an instance of the TransformerEncoderLayer()
             num_layers (int): Number of layers to be stacked
+            warmup_begin (int): For scheduled layer dropout
+            warmup_end (int): For scheduled layer dropout
         """
         super().__init__()
         self.layers = nn.ModuleList(
             [copy.deepcopy(encoder_layer) for i in range(num_layers)]
         )
         self.num_layers = num_layers
+        
+        delta = (1. / num_layers) * (warmup_end - warmup_begin)
+        cur_begin = warmup_begin  # interpreted as a training batch index
+        
+        for i in range(num_layers):
+            cur_end = cur_begin + delta
+            self.layers[i].bypass.skip_rate = ScheduledFloat((cur_begin, initial_layerdrop_rate),
+                                                             (cur_end, final_layerdrop_rate),
+                                                             default=0.0)
+            cur_begin = cur_end
 
     def forward(
         self,
@@ -164,6 +192,7 @@ class TransformerEncoderLayer(torch.nn.Module):
         dim_feedforward: int,
         nhead: int,
         dropout_rate: float,
+        bypass_skip_rate: FloatLike = ScheduledFloat((0.0, 0.5), (4000.0, 0.02), default=0),
     ):
         """TransformerEncoderLayer is made up of self-attn and feedforward module
 
@@ -176,6 +205,10 @@ class TransformerEncoderLayer(torch.nn.Module):
         super().__init__()
 
         self.d_model = d_model
+        
+        # self.bypass implements layer skipping as well as bypass; see its default values.
+        self.bypass = BypassModule(d_model, skip_rate=bypass_skip_rate,
+                                   straight_through_rate=0)
 
         self.self_attn = RelPositionMultiheadAttention(d_model, nhead, dropout=0.0)
         self.feed_forward = nn.Sequential(

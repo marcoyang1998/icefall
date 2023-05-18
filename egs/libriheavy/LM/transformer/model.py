@@ -20,7 +20,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from icefall.transformer_lm.encoder import Transformer
+from encoder import Transformer
 from icefall.utils import AttributeDict, add_eos, add_sos, make_pad_mask
 
 

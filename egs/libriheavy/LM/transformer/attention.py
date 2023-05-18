@@ -55,7 +55,7 @@ class RelPositionMultiheadAttention(nn.Module):
 
         self.in_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=True)
         self.out_proj = nn.Linear(
-            embed_dim, embed_dim, bias=True, initial_scale=0.25
+            embed_dim, embed_dim, bias=True,
         )
 
         # linear transformation for positional encoding.
@@ -140,11 +140,11 @@ class RelPositionMultiheadAttention(nn.Module):
             pos_emb,
             self.embed_dim,
             self.num_heads,
-            self.in_proj.get_weight(),
-            self.in_proj.get_bias(),
+            self.in_proj.weight,
+            self.in_proj.bias,
             self.dropout,
-            self.out_proj.get_weight(),
-            self.out_proj.get_bias(),
+            self.out_proj.weight,
+            self.out_proj.bias,
             training=self.training,
             key_padding_mask=key_padding_mask,
             need_weights=need_weights,
