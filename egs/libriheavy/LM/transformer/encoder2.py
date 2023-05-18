@@ -30,7 +30,7 @@ from scaling import FloatLike, ScheduledFloat
 
 
 class Transformer(torch.nn.Module):
-    """_summary_
+    """This transformer has scheduled layer dropout
 
     Args:
         input_dim (int): Input feature dimension
@@ -39,6 +39,8 @@ class Transformer(torch.nn.Module):
         nhead (int): The number of attention heads
         dropout_rate (float): dropout rate
         att_dropout (float): dropout rate in attention module
+        warmup_batches (float): perform scheduled layer dropout during the warmup
+        batches. After warmup_batches, the probability of layer dropout is very small.
     """
 
     def __init__(
@@ -57,7 +59,7 @@ class Transformer(torch.nn.Module):
         self.encoder_layers = num_layers
         self.d_model = d_model
 
-        self.embed = nn.linear(input_dim, d_model)
+        self.embed = nn.Linear(input_dim, d_model)
         self.norm_before = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -215,7 +217,7 @@ class TransformerEncoderLayer(torch.nn.Module):
             nn.Linear(d_model, dim_feedforward),
             nn.GELU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(dim_feedforward, d_model, initial_scale=0.25),
+            nn.Linear(dim_feedforward, d_model),
         )
 
         self.norm_before = nn.LayerNorm(d_model)
