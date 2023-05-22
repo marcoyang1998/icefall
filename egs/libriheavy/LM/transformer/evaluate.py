@@ -18,7 +18,7 @@
 import argparse
 import logging
 from pathlib import Path
-from train import get_model, get_params, add_model_arguments
+from train_with_scheduled_bypass import get_model, get_model_legacy, get_params, add_model_arguments
 from typing import Tuple
 import torch
 
@@ -89,6 +89,24 @@ def get_parser():
         help="The experiment dir",
     )
     
+    parser.add_argument(
+        "--bytes-per-segment",
+        type=int,
+        default=1024,
+    )
+    
+    parser.add_argument(
+        "--eval-chunk-size",
+        type=int,
+        default=1024,
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=12,
+    )
+    
     add_model_arguments(parser)
     
     return parser
@@ -120,10 +138,22 @@ def evaluate_dataset(
     with torch.set_grad_enabled(False):
         for batch_idx, batch in enumerate(dl):
             
+            batch = torch.chunk(batch, params.chunk_per_segment, dim=1)
+            batch = torch.cat(batch) # (N*chunk_per_segment, eval_chunk_size)
+            
+            x = torch.nn.functional.pad(batch, [1,0]).to(device) # pad zero byte on the left as <sos>
+            y = torch.nn.functional.pad(batch, [0,1]).to(device) # pad zero byte on the right as <eos>
+            x_lens = torch.tensor([x.size(1)] * x.size(0)).to(device)
+            
             labels = batch.to(device)  # (batch_size, sequence_length)
         
-            loglikes = model(labels)
-            loss = -loglikes.sum()
+            nll = model(
+                x=x,
+                y=y,
+                x_lens=x_lens,
+            )
+            
+            loss = nll.sum()
             
             assert loss.requires_grad is False
             
@@ -154,6 +184,8 @@ def main():
         params.suffix = f"iter-{params.iter}-avg-{params.avg}"
     else:
         params.suffix = f"epoch-{params.epoch}-avg-{params.avg}"
+    
+    params.suffix += f"-segment-{params.bytes_per_segment}"
     
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
@@ -228,7 +260,8 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
-                )
+                ),
+                strict=True
             )
         else:
             assert params.avg > 0, params.avg
@@ -254,8 +287,18 @@ def main():
     
     valid = LmDataset(params.valid_file_list,
                       bytes_per_segment=params.bytes_per_segment)
-    valid_dl = LmDataloader(valid, batch_size=params.batch_size,
-                            num_workers=params.num_workers)
+    valid_dl = torch.utils.data.DataLoader(
+        dataset=valid,
+        batch_size=params.batch_size,
+        num_workers=params.num_workers,
+        drop_last=False
+    )
+    
+    chunk_per_segment = params.bytes_per_segment / params.eval_chunk_size
+    if not chunk_per_segment.is_integer():
+        raise ValueError("Dataloader segment length should be a multiple of evaluation chunk size!")
+    else:
+        params.chunk_per_segment = int(chunk_per_segment)
     
     logging.info("Evaluation started!")
     tot_loss, tot_frames = evaluate_dataset(
