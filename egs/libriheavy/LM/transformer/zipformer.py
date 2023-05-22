@@ -1055,7 +1055,7 @@ class BypassModule(nn.Module):
     force all the modules to learn something.
     
     Notes from Xiaoyu:
-    This module can be seen as a residual module, with a channel
+    This module can be seen as a residual module, with a batch-wise and channel-wise scale.
     If a larger straight_through_rate is used, the module will preserve the information more 
     frequently.
     """

@@ -221,6 +221,8 @@ class TransformerEncoderLayer(torch.nn.Module):
         if layer_bypass:
             self.bypass = BypassModule(d_model, skip_rate=bypass_skip_rate,
                                     straight_through_rate=0)
+        else:
+            self.bypass = None
 
         self.self_attn = RelPositionMultiheadAttention(d_model, nhead, dropout=0.0)
         self.feed_forward = nn.Sequential(
@@ -272,7 +274,8 @@ class TransformerEncoderLayer(torch.nn.Module):
 
         src = self.norm_final(src)
         
-        src = self.bypass(src_orig, src)
+        if self.bypass is not None:
+            src = self.bypass(src_orig, src)
 
         return src
 
