@@ -241,6 +241,12 @@ def get_parser():
         type=float,
         default=0.5,
     )
+    
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
+    )
 
     parser.add_argument(
         "--lr-tokens",
@@ -407,6 +413,21 @@ def get_params() -> AttributeDict:
 
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(',')))
+
+def get_model_legacy(params: AttributeDict) -> nn.Module:
+    from model_old import TransformerLM
+    
+    model = TransformerLM(
+        vocab_size=params.vocab_size,
+        d_model=params.encoder_dim,
+        embedding_dim=params.embedding_dim,
+        dim_feedforward=params.dim_feedforward,
+        nhead=params.nhead,
+        num_layers=params.num_layers,
+        tie_weights=params.tie_weights,
+        params=params,
+    )
+    return model
 
 def get_model(params: AttributeDict) -> nn.Module:
     model = TransformerLM(
@@ -926,7 +947,13 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_tokens, warmup_start=params.warmup_start)
+    scheduler = Eden(
+        optimizer,
+        params.lr_batches,
+        params.lr_tokens,
+        warmup_batches=params.warmup_batches,
+        warmup_start=params.warmup_start,
+    )
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
