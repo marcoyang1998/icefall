@@ -156,6 +156,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         last output linear layer
         """,
     )
+    
+    parser.add_argument(
+        "--layer-bypass",
+        type=str2bool,
+        default=False,
+    )
 
 
 
@@ -235,6 +241,18 @@ def get_parser():
         help="""Number of steps that affects how rapidly the learning rate
         decreases. We suggest not to change this.""",
     )
+    
+    parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.5,
+    )
+    
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
+    )
 
     parser.add_argument(
         "--lr-tokens",
@@ -258,6 +276,13 @@ def get_parser():
         type=int,
         default=2048,
         help="Number of bytes in each training sample"
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        default=10,
+        type=int,
+        help="Batch size during training."
     )
 
     parser.add_argument(
@@ -324,12 +349,6 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
-    
-    parser.add_argument(
-        "--layer-bypass",
-        type=str2bool,
-        default=False,
-    )
 
     add_model_arguments(parser)
 
@@ -394,8 +413,6 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             "vocab_size": 256, # bytes
-            "batch_size": 12,
-            "bytes_per_segment": 1024,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
             "num_workers": 4,
@@ -409,6 +426,21 @@ def get_params() -> AttributeDict:
 
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(',')))
+
+def get_model_legacy(params: AttributeDict) -> nn.Module:
+    from model_old import TransformerLM
+    
+    model = TransformerLM(
+        vocab_size=params.vocab_size,
+        d_model=params.encoder_dim,
+        embedding_dim=params.embedding_dim,
+        dim_feedforward=params.dim_feedforward,
+        nhead=params.nhead,
+        num_layers=params.num_layers,
+        tie_weights=params.tie_weights,
+        params=params,
+    )
+    return model
 
 def get_model(params: AttributeDict) -> nn.Module:
     model = TransformerLM(
@@ -930,7 +962,13 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_tokens)
+    scheduler = Eden(
+        optimizer,
+        params.lr_batches,
+        params.lr_tokens,
+        warmup_batches=params.warmup_batches,
+        warmup_start=params.warmup_start,
+    )
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")

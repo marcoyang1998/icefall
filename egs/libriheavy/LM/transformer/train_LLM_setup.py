@@ -58,7 +58,7 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 from lm_datamodule import LmDataset, LmDataloader
 from lhotse.utils import fix_random_seed
-from model import TransformerLM
+from model2 import TransformerLM
 from optim_cosine import CosineScheduler
 from torch import Tensor
 from torch import nn
@@ -311,6 +311,18 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--layer-bypass",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=12,
+    )
 
     add_model_arguments(parser)
 
@@ -375,7 +387,7 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             "vocab_size": 256, # bytes
-            "batch_size": 12,
+            #"batch_size": 12,
             "bytes_per_segment": 1024,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
@@ -387,6 +399,8 @@ def get_params() -> AttributeDict:
             "warmup_init_lr": 1e-7,
             "warmup_updates": 1000,
             "t_mult": 1.0,
+            # model warmup
+            "warmup_batches": 4000, 
         }
     )
 
@@ -406,6 +420,8 @@ def get_model(params: AttributeDict) -> nn.Module:
         num_layers=params.num_layers,
         tie_weights=params.tie_weights,
         params=params,
+        warmup_batches=params.warmup_batches,
+        layer_bypass=params.layer_bypass,
     )
     return model
 
