@@ -138,8 +138,9 @@ def evaluate_dataset(
     with torch.set_grad_enabled(False):
         for batch_idx, batch in enumerate(dl):
             
-            batch = torch.chunk(batch, params.chunk_per_segment, dim=1)
-            batch = torch.cat(batch) # (N*chunk_per_segment, eval_chunk_size)
+            if params.chunk_per_segment > 1:
+                batch = torch.chunk(batch, params.chunk_per_segment, dim=1)
+                batch = torch.cat(batch) # (N*chunk_per_segment, eval_chunk_size)
             
             x = torch.nn.functional.pad(batch, [1,0]).to(device) # pad zero byte on the left as <sos>
             y = torch.nn.functional.pad(batch, [0,1]).to(device) # pad zero byte on the right as <eos>
@@ -186,6 +187,7 @@ def main():
         params.suffix = f"epoch-{params.epoch}-avg-{params.avg}"
     
     params.suffix += f"-segment-{params.bytes_per_segment}"
+    params.suffix += f"-eval-{params.eval_chunk_size}"
     
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
