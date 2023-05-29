@@ -26,7 +26,7 @@ from zipformer import BypassModule
 from attention import RelPositionMultiheadAttention
 from icefall.utils import is_jit_tracing, make_pad_mask
 
-from scaling import FloatLike, ScheduledFloat
+from scaling import Balancer, FloatLike, ScheduledFloat
 
 
 class Transformer(torch.nn.Module):
@@ -53,7 +53,8 @@ class Transformer(torch.nn.Module):
         dropout_rate: float = 0.1,
         att_dropout: float = 0.0,
         layer_bypass: bool = False,
-        warmup_batches: float = 4000.0
+        warmup_batches: float = 4000.0,
+        use_balancer: bool = False,
     ):
         super().__init__()
 
@@ -71,7 +72,8 @@ class Transformer(torch.nn.Module):
             dim_feedforward=dim_feedforward,
             nhead=nhead,
             dropout_rate=dropout_rate,
-            layer_bypass=layer_bypass
+            layer_bypass=layer_bypass,
+            use_balancer=use_balancer,
         )
 
         self.encoder = TransformerEncoder(
@@ -204,6 +206,7 @@ class TransformerEncoderLayer(torch.nn.Module):
         dropout_rate: float,
         layer_bypass: bool = False,
         bypass_skip_rate: FloatLike = ScheduledFloat((0.0, 0.5), (4000.0, 0.02), default=0),
+        use_balancer: bool = False,
     ):
         """TransformerEncoderLayer is made up of self-attn and feedforward module
 
@@ -225,12 +228,22 @@ class TransformerEncoderLayer(torch.nn.Module):
             self.bypass = None
 
         self.self_attn = RelPositionMultiheadAttention(d_model, nhead, dropout=0.0)
-        self.feed_forward = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(dim_feedforward, d_model),
-        )
+        
+        if use_balancer:
+            self.feed_forward = nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                Balancer(dim_feedforward, channel_dim=-1, min_positive=0.1, max_abs=1.0),
+                nn.GELU(),
+                nn.Dropout(dropout_rate),
+                nn.Linear(dim_feedforward, d_model),
+            )
+        else:
+            self.feed_forward = nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                nn.GELU(),
+                nn.Dropout(dropout_rate),
+                nn.Linear(dim_feedforward, d_model),
+            )
 
         self.norm_before = nn.LayerNorm(d_model)
         self.norm_final = nn.LayerNorm(d_model)
