@@ -162,6 +162,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
     )
+    
+    parser.add_argument(
+        "--use-balancer",
+        type=str2bool,
+        default=False,
+    )
 
 
 
@@ -416,8 +422,6 @@ def get_params() -> AttributeDict:
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
             "num_workers": 4,
-            # model warmup
-            "warmup_batches": 4000, 
         }
     )
 
@@ -454,6 +458,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         params=params,
         warmup_batches=params.warmup_batches,
         layer_bypass=params.layer_bypass,
+        use_balancer=params.use_balancer,
     )
     return model
 
@@ -953,7 +958,7 @@ def run(rank, world_size, args):
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank],
-                    find_unused_parameters=True)
+                    find_unused_parameters=False)
 
     optimizer = ScaledAdam(
         get_parameter_groups_with_lrs(
