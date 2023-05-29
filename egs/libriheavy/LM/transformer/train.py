@@ -61,7 +61,7 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 from lm_datamodule import LmDataset, LmDataloader
 from lhotse.utils import fix_random_seed
-from model import TransformerLM
+from model2 import TransformerLM
 from optim import Eden, ScaledAdam
 from torch import Tensor
 from torch import nn
@@ -155,6 +155,18 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="""True to share the weights between the input embedding layer and the
         last output linear layer
         """,
+    )
+    
+    parser.add_argument(
+        "--layer-bypass",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--use-balancer",
+        type=str2bool,
+        default=False,
     )
 
 
@@ -270,6 +282,13 @@ def get_parser():
         type=int,
         default=2048,
         help="Number of bytes in each training sample"
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        default=10,
+        type=int,
+        help="Batch size during training."
     )
 
     parser.add_argument(
@@ -400,8 +419,6 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             "vocab_size": 256, # bytes
-            "batch_size": 12,
-            "bytes_per_segment": 1024,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
             "num_workers": 4,
@@ -439,6 +456,9 @@ def get_model(params: AttributeDict) -> nn.Module:
         num_layers=params.num_layers,
         tie_weights=params.tie_weights,
         params=params,
+        warmup_batches=params.warmup_batches,
+        layer_bypass=params.layer_bypass,
+        use_balancer=params.use_balancer,
     )
     return model
 
@@ -938,7 +958,7 @@ def run(rank, world_size, args):
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank],
-                    find_unused_parameters=True)
+                    find_unused_parameters=False)
 
     optimizer = ScaledAdam(
         get_parameter_groups_with_lrs(
