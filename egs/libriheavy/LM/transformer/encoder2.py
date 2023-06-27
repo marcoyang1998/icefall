@@ -26,7 +26,7 @@ from zipformer import BypassModule
 from attention import RelPositionMultiheadAttention
 from icefall.utils import is_jit_tracing, make_pad_mask
 
-from scaling import Balancer, FloatLike, ScheduledFloat
+from scaling import Balancer, BiasNorm, FloatLike, ScheduledFloat
 
 
 class Transformer(torch.nn.Module):
@@ -55,6 +55,7 @@ class Transformer(torch.nn.Module):
         layer_bypass: bool = False,
         warmup_batches: float = 4000.0,
         use_balancer: bool = False,
+        use_bias_norm: bool = False
     ):
         super().__init__()
 
@@ -74,6 +75,7 @@ class Transformer(torch.nn.Module):
             dropout_rate=dropout_rate,
             layer_bypass=layer_bypass,
             use_balancer=use_balancer,
+            use_bias_norm =use_bias_norm,
         )
 
         self.encoder = TransformerEncoder(
@@ -207,6 +209,7 @@ class TransformerEncoderLayer(torch.nn.Module):
         layer_bypass: bool = False,
         bypass_skip_rate: FloatLike = ScheduledFloat((0.0, 0.5), (4000.0, 0.02), default=0),
         use_balancer: bool = False,
+        use_bias_norm: bool = False,
     ):
         """TransformerEncoderLayer is made up of self-attn and feedforward module
 
@@ -245,8 +248,12 @@ class TransformerEncoderLayer(torch.nn.Module):
                 nn.Linear(dim_feedforward, d_model),
             )
 
-        self.norm_before = nn.LayerNorm(d_model)
-        self.norm_final = nn.LayerNorm(d_model)
+        if use_bias_norm:
+            self.norm_before = BiasNorm(d_model)
+            self.norm_final = BiasNorm(d_model)
+        else:
+            self.norm_before = nn.LayerNorm(d_model)
+            self.norm_final = nn.LayerNorm(d_model)
 
         self.dropout = nn.Dropout(dropout_rate)
 
