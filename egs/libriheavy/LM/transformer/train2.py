@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Copyright    2021-2022  Xiaomi Corp.        (authors: Xiaoyu Yang,
+# Copyright    2021-2022  Xiaomi Corp.        (authors: Fangjun Kuang,
+#                                                       Wei Kang,
+#                                                       Mingshuang Luo,)
+#                                                       Zengwei Yao)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
 #
@@ -59,7 +62,7 @@ import torch.nn as nn
 from lm_datamodule2 import LmDataset
 from lhotse.utils import fix_random_seed
 from model2 import TransformerLM
-from optim_cosine import CosineScheduler
+from optim import Eden, ScaledAdam
 from torch import Tensor
 from torch import nn
 from torch.cuda.amp import GradScaler
@@ -153,6 +156,24 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         last output linear layer
         """,
     )
+    
+    parser.add_argument(
+        "--layer-bypass",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--use-balancer",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--use-bias-norm",
+        type=str2bool,
+        default=False,
+    )
 
 
 
@@ -218,20 +239,42 @@ def get_parser():
         """,
     )
 
-    # optimizer and scheduler settings
     parser.add_argument(
-        "--lr",
+        "--base-lr",
         type=float,
-        default=4e-4,
+        default=0.045,
         help="The base learning rate."
     )
-    
+
     parser.add_argument(
-        "--weight-decay",
+        "--lr-batches",
         type=float,
-        default=0.1
+        default=7500,
+        help="""Number of steps that affects how rapidly the learning rate
+        decreases. We suggest not to change this.""",
     )
     
+    parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.5,
+    )
+    
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
+    )
+
+    parser.add_argument(
+        "--lr-tokens",
+        type=float,
+        default=1000000000,
+        help="""Number of tokens beyond which the LR will start to decrease per token, defines
+        LR schedule, replacing lr-epochs
+        """,
+    )
+
     parser.add_argument(
         "--ref-duration",
         type=float,
@@ -245,6 +288,13 @@ def get_parser():
         type=int,
         default=2048,
         help="Number of bytes in each training sample"
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        default=10,
+        type=int,
+        help="Batch size during training."
     )
 
     parser.add_argument(
@@ -311,18 +361,6 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
-    
-    parser.add_argument(
-        "--layer-bypass",
-        type=str2bool,
-        default=False,
-    )
-    
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=12,
-    )
 
     add_model_arguments(parser)
 
@@ -387,20 +425,9 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             "vocab_size": 256, # bytes
-            #"batch_size": 12,
-            "bytes_per_segment": 1024,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
             "num_workers": 4,
-            # optimizer and scheduler
-            "min_lr": 1e-9,
-            "lr_shrink": 0.75,
-            "lr_period_updates": 100000,
-            "warmup_init_lr": 1e-7,
-            "warmup_updates": 1000,
-            "t_mult": 1.0,
-            # model warmup
-            "warmup_batches": 4000, 
         }
     )
 
@@ -409,6 +436,21 @@ def get_params() -> AttributeDict:
 
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(',')))
+
+def get_model_legacy(params: AttributeDict) -> nn.Module:
+    from model_old import TransformerLM
+    
+    model = TransformerLM(
+        vocab_size=params.vocab_size,
+        d_model=params.encoder_dim,
+        embedding_dim=params.embedding_dim,
+        dim_feedforward=params.dim_feedforward,
+        nhead=params.nhead,
+        num_layers=params.num_layers,
+        tie_weights=params.tie_weights,
+        params=params,
+    )
+    return model
 
 def get_model(params: AttributeDict) -> nn.Module:
     model = TransformerLM(
@@ -422,6 +464,8 @@ def get_model(params: AttributeDict) -> nn.Module:
         params=params,
         warmup_batches=params.warmup_batches,
         layer_bypass=params.layer_bypass,
+        use_bias_norm=params.use_bias_norm,
+        use_balancer=params.use_balancer,
     )
     return model
 
@@ -745,15 +789,15 @@ def train_one_epoch(
 
             # NOTE: We use reduction==sum and loss is computed over utterances
             # in the batch and there is no normalization to it so far.
-            
             scaler.scale(loss).backward()
+            scheduler.step_batch(params.batch_idx_train)
             tokens_seen = params.batch_idx_train * params.bytes_per_segment * params.batch_size * get_world_size()
-            
+            # we make the formula depend on tokens not epochs, replacing lr_epochs with lr_tokens.
+            scheduler.step_epoch(tokens_seen)
+
             scaler.step(optimizer)
-            last_lr = scheduler.step_update(params.batch_idx_train)
             scaler.update()
             optimizer.zero_grad()
-            
         except:  # noqa
             save_bad_model()
             display_and_save_batch(batch, params=params)
@@ -814,7 +858,7 @@ def train_one_epoch(
                 raise RuntimeError(f"grad_scale is too small, exiting: {cur_grad_scale}")
 
         if batch_idx % params.log_interval == 0:
-            cur_lr = last_lr
+            cur_lr = max(scheduler.get_last_lr())
             cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
 
             logging.info(
@@ -840,6 +884,8 @@ def train_one_epoch(
                     tb_writer.add_scalar(
                         "train/grad_scale", cur_grad_scale, params.batch_idx_train
                     )
+
+
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
@@ -919,24 +965,21 @@ def run(rank, world_size, args):
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank],
-                    find_unused_parameters=True)
+                    find_unused_parameters=False)
 
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        betas=(0.9, 0.95),
-        weight_decay=params.weight_decay,
-        eps=1e-8,
+    optimizer = ScaledAdam(
+        get_parameter_groups_with_lrs(
+            model, lr=params.base_lr, include_names=True),
+        lr=params.base_lr,   # should have no effect
+        clipping_scale=2.0,
     )
 
-    scheduler = CosineScheduler(
-        optimizer=optimizer,
-        lr=params.lr,
-        min_lr=params.min_lr,
-        lr_shrink=params.lr_shrink,
-        lr_period_updates=params.lr_period_updates,
-        warmup_init_lr=params.warmup_init_lr,
-        warmup_updates=params.warmup_updates,
-        t_mult=params.t_mult,
+    scheduler = Eden(
+        optimizer,
+        params.lr_batches,
+        params.lr_tokens,
+        warmup_batches=params.warmup_batches,
+        warmup_start=params.warmup_start,
     )
 
     if checkpoints and "optimizer" in checkpoints:
@@ -960,6 +1003,7 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
+
     train_data = LmDataset(params.train_file_list,
                       bytes_per_segment=params.bytes_per_segment,)
     train_dl = torch.utils.data.DataLoader(
@@ -978,6 +1022,7 @@ def run(rank, world_size, args):
         num_workers=params.num_workers,
         drop_last=False)
 
+
     scaler = GradScaler(enabled=params.use_fp16,
                         init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
@@ -989,8 +1034,6 @@ def run(rank, world_size, args):
         # to let it know how many tokens we have processed so far, and have a
         # soft-cutoff lr_tokens measured in tokens.
         # scheduler.step_epoch(epoch - 1)
-        scheduler.step(epoch - 1) # not sure if needed
-        
         fix_random_seed(params.seed + epoch - 1)
         # the above will affect random seeds in the dataloaders.
 
