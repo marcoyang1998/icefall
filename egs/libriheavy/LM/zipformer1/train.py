@@ -172,8 +172,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
 
-
-
 def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -206,6 +204,12 @@ def get_parser():
         default=10000000000,
         help="Number of tokens to train.",
     )
+    
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=3,
+    )
 
 
     parser.add_argument(
@@ -226,8 +230,6 @@ def get_parser():
         files, e.g., checkpoints, log, etc, are saved
         """,
     )
-
-
 
     parser.add_argument(
         "--base-lr",
@@ -308,6 +310,20 @@ def get_parser():
             model_avg * ((batch_idx_train - average_period) / batch_idx_train)`.
         """,
     )
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=18,
+        help="Training batch size"
+    )
+    
+    parser.add_argument(
+        "--bytes-per-segment",
+        type=int,
+        default=2048,
+        help="Training segment length"
+    )
 
     parser.add_argument(
         "--use-fp16",
@@ -363,8 +379,6 @@ def get_params() -> AttributeDict:
             "valid_interval": 3000,
             "warm_step": 2000,
             "env_info": get_env_info(),
-            "bytes_per_segment": 2048,
-            "batch_size": 18,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
             "num_workers": 4,
@@ -928,6 +942,11 @@ def run(rank, world_size, args):
                            bytes_per_segment=params.bytes_per_segment)
 
     params.tokens_per_epoch = train_data.num_tokens()  # helps us figure out epoch progress.
+    
+    # Easier to calculate how many tokens
+    if params.num_epochs > 1:
+        params.num_tokens = params.tokens_per_epoch * params.num_epochs
+        logging.info(f"Adjusting total number of tokens during training to: {params.num_tokens}")
 
     batch_size = params.batch_size // (6 if params.print_diagnostics else 1)
 
