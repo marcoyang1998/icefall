@@ -18,18 +18,20 @@
 
 import argparse
 import inspect
+import codecs
 import logging
 from functools import lru_cache
 import numpy as np
 import random
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from icefall.dist import get_world_size, get_rank
 
 import torch
 
 from text_normalization import (
     remove_non_alphabetic,
+    keep_all,
     upper_only_alpha,
     lower_only_alpha,
     upper_all_char,
@@ -47,6 +49,8 @@ class LmDataset(torch.utils.data.IterableDataset):
                  file_list_fn: Path,
                  bytes_per_segment: int = 200,
                  training: bool = True,
+                 do_random_transform: bool = False,
+                 sampling_weight: List[float] = None,
     ):
         """
         Initialize LmDataset object.   This keeps no state, it just gives you a totally random
@@ -94,13 +98,14 @@ class LmDataset(torch.utils.data.IterableDataset):
         tot_workers = num_workers * get_world_size()
         
         self.transforms = [
-            lambda x: x,  # return it self
+            keep_all,
             upper_only_alpha,
             upper_all_char,
             lower_only_alpha,
             lower_all_char,
         ]
-        self.sampling_weight = [0.2]*5
+        self.sampling_weight = sampling_weight
+        self.do_random_transform = do_random_transform
 
         self.num_segments = float('inf') if training else 1 + tot_positions // (bytes_per_segment * tot_workers)
 
@@ -147,7 +152,7 @@ class LmDataset(torch.utils.data.IterableDataset):
 
             begin, = rng.integers(low=begin_pos, high=end_pos, size=1)
 
-            with open(fn, "rb") as f:
+            with open(fn, "rb") as f: # here, read utf-8 instead of bytes
                 if begin >= 0:
                     f.seek(begin)
                     b = f.read(self.bytes_per_segment) # b is bytes object
@@ -155,13 +160,19 @@ class LmDataset(torch.utils.data.IterableDataset):
                     b = f.read(self.bytes_per_segment + begin)
                     #b = b'\0' * -begin + f.read(self.bytes_per_segment + begin)
                 # do random text transform
-                s = b.decode() # first convert to str
-                transform_id = np.random.choice(len(self.transforms), 1, p=self.sampling_weight)[0]
-                trans = self.transforms[transform_id]
-                s = trans(s)
-                b = s.encode() # to bytes
+                if self.do_random_transform:
+                    try:
+                        s = b.decode('utf-8') # first convert to utf8 str
+                    except:
+                        s = codecs.decode(b, 'utf-8', errors='replace')
+                    transform_id = np.random.choice(len(self.transforms), 1, p=self.sampling_weight)[0]
+                    trans = self.transforms[transform_id]
+                    s = trans(s)
+                    b = s.encode() # to bytes
             if len(b) < self.bytes_per_segment:
                 b = b + b'\0' * (self.bytes_per_segment - len(b))
+            if len(b) > self.bytes_per_segment:
+                b = b[:self.bytes_per_segment]
             yield torch.Tensor(np.frombuffer(b, dtype=np.uint8).copy()).to(torch.long)
 
     def num_tokens(self):
