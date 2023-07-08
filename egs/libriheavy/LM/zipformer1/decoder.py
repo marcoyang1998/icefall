@@ -39,7 +39,9 @@ class Decoder(nn.Module):
 
     def forward(self,
                 labels: Tensor,
-                encoder_embed: Tensor) -> Tensor:
+                encoder_embed: Tensor,
+                return_logits: bool=False
+        ) -> Tensor:
         """
         Compute log-probs.
         Args:
@@ -60,8 +62,11 @@ class Decoder(nn.Module):
 
         # x: (batch_size, seq_len, vocab_size)
 
+        if return_logits: # only return the logits prior to softmax
+            return x
+        
         x = x.log_softmax(dim=-1)
-
+        
         logprobs = torch.gather(x, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # (batch_size, seq_len)
 
         return logprobs
