@@ -51,7 +51,7 @@ from subformer import Subformer
 from scaling import ScheduledFloat
 from lhotse.utils import fix_random_seed
 from decoder import Decoder
-from model import SubformerLM, TextEmbedder
+from model_mlm import SubformerLM, TextEmbedder
 from optim import Eden, ScaledAdam
 from torch import Tensor
 from torch import nn
@@ -595,12 +595,13 @@ def compute_loss(
     )
 
     labels = batch.to(device)  # (batch_size, sequence_length)
-
+    text_lens = (batch > 0).sum(1).to(device)
+    
     with torch.set_grad_enabled(is_training):
-        loglikes = model(labels)
-
-        loss = -loglikes.sum()
-
+        loss = model(
+            text=labels,
+            text_lens=text_lens,
+        )
 
     assert loss.requires_grad == is_training
 
@@ -614,7 +615,7 @@ def compute_loss(
         # we may also pad with leading zeros in case the 'window' starts before
         # the start of the file.  But this is a small effect if the files are long.
         info["frames"] = (
-            (labels != 0).sum()
+            (labels != 0).sum() * 0.15 # because we only masked 15% of frames
         )
 
     # Note: We use reduction=sum while computing the loss.
