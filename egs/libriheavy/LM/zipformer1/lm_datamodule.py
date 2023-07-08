@@ -39,6 +39,7 @@ class LmDataset(torch.utils.data.IterableDataset):
                  file_list_fn: Path,
                  bytes_per_segment: int = 200,
                  training: bool = True,
+                 do_random_transform: bool = False,
     ):
         """
         Initialize LmDataset object.   This keeps no state, it just gives you a totally random
@@ -85,6 +86,7 @@ class LmDataset(torch.utils.data.IterableDataset):
         # num_workers for data-loader worker threads; world_size is for ddp training.
         tot_workers = num_workers * get_world_size()
 
+        self.do_random_transform = do_random_transform
         self.num_segments = float('inf') if training else 1 + tot_positions // (bytes_per_segment * tot_workers)
 
 

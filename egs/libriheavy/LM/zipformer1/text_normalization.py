@@ -38,6 +38,9 @@ def remove_non_alphabetic(text: str, strict: bool=True) -> str:
 def recog_text_normalization(recog_text: str) -> str:
     pass
 
+def keep_all(text: str) -> str:
+    return text
+
 def upper_only_alpha(text: str,) -> str:
     return remove_non_alphabetic(text.upper(), strict=True)
 
