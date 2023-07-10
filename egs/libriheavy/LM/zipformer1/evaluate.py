@@ -76,6 +76,18 @@ def get_parser():
         default="pruned_transducer_stateless7_streaming/exp",
         help="The experiment dir",
     )
+    
+    parser.add_argument(
+        "--bytes-per-segment",
+        type=int,
+        default=2048,
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=12,
+    )
 
     add_model_arguments(parser)
 
@@ -141,6 +153,7 @@ def main():
     assert params.iter > 0
     params.suffix = f"iter-{params.iter}-avg-{params.avg}"
 
+    params.suffix += f"-bytes-per-segment-{params.bytes_per_segment}"
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
 
