@@ -329,10 +329,10 @@ class Subformer(EncoderInterface):
             src_t = t
             tgt_t = t.unsqueeze(-1)
             attn_mask = (src_t > tgt_t)
-            ans.masked_fill_(attn_mask, float('-inf'))
+            ans.masked_fill_(attn_mask, -1000)
 
         if src_key_padding_mask is not None:
-            ans = ans.masked_fill(src_key_padding_mask.unsqueeze(1), float('-inf'))
+            ans = ans.masked_fill(src_key_padding_mask.unsqueeze(1), -1000)
             # now ans: (batch_size, seq_len, seq_len).
 
         return ans

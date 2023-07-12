@@ -22,6 +22,8 @@ from torch import nn, Tensor
 from subformer import Subformer
 from scaling import Balancer
 
+from icefall.utils import make_pad_mask
+
 
 class TextEmbedder(nn.Module):
     def __init__(self,
@@ -104,6 +106,7 @@ class SubformerLM(nn.Module):
         """
         (batch_size, seq_len) = labels.shape
 
+        x_lens = (labels > 0).sum(-1).long() # because we prepend sos 
         chunk_size = 1
         labels_shifted = labels.t()  # (time, batch)
         labels_shifted = torch.cat((torch.zeros_like(labels_shifted[:1]),
@@ -111,11 +114,12 @@ class SubformerLM(nn.Module):
                                    dim=0)
 
         x = self.encoder_embed(labels_shifted)
-        x_lens = torch.full((batch_size,), seq_len,
-                            dtype=torch.long, device=labels.device)
 
         # x_lens is after subsampling.  Actually we don't need it.
-        (x, x_lens) = self.encoder(x, x_lens)
+        src_key_padding_mask = make_pad_mask(x_lens)
+        (x, x_lens) = self.encoder(x, x_lens, src_key_padding_mask)
 
         logprobs = self.decoder(labels, x)
+        logprobs.masked_fill_(src_key_padding_mask, 0) # mask 
+        
         return logprobs
