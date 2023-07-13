@@ -18,7 +18,7 @@
 import argparse
 import logging
 from pathlib import Path
-from train import get_model, get_params, add_model_arguments
+from train_bpe import get_model, get_params, add_model_arguments
 from typing import Tuple
 import torch
 
@@ -146,7 +146,13 @@ def main():
             )
         )
         
-        torch.save({"model": model.state_dict()}, params.exp_dir / "pretrained.pt")
+        torch.save(
+            {
+                "encoder": model.encoder.state_dict(),
+                "embed": model.encoder_embed.state_dict(),
+            }, 
+            params.exp_dir / "pretrained.pt"
+        )
 
 if __name__ == "__main__":
     main()
