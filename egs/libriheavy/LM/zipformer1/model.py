@@ -107,6 +107,7 @@ class SubformerLM(nn.Module):
         (batch_size, seq_len) = labels.shape
 
         x_lens = (labels > 0).sum(-1).long() # because we prepend sos 
+        labels = labels[:, :x_lens.max()]
         chunk_size = 1
         labels_shifted = labels.t()  # (time, batch)
         labels_shifted = torch.cat((torch.zeros_like(labels_shifted[:1]),
@@ -120,6 +121,7 @@ class SubformerLM(nn.Module):
         (x, x_lens) = self.encoder(x, x_lens, src_key_padding_mask)
 
         logprobs = self.decoder(labels, x)
+        assert not logprobs.isnan().any()
         logprobs.masked_fill_(src_key_padding_mask, 0) # mask 
         
         return logprobs

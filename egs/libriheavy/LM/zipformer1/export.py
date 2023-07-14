@@ -146,13 +146,14 @@ def main():
             )
         )
         
-        torch.save(
-            {
-                "encoder": model.encoder.state_dict(),
-                "embed": model.encoder_embed.state_dict(),
-            }, 
-            params.exp_dir / "pretrained.pt"
-        )
+    torch.save(
+        {
+            "encoder": model.encoder.state_dict(),
+            "embed": model.encoder_embed.state_dict(),
+        }, 
+        params.exp_dir / "pretrained.pt"
+    )
+    print(f"Model saved at {params.exp_dir / f"pretrained-epoch-{params.epoch}-avg-{params.avg}.pt"}")
 
 if __name__ == "__main__":
     main()
