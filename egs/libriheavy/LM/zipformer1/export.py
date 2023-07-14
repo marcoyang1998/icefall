@@ -153,7 +153,8 @@ def main():
         }, 
         params.exp_dir / "pretrained.pt"
     )
-    print(f"Model saved at {params.exp_dir / f"pretrained-epoch-{params.epoch}-avg-{params.avg}.pt"}")
+    model_name = f"pretrained-epoch-{params.epoch}-avg-{params.avg}.pt"
+    print(f"Model saved at {params.exp_dir / model_name}")
 
 if __name__ == "__main__":
     main()
