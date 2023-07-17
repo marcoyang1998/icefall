@@ -51,7 +51,7 @@ class LmDataset(torch.utils.data.IterableDataset):
                  tokens_per_segment: int = 200,
                  training: bool = True,
                  do_random_transform: bool = False,
-                 sampling_weight: List[float] = None,
+                 style_sampling_weight: List[float] = None,
                  bpe_model: spm.SentencePieceProcessor = None,
     ):
         """
@@ -60,6 +60,9 @@ class LmDataset(torch.utils.data.IterableDataset):
         we select chunks of a fixed size.  In training mode we just loop infinitely, and let
         the training code decide when to stop based on the count of tokens.  In test mode
         we loop so that we see each byte about once.
+        
+        This version supports random text transform with specified probabilies for each transform.
+        This lm datamodule support BPE as tokenization.
 
         Args:
           file_list_fn: a file in which each line contains: a number of bytes, then a space, then a filename.
@@ -107,7 +110,7 @@ class LmDataset(torch.utils.data.IterableDataset):
             lower_only_alpha,
             lower_all_char,
         ]
-        self.sampling_weight = sampling_weight
+        self.style_sampling_weight = style_sampling_weight
         self.do_random_transform = do_random_transform
         
         self.bpe_model = bpe_model
@@ -171,7 +174,7 @@ class LmDataset(torch.utils.data.IterableDataset):
                     s = codecs.decode(b, 'utf-8', errors='replace')
                 # do random text transform
                 if self.do_random_transform:
-                    transform_id = np.random.choice(len(self.transforms), 1, p=self.sampling_weight)[0]
+                    transform_id = np.random.choice(len(self.transforms), 1, p=self.style_sampling_weight)[0]
                     trans = self.transforms[transform_id]
                     s = trans(s)
                 tokens = self.bpe_model.encode(s)
