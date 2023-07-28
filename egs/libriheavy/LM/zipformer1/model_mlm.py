@@ -102,6 +102,20 @@ class SubformerLM(nn.Module):
         text: Tensor,
         text_lens: Tensor
     ):
+        """A help function to generate masked input; 15% position will masked,
+        among them, 80% will be masked with a [MASK] token,
+        10% will be masked with a random token, and the rest 10%
+        will remain the same
+
+        Args:
+            text (Tensor): Unmasked padded input sequence
+            text_lens (Tensor): The length of the unpadded sequence
+
+        Returns:
+            text (Tensor): Masked input sequence
+            mask (Tensor): The mask positions, with the masked region filled with True
+            label (Tensor): The original token on the masked positions
+        """
         device = text.device
         src = text
         
@@ -145,6 +159,9 @@ class SubformerLM(nn.Module):
         """
         device = text.device
         (batch_size, seq_len) = text.shape
+        
+        x_lens = (text > 0).sum(-1).long() # because we prepend sos 
+        text = text[:, :x_lens.max()] # Only get the useful areas
         orig_labels = text.clone()
         
         text, mask, masked_labels = self._create_masked_input_and_labels(text, text_lens)
@@ -157,11 +174,10 @@ class SubformerLM(nn.Module):
                                    dim=0)
 
         x = self.encoder_embed(text_shifted)
-        x_lens = torch.full((batch_size,), seq_len,
-                            dtype=torch.long, device=device)
 
         # x_lens is after subsampling.  Actually we don't need it.
-        (x, x_lens) = self.encoder(x, x_lens)
+        src_key_padding_mask = make_pad_mask(x_lens)
+        (x, x_lens) = self.encoder(x, x_lens, src_key_padding_mask)
 
         logits = self.decoder(orig_labels, x, return_logits=True) # (batch_size, seq_len, vocab_size)
         masked_logits = logits[mask] # (bs, seq_len', vocab_size)

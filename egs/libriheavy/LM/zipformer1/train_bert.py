@@ -331,6 +331,13 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--causal",
+        type=str2bool,
+        default=True,
+        help="Use causal subformer",
+    )
 
     add_model_arguments(parser)
 
@@ -415,7 +422,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         feedforward_dim=_to_int_tuple(params.feedforward_dim),
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
         warmup_batches=4000.0,
-        causal=True,
+        causal=params.causal,
     )
     return encoder
 
