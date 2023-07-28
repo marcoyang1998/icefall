@@ -324,6 +324,19 @@ def get_parser():
         default=2048,
         help="Training segment length"
     )
+    
+    parser.add_argument(
+        "--random-text-transform",
+        type=str2bool,
+        default=False,
+        help="Do random text normalization to the "
+    )
+    
+    parser.add_argument(
+        "--style-sampling-weight",
+        type=str,
+        default="0.6 0.1 0.1 0.1 0.1"
+    )
 
     parser.add_argument(
         "--use-fp16",
@@ -937,9 +950,13 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-
-    train_data = LmDataset(params.train_file_list,
-                           bytes_per_segment=params.bytes_per_segment)
+    params.style_sampling_weight = [0.6,0.1,0.1,0.1,0.1]
+    logging.info(f"Style sampling weight: {params.style_sampling_weight}")
+    train_data = LmDataset(
+        params.train_file_list,
+        bytes_per_segment=params.bytes_per_segment,
+        do_random_transform=params.random_text_transform,
+    )
 
     params.tokens_per_epoch = train_data.num_tokens()  # helps us figure out epoch progress.
     
@@ -957,9 +974,11 @@ def run(rank, world_size, args):
         drop_last=True)
 
 
-    valid_data = LmDataset(params.valid_file_list,
-                           bytes_per_segment=params.bytes_per_segment,
-                           training=False)
+    valid_data = LmDataset(
+        params.valid_file_list,
+        bytes_per_segment=params.bytes_per_segment,
+        training=False,
+    )
 
     valid_dl = torch.utils.data.DataLoader(
         dataset=valid_data,
@@ -980,7 +999,6 @@ def run(rank, world_size, args):
     # at the expense of exact repeatability.
     fix_random_seed(params.seed * 123456 + params.start_batch)
     # the above will affect random seeds in the dataloaders.
-
 
     train(
         params=params,

@@ -422,7 +422,7 @@ def _to_int_tuple(s: str):
 
 def get_encoder_embed(params: AttributeDict) -> nn.Module:
     return TextEmbedder(
-        vocab_size=params.vocab_size,  # we encode the text as UTF-8 bytes
+        vocab_size=params.vocab_size,  # we encode the text as bpe tokens
         embedding_dim=_to_int_tuple(params.encoder_dim)[0],
     )
 
@@ -450,7 +450,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
 def get_decoder_model(params: AttributeDict) -> nn.Module:
     decoder = Decoder(
         embed_dim=max(_to_int_tuple(params.encoder_dim)),
-        vocab_size=params.vocab_size, # bytes
+        vocab_size=params.vocab_size, # tokens
     )
     return decoder
 
@@ -975,6 +975,7 @@ def run(rank, world_size, args):
         tokens_per_segment=params.tokens_per_segment,
         do_random_transform=params.random_text_transform,
         bpe_model=sp,
+        style_sampling_weight=params.style_sampling_weight,
     )
 
     params.tokens_per_epoch = train_data.num_tokens()  # helps us figure out epoch progress.
