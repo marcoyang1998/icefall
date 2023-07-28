@@ -268,7 +268,7 @@ class Subformer(EncoderInterface):
                 downsample_info.append((indexes, weights, x))
                 x = x_new
 
-                pos_embs.append(downsampler.downsample_pos_emb(pos_embs[-1], indexes))
+                pos_embs.append(downsampler.downsample_pos_emb(pos_embs[-1], indexes)) # save the posisional embeddings
 
                 attn_offsets.append(downsampler.downsample_attn_offset(attn_offsets[-1],
                                                                        indexes,
@@ -929,13 +929,13 @@ class LearnedDownsamplingModule(nn.Module):
 
 
         weights = sscores.clamp(min=0.0, max=1.0)
-        weights = self.copy_weights1(weights)
+        weights = self.copy_weights1(weights) # for diagnostics
 
         if self.training:
             d = self.downsampling_factor
             seq_len_reduced = (seq_len + d - 1) // d
 
-            weights_discarded = weights[:, seq_len_reduced:2*seq_len_reduced]
+            weights_discarded = weights[:, seq_len_reduced:2*seq_len_reduced] # get the second half of the wegiths
             missing = seq_len_reduced - weights_discarded.shape[1]
             if missing != 0:
                 weights_discarded = torch.cat((weights_discarded,
@@ -953,7 +953,7 @@ class LearnedDownsamplingModule(nn.Module):
                 # to avoid nonzero weights in the discarded half
                 weights_discarded = weights_discarded.flip(dims=(1,))
 
-            weights = weights[:, :seq_len_reduced] - weights_discarded
+            weights = weights[:, :seq_len_reduced] - weights_discarded # the weights difference between the kept frames and the discarded frames
         else:
             # test mode.  because the sequence might be short, we keep all nonzero scores;
             # and there is no need for any penalty.
@@ -965,7 +965,7 @@ class LearnedDownsamplingModule(nn.Module):
                 logging.info(f"seq_len={seq_len}, seq_len_reduced={seq_len_reduced}")
             weights = weights[:, :seq_len_reduced]
 
-        indexes = indexes[:, :seq_len_reduced]
+        indexes = indexes[:, :seq_len_reduced] # get the frame indexes of the kept frames
 
 
         weights = self.copy_weights2(weights)
@@ -974,10 +974,10 @@ class LearnedDownsamplingModule(nn.Module):
         # masking for causal models will be in the correct order.
         # (actually this may not really matter, TODO: see whether we
         # can remove this??)
-        indexes, reorder = indexes.sort(dim=-1)
+        indexes, reorder = indexes.sort(dim=-1) # retrieve the original order of frames
         weights = torch.gather(weights, dim=-1, index=reorder)
 
-        x_downsampled = self.downsample(x, indexes)
+        x_downsampled = self.downsample(x, indexes) # Actually a gather option
         return indexes, weights, x_downsampled
 
 
