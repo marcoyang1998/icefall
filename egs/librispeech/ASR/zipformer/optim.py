@@ -180,6 +180,8 @@ class ScaledAdam(BatchedOptimizer):
         scalar_max=10.0,
         size_update_period=4,
         clipping_update_period=100,
+        clamp_period=100,
+        clamp_limit=2.0,
     ):
 
         defaults = dict(
@@ -193,6 +195,8 @@ class ScaledAdam(BatchedOptimizer):
             scalar_max=scalar_max,
             size_update_period=size_update_period,
             clipping_update_period=clipping_update_period,
+            clamp_period=clamp_period,
+            clamp_limit=clamp_limit,
         )
 
         # If params only contains parameters or group of parameters,
@@ -692,6 +696,7 @@ class ScaledAdam(BatchedOptimizer):
         beta1, beta2 = group["betas"]
         eps = group["eps"]
         param_min_rms = group["param_min_rms"]
+        clamp_limit = group["clamp_limit"]
         step = state["step"]
 
         exp_avg_sq = state["exp_avg_sq"]
@@ -712,6 +717,27 @@ class ScaledAdam(BatchedOptimizer):
         delta = state["delta"]
         delta.add_(grad * alpha)
         p.add_(delta)
+        
+        if p.numel() // p.shape[0] >= 100:            
+            if state["step"] and state["step"] % group["clamp_period"] == 0:
+                param_rms = state["param_rms"]
+                verbose = random.random() < 0.03
+                if verbose:
+                    logging.info(f"Clamping the parameter within a range. Upper bound: {torch.flatten(param_rms + clamp_limit)}")
+                    logging.info(f"Lower bound: {torch.flatten(param_rms - clamp_limit)}")
+                    logging.info(f"Original max: {torch.amax(p, dim=list(range(1, p.ndim)))}")
+                    logging.info(f"Original min: {torch.amin(p, dim=list(range(1, p.ndim)))}")
+                
+                p.clamp_(
+                    min=param_rms - clamp_limit,
+                    max=param_rms + clamp_limit
+                )
+                
+                if verbose:
+                    logging.info(f"After clamping, max: {torch.amax(p, dim=list(range(1, p.ndim)))}")
+                    logging.info(f"After clamping, min: {torch.amin(p, dim=list(range(1, p.ndim)))}")
+                    
+
 
     def _step_scalar(self, group: dict, p: Tensor, state: dict):
         """
