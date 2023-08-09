@@ -207,6 +207,10 @@ class ScaledAdam(BatchedOptimizer):
         super(ScaledAdam, self).__init__(param_groups, defaults)
         assert len(self.param_groups) == len(parameters_names)
         self.parameters_names = parameters_names
+        if clamp_period < 0:
+            self.do_clamp = False
+        else:
+            self.do_clamp = True
 
     def _get_names_of_parameters(
         self, params_or_named_params
@@ -718,7 +722,7 @@ class ScaledAdam(BatchedOptimizer):
         delta.add_(grad * alpha)
         p.add_(delta)
         
-        if p.numel() // p.shape[0] >= 100:            
+        if self.do_clamp and p.numel() // p.shape[0] >= 100:            
             if state["step"] and state["step"] % group["clamp_period"] == 0:
                 param_rms = state["param_rms"]
                 verbose = random.random() < 0.03
