@@ -47,6 +47,7 @@ class PromptedTransducer(nn.Module):
         use_BERT: bool = True,
         text_encoder_type: str = "BERT",
         text_encoder_adapter: bool = False,
+        freeze_text_encoder: bool = True,
         context_fuser: nn.Module = None,
     ):
         """
@@ -103,6 +104,7 @@ class PromptedTransducer(nn.Module):
         
         assert text_encoder_type in ("BERT","DistilBERT", "BERT-UNCASED"), f"Unseen text_encoder type {text_encoder_type}"
         self.text_encoder_dim = self.text_encoder.config.hidden_size if text_encoder_type in ("BERT", "BERT-UNCASED") else self.text_encoder.config.dim
+        self.freeze_text_encoder = freeze_text_encoder
         
         if text_encoder_adapter:
             self.text_encoder_adapter = nn.Sequential(
@@ -169,6 +171,9 @@ class PromptedTransducer(nn.Module):
               lm_scale * lm_probs + am_scale * am_probs +
               (1-lm_scale-am_scale) * combined_probs
         """
+        if self.freeze_text_encoder:
+            self.text_encoder.eval()
+        
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         assert y.num_axes == 2, y.num_axes
@@ -339,7 +344,9 @@ class PromptedTransducer(nn.Module):
         if self.text_encoder_adapter is not None:
             memory = self.text_encoder_adapter(memory)
         
-        memory = self._add_style_indicator(memory, style_lens)
+        # Use style prompt
+        if not torch.all(style_lens == 0):
+            memory = self._add_style_indicator(memory, style_lens)
 
         memory_key_padding_mask = make_pad_mask(text_lens)
         
