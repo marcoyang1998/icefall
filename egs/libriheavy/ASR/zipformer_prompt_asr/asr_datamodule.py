@@ -202,20 +202,22 @@ class LibriHeavyAsrDataModule:
             default="small",
             help="Select the Libriheavy subset (small|medium|large)",
         )
-        
+
         group.add_argument(
             "--use-context-list",
             type=str2bool,
             default=False,
             help="Use the context list of libri heavy",
         )
-        
+
         group.add_argument(
-            "--min-count",
+            "--top-k",
             type=int,
-            default=7,
+            default=10000,
+            help="""The top-k words are identified as common words,
+            the rest as rare words""",
         )
-        
+
         group.add_argument(
             "--with-decoding",
             type=str2bool,
@@ -285,9 +287,7 @@ class LibriHeavyAsrDataModule:
         input_transforms = []
         if self.args.enable_spec_aug:
             logging.info("Enable SpecAugment")
-            logging.info(
-                f"Time warp factor: {self.args.spec_aug_time_warp_factor}"
-            )
+            logging.info(f"Time warp factor: {self.args.spec_aug_time_warp_factor}")
             # Set the value of num_frame_masks according to Lhotse's version.
             # In different Lhotse's versions, the default of num_frame_masks is
             # different.
@@ -351,11 +351,8 @@ class LibriHeavyAsrDataModule:
                 drop_last=True,
             )
         else:
-            logging.info("Using SingleCutSampler.")
-            train_sampler = SingleCutSampler(
-                cuts_train,
-                max_duration=self.args.max_duration,
-                shuffle=self.args.shuffle,
+            raise NotImplementedError(
+                "SingleCutSampler is no longer supported by lhotse"
             )
         logging.info("About to create train dataloader")
 
@@ -379,9 +376,10 @@ class LibriHeavyAsrDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self,
+    def valid_dataloaders(
+        self,
         cuts_valid: CutSet,
-        text_sampling_func: Callable[[List[str]], str] = None, 
+        text_sampling_func: Callable[[List[str]], str] = None,
     ) -> DataLoader:
         transforms = []
         if self.args.random_left_padding:
@@ -460,16 +458,16 @@ class LibriHeavyAsrDataModule:
         if self.args.use_context_list:
             path = (
                 self.args.manifest_dir
-                / f"libriheavy_cuts_{self.args.subset}_with_context_list_min_count_{self.args.min_count}.jsonl.gz"
+                / f"libriheavy_cuts_{self.args.subset}_with_context_list_topk_{self.args.top_k}.jsonl.gz"
             )
         elif self.args.with_decoding:
             path = (
-                self.args.manifest_dir / f"libriheavy_cuts_{self.args.subset}_with_decoding.jsonl.gz"
+                self.args.manifest_dir
+                / f"libriheavy_cuts_{self.args.subset}_with_decoding.jsonl.gz"
             )
         else:
             path = (
-                self.args.manifest_dir
-                / f"libriheavy_cuts_{self.args.subset}.jsonl.gz"
+                self.args.manifest_dir / f"libriheavy_cuts_{self.args.subset}.jsonl.gz"
             )
 
         logging.info(f"Loading manifest from {path}.")
