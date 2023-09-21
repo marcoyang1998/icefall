@@ -1400,6 +1400,15 @@ def get_parameter_groups_with_lrs(
         [  { 'named_params': [ (name1, tensor1, (name2, tensor2), ... ], 'lr': 0.01 },
            { 'named_params': [ (name3, tensor3), (name4, tensor4), ... ], 'lr': 0.005 },
          ...   ]
+         
+    Modules starting with items in `freeze_modules` will not be added to the parameters.
+    For example, if you want to freeze `model.decoder`, you can set `freeze_modules= ["decoder"]`
+    
+    Modules not matching the module names in `kept_modules` will not be added to the parameters.
+    For example, if you only want to update the model parameters in each encoder layer's `self_attn`,
+    i.e `model.encoder.encoders[0].self_attn.in_proj.weight, model.encoder.encoders[0].self_attn.in_proj.bias`,
+    you can specify `kept_modules=['.self_attn.']`. The matching is determined by if a substring in
+    the parameter name appears in `kept_models`.
 
     """
     named_modules = list(model.named_modules())
@@ -1441,7 +1450,6 @@ def get_parameter_groups_with_lrs(
             if len(kept_modules) > 0 and not _check_module_match(name, kept_modules):
                 logging.info(f"Remove {name} from parameters")
                 continue
-        # import pdb; pdb.set_trace()
         cur_lr = lr * flat_lr_scale[prefix]
         if prefix != "":
             cur_lr *= flat_lr_scale[""]
