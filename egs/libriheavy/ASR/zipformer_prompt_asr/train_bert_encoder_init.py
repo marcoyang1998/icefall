@@ -47,6 +47,7 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3"
 import argparse
 import copy
 import logging
+import os
 import random
 import warnings
 from pathlib import Path
@@ -329,6 +330,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--backbone-ckpt",
+        type=str,
+        help="The backbone ASR ckpt for the PromptASR"
+    )
+    
+    parser.add_argument(
         "--context-injection",
         type=str2bool,
         default=False,
@@ -566,8 +573,15 @@ def get_parser():
         default=0.05,
         help="The probability of masking prompts",
     )
+    
     parser.add_argument(
         "--freeze-text-encoder",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--only-finetune-cross-attention",
         type=str2bool,
         default=True,
     )
@@ -745,7 +759,10 @@ def get_text_encoder(params: AttributeDict) -> nn.Module:
         from transformers import BertModel
         # This is a BERT-base-cased
         logging.info("Loading pre-trained BERT-base-cased as text encoder")
-        model = BertModel.from_pretrained("bert-base-cased")
+        if os.path.exists("data/models/bert-base-cased"):
+            model = BertModel.from_pretrained("data/models/bert-base-cased")
+        else:
+            model = BertModel.from_pretrained("bert-base-cased")
     elif params.text_encoder_type == "DistilBERT":
         from transformers import DistilBertModel
         # This is a DistilBERT-base-cased
@@ -761,7 +778,10 @@ def get_tokenizer(params: AttributeDict):
     if params.text_encoder_type == "BERT":
         from transformers import BertTokenizer
         # This is a BERT-base-cased
-        tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
+        if os.path.exists("data/models/bert-base-cased"):
+            tokenizer = BertTokenizer.from_pretrained('data/models/bert-base-cased')
+        else:
+            tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
     elif params.text_encoder_type == "DistilBERT":
         from transformers import DistilBertTokenizer
         tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-cased')
@@ -851,6 +871,7 @@ def get_transducer_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         text_encoder_type=params.text_encoder_type,
         text_encoder_adapter=params.text_encoder_adapter,
+        freeze_text_encoder=params.freeze_text_encoder,
         context_fuser=context_fuser,
     )
     
@@ -870,9 +891,28 @@ def load_backbone_ASR(params: AttributeDict, model: nn.Module) -> nn.Module:
     state_dict = torch.load(params.backbone_ckpt)["model"]
     model.load_state_dict(state_dict, strict=False)
     
-    return model
+    backbone_keys = list(state_dict.keys())
+    new_keys = list(model.state_dict().keys())
+    new_params = [n for n in new_keys if n not in backbone_keys]
+    new_params = [n for n in new_params if "text_encoder" not in n]
     
+    return model
 
+def set_params_grad(model: nn.Module, update_modules: List[str]):
+    """Set the requires_grad attribute for each parameter in the model
+    Only set to True if the name matches `update_modules`
+
+    Args:
+        model (nn.Module): The PromptASR model
+        update_modules (List[str]): A list of modules to be updated
+    """
+    for name, p in model.named_parameters():
+        p.requires_grad_(False)
+        for m in update_modules:
+            if m in name: # optimize this parameter
+                p.requires_grad_(True)
+                break
+    
 def load_checkpoint_if_available(
     params: AttributeDict,
     model: nn.Module,
@@ -994,8 +1034,9 @@ def save_checkpoint(
 def _encode_texts_as_bytes_with_tokenizer(
     pre_texts: List[str], 
     style_texts: List[str],
-    tokenizer,
+    tokenizer: spm.SentencePieceProcessor,
     device: torch.device,
+    use_style_text: bool = True,
     max_len: int=500,
     no_limit: bool=False
 ) -> Tuple[Dict, Tensor]:
@@ -1021,7 +1062,10 @@ def _encode_texts_as_bytes_with_tokenizer(
         return_length=True,
         max_length=max_len,
     )
-    style_lens = encoded_style_texts["length"].to(device)
+    if use_style_text:
+        style_lens = encoded_style_texts["length"].to(device)
+    else:
+        style_lens = torch.zeros(len(style_texts)).to(device)
     
     # Use tokenizer to prepare input for text encoder
     encoded_inputs = tokenizer(
@@ -1102,7 +1146,6 @@ def compute_loss(
             p=params.pre_text_shuffle_prob,
             p_mask=params.prompt_mask_prob,
         )
-        
         if params.use_style_prompt:
             if random.random() < 0.5: 
                 # randomly shuffle the style_text
@@ -1131,6 +1174,7 @@ def compute_loss(
         pre_texts=pre_texts,
         style_texts=style_texts,
         tokenizer=tokenizer,
+        use_style_text=params.use_style_prompt,
         device=device,
     )
     
@@ -1265,6 +1309,7 @@ def train_one_epoch(
         be set to 0.
     """
     model.train()
+    set_params_grad(model, update_modules=params.update_modules)
 
     tot_loss = MetricsTracker()
 
@@ -1415,7 +1460,7 @@ def train_one_epoch(
                     )
 
         if (
-            batch_idx % params.valid_interval == 0
+            batch_idx % params.valid_interval == 10
             and not params.print_diagnostics
         ):
             logging.info("Computing validation loss")
@@ -1489,12 +1534,21 @@ def run(rank, world_size, args):
     # <blk> is defined in local/train_bpe_model.py
     params.blank_id = sp.piece_to_id("<blk>")
     params.vocab_size = sp.get_piece_size()
+    
+    # hard set these modules
+    params.update_modules = [
+        ".attn_weights.",
+        "src_attn1",
+        "src_attn2",
+        "memory_balancer",
+        "style_prompt_embedding"
+    ]
 
     logging.info(params)
 
     logging.info("About to create model")
     model = get_transducer_model(params)
-    ckpt = 
+    model = load_backbone_ASR(params, model=model)
     tokenizer = get_tokenizer(params)
 
     num_param = sum([p.numel() for p in model.parameters()])
@@ -1524,7 +1578,7 @@ def run(rank, world_size, args):
     
     optimizer = ScaledAdam(
         get_parameter_groups_with_lrs(
-            model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules
+            model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules, kept_modules=params.update_modules,
         ),
         lr=params.base_lr,  # should have no effect
         clipping_scale=2.0,
