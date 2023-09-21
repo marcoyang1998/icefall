@@ -32,7 +32,6 @@ from lhotse.dataset import (
     ExtraPadding,
     K2SpeechRecognitionDataset,
     PrecomputedFeatures,
-    SingleCutSampler,
     SpecAugment,
 )
 from lhotse.dataset.input_strategies import OnTheFlyFeatures
@@ -264,7 +263,7 @@ class LibriHeavyAsrDataModule:
             )
             transforms.append(
                 CutMix(
-                    cuts=cuts_musan, prob=0.5, snr=(10, 20), preserve_id=True
+                    cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True
                 )
             )
         else:
