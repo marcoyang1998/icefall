@@ -1407,8 +1407,10 @@ def get_parameter_groups_with_lrs(
     Modules not matching the module names in `kept_modules` will not be added to the parameters.
     For example, if you only want to update the model parameters in each encoder layer's `self_attn`,
     i.e `model.encoder.encoders[0].self_attn.in_proj.weight, model.encoder.encoders[0].self_attn.in_proj.bias`,
-    you can specify `kept_modules=['.self_attn.']`. The matching is determined by if a substring in
+    you can specify `kept_modules=['.self_attn.']`. Matching is determined by if a substring in
     the parameter name appears in `kept_models`.
+    
+    If `kept_modules` is empty, it won't be used to filter modules.
 
     """
     named_modules = list(model.named_modules())

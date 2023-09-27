@@ -1122,62 +1122,6 @@ def _encode_text_as_tokens(
     
     return tokens_with_sos_padded, tokens_lens, style_lens
 
-
-def _encode_texts_as_bytes(
-    texts: List[str], 
-    style_texts: List[str],
-    device: torch.device,
-    max_len: int = 1200,
-) -> Tuple[Tensor, Tensor, Tensor]:
-    """
-    Encode texts as bytes and then integer tensors.
-    Note that the style text will be added to the beginning of texts.
-    Args:
-            texts: the texts to encode, as a list of strings
-            style_texts: the style texts to encode, as a list of strings
-            device: the PyTorch device we want the texts on
-            max_len: the maximum length of the text. Will throw bytes at the beginning
-            if it exceeds max_len
-    Returns:
-        (text, text_lens, style_lens), where:
-        text: a torch.Tensor of shape (batch_size, text_len) containing integers
-          0 <= i < 256
-        text_lens: a torch.Tensor of shape (batch_size,), giving the length of each byt
-          sequence
-        style_lens: a torch.Tensor of shape (batch_size,), giving the length of each
-          style prompt (style prompts are supposed to come first).  If no
-          style prompt here, just use zeros.
-    """
-    max_len = max(min(1200, max_len), 600)
-    
-    if random.random() > 0.9:
-        logging.info(f"Truncate to max len: {max_len}")
-
-    texts = [bytes(s, "UTF-8") for s in texts]
-    style_texts = [bytes(s, "UTF-8") for s in style_texts]
-    
-    N = len(texts)
-    text_lengths = [len(s) for s in texts]
-    style_lengths = [len(s) for s in style_texts]
-    total_lengths = [text_lengths[i]+style_lengths[i] for i in range(N)]
-    
-    total_max_len = max(total_lengths)
-    max_len = min(total_max_len, max_len) # the max_len after padding
-
-    texts = [texts[i][-(max_len - style_lengths[i]):] for i in range(N)] # truncate the text
-    texts = [style_texts[i] + texts[i] + (b"\0" * (max_len - len(style_texts[i]) - len(texts[i]))) for i in range(N)] # concat text
-    text = b"".join(texts)  # bytes array containing all of the texts
-    total_lengths = [min(max_len, total_lengths[i]) for i in range(N)]
-
-    text = torch.Tensor(numpy.frombuffer(text, dtype=numpy.uint8)).to(device)
-    text = text.to(dtype=torch.long)
-    text = text.reshape(N, max_len)
-    text_lens = torch.tensor(total_lengths).to(device)
-    style_lens = torch.tensor(style_lengths, dtype=torch.long, device=device)
-    # print(f"text={text}, text_lens={text_lens}, style_lens={style_lens}")
-    return text, text_lens, style_lens
-
-
 def compute_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
