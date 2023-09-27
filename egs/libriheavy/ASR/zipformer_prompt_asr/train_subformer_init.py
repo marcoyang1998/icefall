@@ -77,10 +77,11 @@ from joiner import Joiner
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_with_BERT_with_style import PromptedTransducer
+from model_with_subformer import PromptedTransducer, TextEmbedder
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat, Balancer, BiasNorm, Dropout3, ScaleGrad, SwooshR
 from subsampling import Conv2dSubsampling
+from subformer import Subformer
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -315,24 +316,44 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
-        "--text-encoder-type",
+        "--text-encoder-ckpt",
         type=str,
-        default="BERT",
-        choices=["BERT","BERT-large", "DistilBERT"],
-        help="Type of the text encoder",
+        required=False,
+        help="Path to the pretrained text encoder",
+    )
+    
+    parser.add_argument(
+        "--text-encoder-bpe-model",
+        type=str,
+        required=True,
+        help="Path to the BPE model of the text encoder",
+    )
+    
+    parser.add_argument(
+        "--text-encoder-causal",
+        type=str2bool,
+        required=True,
+        help="If the text encoder is causal or not",
     )
     
     parser.add_argument(
         "--text-encoder-adapter",
         type=str2bool,
         default=False,
-        help="An adapter for pre-trained BERT"
+        help="An adapter for pre-trained text encoder"
+    )
+    
+    parser.add_argument(
+        "--load-pretrained",
+        type=str2bool,
+        default=True,
     )
     
     parser.add_argument(
         "--freeze-text-encoder",
         type=str2bool,
         default=True,
+        help="If update the parameters of text encoder or not"
     )
     
     parser.add_argument(
@@ -755,57 +776,35 @@ class TextEmbedding(nn.Module):
 
 def get_text_encoder(params: AttributeDict) -> nn.Module:
     # Return a text encoder
-    if params.text_encoder_type == "BERT":
-        from transformers import BertModel
-        # This is a BERT-base-cased
-        logging.info("Loading pre-trained BERT-base-cased as text encoder")
-        if os.path.exists("data/models/bert-base-cased"):
-            model = BertModel.from_pretrained("data/models/bert-base-cased")
-        else:
-            model = BertModel.from_pretrained("bert-base-cased")
-        params.text_encoder_dim = 768
-    elif params.text_encoder_type == "BERT-large":
-        from transformers import BertModel
-        logging.info("Loading pre-trained BERT-large-uncased as text encoder")
-        if os.path.exists("data/models/bert-large-uncased"):
-            model = BertModel.from_pretrained("data/models/bert-large-uncased")
-        else:
-            model = BertModel.from_pretrained("bert-large-uncased")
-        params.text_encoder_dim = 1024
-    elif params.text_encoder_type == "DistilBERT":
-        from transformers import DistilBertModel
-        # This is a DistilBERT-base-cased
-        logging.info("Loading pre-trained DistilBERT-base-cased as text encoder")
-        model = DistilBertModel.from_pretrained("distilbert-base-cased")
-        params.text_encoder_dim = 768
-    else:
-        raise ValueError()
+    num_encoder_layers = "2,4,6,4,2"
+    feedforward_dim = "1024,1536,2048,1536,1024"
+    num_heads = "4,8,16,8,4"
+    encoder_dim = "256,384,512,384,256" 
+    encoder_structure = "S(S(S)S)S"
+    encoder_chunk_sizes = "128,1024"
+    encoder = Subformer(
+        structure=encoder_structure,
+        num_encoder_layers=_to_int_tuple(num_encoder_layers),
+        encoder_dim=_to_int_tuple(encoder_dim),
+        encoder_chunk_sizes=(_to_int_tuple(encoder_chunk_sizes),),
+        query_head_dim=_to_int_tuple("32"),
+        pos_dim=4,
+        value_head_dim=_to_int_tuple("16"),
+        num_heads=_to_int_tuple(num_heads),
+        feedforward_dim=_to_int_tuple(feedforward_dim),
+        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
+        warmup_batches=4000.0,
+        causal=params.text_encoder_causal,
+    )
         
-    return model
+    return encoder
 
 def get_tokenizer(params: AttributeDict):
     
-    if params.text_encoder_type == "BERT":
-        from transformers import BertTokenizer
-        # This is a BERT-base-cased
-        if os.path.exists("data/models/bert-base-cased"):
-            tokenizer = BertTokenizer.from_pretrained('data/models/bert-base-cased')
-        else:
-            tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
-    elif params.text_encoder_type == "BERT-large":
-        from transformers import BertTokenizer
-        # This is a BERT-large-uncased
-        if os.path.exists("data/models/bert-large-uncased"):
-            tokenizer = BertTokenizer.from_pretrained('data/models/bert-large-uncased')
-        else:
-            tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')        
-    elif params.text_encoder_type == "DistilBERT":
-        from transformers import DistilBertTokenizer
-        tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-cased')
-    else:
-        raise ValueError()
+    text_encoder_bpe = spm.SentencePieceProcessor()
+    text_encoder_bpe.load(params.text_encoder_bpe_model)
         
-    return tokenizer
+    return text_encoder_bpe
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
     encoder = Zipformer2(
@@ -826,7 +825,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         causal=params.causal,
         chunk_size=_to_int_tuple(params.chunk_size),
         left_context_frames=_to_int_tuple(params.left_context_frames),
-        memory_dim=params.text_encoder_dim, 
+        memory_dim=512, 
         memory_layer=params.memory_layer,
         memory_dropout_rate=params.memory_dropout_rate,
     )
@@ -854,12 +853,20 @@ def get_joiner_model(params: AttributeDict) -> nn.Module:
     )
     return joiner
 
+def get_text_embed(params: AttributeDict) -> nn.Module:
+    # This is the text embedding module for 
+    return TextEmbedder(
+        vocab_size=500,  # we encode the text as UTF-8 bytes
+        embedding_dim=256,
+    )
 
 def get_transducer_model(params: AttributeDict) -> nn.Module:
-    text_encoder = get_text_encoder(params)
-    
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
+    
+    text_encoder = get_text_encoder(params) # This should be Subformer model
+    text_embed = get_text_embed(params)
+    
     num_param = sum([p.numel() for p in text_encoder.parameters()])
     logging.info(f"Num params in text encoder: {num_param}")
     decoder = get_decoder_model(params)
@@ -868,7 +875,7 @@ def get_transducer_model(params: AttributeDict) -> nn.Module:
     if params.context_injection:
         from context_fuser import ContextFuser, SelfAttContextFuser
         context_fuser = SelfAttContextFuser(
-            embed_dim=params.text_encoder_dim,
+            embed_dim=512,
             nhead=4,
             context_dropout_rate=params.context_dropout_rate,
         )
@@ -876,27 +883,32 @@ def get_transducer_model(params: AttributeDict) -> nn.Module:
         logging.info(context_fuser)
     else:
         context_fuser = None
+        
+    # load the pre-trained text encoder
+    if params.load_pretrained:
+        logging.info(f"Loading pre-trained text encoder from {params.text_encoder_ckpt}")
+        state_dict = torch.load(params.text_encoder_ckpt, map_location="cpu")
+
+        text_encoder.load_state_dict(state_dict["encoder"])
+        text_embed.load_state_dict(state_dict["embed"])
+        
+        logging.info(f"Finished loading pre-trained text model")
 
     model = PromptedTransducer(
         encoder_embed=encoder_embed,
         encoder=encoder,
         text_encoder=text_encoder,
+        text_embed=text_embed,
         decoder=decoder,
         joiner=joiner,
         encoder_dim=int(max(params.encoder_dim.split(","))),
         decoder_dim=params.decoder_dim,
         joiner_dim=params.joiner_dim,
         vocab_size=params.vocab_size,
-        text_encoder_type=params.text_encoder_type,
-        text_encoder_adapter=params.text_encoder_adapter,
-        text_encoder_dim=params.text_encoder_dim,
-        freeze_text_encoder=params.freeze_text_encoder,
         context_fuser=context_fuser,
+        freeze_text_encoder=params.freeze_text_encoder
     )
-    
-    if params.text_encoder_adapter:
-        logging.info(f"Using adapter for BERT encoder")
-        logging.info(f"{model.text_encoder_adapter}")
+
     return model
 
 def load_backbone_ASR(params: AttributeDict, model: nn.Module) -> nn.Module:
@@ -920,13 +932,11 @@ def load_backbone_ASR(params: AttributeDict, model: nn.Module) -> nn.Module:
 def set_params_grad(model: nn.Module, update_modules: List[str]):
     """Set the requires_grad attribute for each parameter in the model
     Only set to True if the name matches `update_modules`
-    If `update_modules` is empty, does nothing.
 
     Args:
         model (nn.Module): The PromptASR model
         update_modules (List[str]): A list of modules to be updated
     """
-    
     if len(update_modules) == 0:
         return
     
@@ -1067,59 +1077,46 @@ def save_checkpoint(
         best_valid_filename = params.exp_dir / "best-valid-loss.pt"
         copyfile(src=filename, dst=best_valid_filename)
 
-def _encode_texts_as_bytes_with_tokenizer(
-    pre_texts: List[str], 
+def _encode_text_as_tokens(
+    pre_texts: List[str],
     style_texts: List[str],
-    tokenizer: spm.SentencePieceProcessor,
+    bpe_model: spm.SentencePieceProcessor,
     device: torch.device,
-    use_style_text: bool = True,
-    max_len: int=500,
-    no_limit: bool=False
-) -> Tuple[Dict, Tensor]:
-    """
-    Encode texts as bytes and then integer tensors.
-    Note that the style text will be added to the beginning of texts.
-    """
+    max_tokens: int=800,
+) -> Tuple[Tensor, Tensor]:
     batch_size = len(pre_texts)
-    max_len = min(max_len, 500)
     
-    if no_limit:
-        allowed_lens = [5000 - len(s) for s in style_texts]
-    else:
-        allowed_lens = [1000 - len(s) for s in style_texts]
-    truncated_pre_texts = [pre_texts[i][-allowed_lens[i]:] for i in range(batch_size)]
-    combined_text = [style_texts[i] + ' [SEP] ' + truncated_pre_texts[i] for i in range(batch_size)]
+    # encoded style texts
+    encoded_style_texts = bpe_model.encode(style_texts)
+    style_lens = [len(s) for s in encoded_style_texts]
     
-    encoded_style_texts = tokenizer(
-        style_texts,
-        return_tensors='pt',
-        padding=True,
-        truncation=True,
-        return_length=True,
-        max_length=max_len,
-    )
-    if use_style_text:
-        style_lens = encoded_style_texts["length"].to(device)
-    else:
-        style_lens = torch.zeros(len(style_texts)).to(device)
+    # encode pre texts
+    encoded_pre_texts = bpe_model.encode(pre_texts)
+    pre_text_lens = [len(s) for s in encoded_pre_texts]
     
-    # Use tokenizer to prepare input for text encoder
-    encoded_inputs = tokenizer(
-        combined_text,
-        return_tensors='pt',
-        padding=True,
-        truncation=True,
-        return_length=True,
-        max_length=max_len,
-    ).to(device)
+    allowed_tokens = [max_tokens - l for l in style_lens]
+    truncated_pre_text = [t[-l:] for t, l in zip(encoded_pre_texts, allowed_tokens)]
     
-    return encoded_inputs, style_lens
+    # tokens = bpe_model.encode(texts)
+    # tokens = [t[:max_len] for t in tokens]
     
+    tokens = [s + t for s, t in zip(encoded_style_texts, truncated_pre_text)]
+    tokens_lens = torch.tensor([len(t) + 1 for t in tokens], device=device).long()
+    style_lens = torch.tensor(style_lens, device=device).long()
+    
+    # add sos token
+    tokens = k2.RaggedTensor(tokens).to(device)
+    tokens_with_sos = add_sos(tokens, sos_id=0)
+    tokens_with_sos_padded = tokens_with_sos.pad(mode="constant", padding_value=0)
+    
+    return tokens_with_sos_padded, tokens_lens, style_lens
+
+   
 def compute_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
     sp: spm.SentencePieceProcessor,
-    tokenizer,
+    text_encoder_bpe_model: spm.SentencePieceProcessor,
     batch: dict,
     is_training: bool,
 ) -> Tuple[Tensor, MetricsTracker]:
@@ -1206,12 +1203,12 @@ def compute_loss(
         logging.info(f"Ref texts: {texts[0]}")
         logging.info(f"Style texts: {style_texts[0]}")
     
-    encoded_inputs, style_lens = _encode_texts_as_bytes_with_tokenizer(
+    pre_texts, pre_texts_lens, style_text_lens = _encode_text_as_tokens(
         pre_texts=pre_texts,
         style_texts=style_texts,
-        tokenizer=tokenizer,
-        use_style_text=params.use_style_prompt,
+        bpe_model=text_encoder_bpe_model,
         device=device,
+        max_tokens=max(supervisions["num_frames"])//1.5,
     )
     
     if random.random() < 0.02:
@@ -1266,7 +1263,7 @@ def compute_validation_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
     sp: spm.SentencePieceProcessor,
-    tokenizer,
+    text_encoder_bpe_model:spm.SentencePieceProcessor,
     valid_dl: torch.utils.data.DataLoader,
     world_size: int = 1,
 ) -> MetricsTracker:
@@ -1280,7 +1277,7 @@ def compute_validation_loss(
             params=params,
             model=model,
             sp=sp,
-            tokenizer=tokenizer,
+            text_encoder_bpe_model=text_encoder_bpe_model,
             batch=batch,
             is_training=False,
         )
@@ -1304,7 +1301,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     scheduler: LRSchedulerType,
     sp: spm.SentencePieceProcessor,
-    tokenizer,
+    text_encoder_bpe_model: spm.SentencePieceProcessor,
     train_dl: torch.utils.data.DataLoader,
     valid_dl: torch.utils.data.DataLoader,
     scaler: GradScaler,
@@ -1383,7 +1380,7 @@ def train_one_epoch(
                     params=params,
                     model=model,
                     sp=sp,
-                    tokenizer=tokenizer,
+                    text_encoder_bpe_model=text_encoder_bpe_model,
                     batch=batch,
                     is_training=True,
                 )
@@ -1505,7 +1502,7 @@ def train_one_epoch(
                 params=params,
                 model=model,
                 sp=sp,
-                tokenizer=tokenizer,
+                text_encoder_bpe_model=text_encoder_bpe_model,
                 valid_dl=valid_dl,
                 world_size=world_size,
             )
@@ -1572,8 +1569,8 @@ def run(rank, world_size, args):
     params.blank_id = sp.piece_to_id("<blk>")
     params.vocab_size = sp.get_piece_size()
     
-    # hard set these modules
     if params.only_finetune_cross_attention:
+        # hard set these modules
         params.update_modules = [
             ".attn_weights.",
             "src_attn1",
@@ -1589,7 +1586,7 @@ def run(rank, world_size, args):
     logging.info("About to create model")
     model = get_transducer_model(params)
     model = load_backbone_ASR(params, model=model)
-    tokenizer = get_tokenizer(params)
+    text_encoder_bpe_model = get_tokenizer(params)
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
@@ -1742,7 +1739,7 @@ def run(rank, world_size, args):
             optimizer=optimizer,
             scheduler=scheduler,
             sp=sp,
-            tokenizer=tokenizer,
+            text_encoder_bpe_model=text_encoder_bpe_model,
             train_dl=train_dl,
             valid_dl=valid_dl,
             scaler=scaler,
@@ -1810,7 +1807,7 @@ def scan_pessimistic_batches_for_oom(
     train_dl: torch.utils.data.DataLoader,
     optimizer: torch.optim.Optimizer,
     sp: spm.SentencePieceProcessor,
-    tokenizer,
+    text_encoder_bpe_model,
     params: AttributeDict,
 ):
     from lhotse.dataset import find_pessimistic_batches
@@ -1827,7 +1824,7 @@ def scan_pessimistic_batches_for_oom(
                     params=params,
                     model=model,
                     sp=sp,
-                    tokenizer=tokenizer,
+                    text_encoder_bpe_model=text_encoder_bpe_model,
                     batch=batch,
                     is_training=True,
                 )
