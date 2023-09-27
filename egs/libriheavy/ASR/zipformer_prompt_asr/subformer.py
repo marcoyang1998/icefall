@@ -23,7 +23,7 @@ import logging
 import torch
 import random
 from encoder_interface import EncoderInterface
-from scaling import (
+from subformer_scaling import (
     Balancer,
     BiasNorm,
     Dropout2,

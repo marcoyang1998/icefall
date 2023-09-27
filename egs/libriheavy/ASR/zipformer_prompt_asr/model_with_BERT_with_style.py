@@ -47,6 +47,7 @@ class PromptedTransducer(nn.Module):
         use_BERT: bool = True,
         text_encoder_type: str = "BERT",
         text_encoder_adapter: bool = False,
+        text_encoder_dim: int = 768,
         freeze_text_encoder: bool = True,
         context_fuser: nn.Module = None,
     ):
@@ -102,8 +103,8 @@ class PromptedTransducer(nn.Module):
         self.use_BERT = use_BERT # if the text encoder is a pre-trained BERT 
         self.context_fuser = context_fuser
         
-        assert text_encoder_type in ("BERT","DistilBERT", "BERT-UNCASED"), f"Unseen text_encoder type {text_encoder_type}"
-        self.text_encoder_dim = self.text_encoder.config.hidden_size if text_encoder_type in ("BERT", "BERT-UNCASED") else self.text_encoder.config.dim
+        # assert text_encoder_type in ("BERT","DistilBERT", "BERT-UNCASED"), f"Unseen text_encoder type {text_encoder_type}"
+        self.text_encoder_dim = text_encoder_dim
         self.freeze_text_encoder = freeze_text_encoder
         
         if text_encoder_adapter:

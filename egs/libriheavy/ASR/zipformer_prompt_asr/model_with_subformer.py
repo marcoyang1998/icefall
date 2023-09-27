@@ -231,6 +231,8 @@ class PromptedTransducer(nn.Module):
               lm_scale * lm_probs + am_scale * am_probs +
               (1-lm_scale-am_scale) * combined_probs
         """
+        if self.freeze_text_encoder:
+            self.text_encoder.eval()
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         assert y.num_axes == 2, y.num_axes

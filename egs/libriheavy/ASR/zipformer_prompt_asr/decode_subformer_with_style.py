@@ -63,7 +63,7 @@ from dataset import naive_triplet_text_sampling, random_shuffle_subset, get_subs
 from utils import get_facebook_biasing_list, brian_biasing_list, write_error_stats
 from ls_text_normalization import word_normalization
 from text_normalization import ref_text_normalization, remove_non_alphabetic, upper_only_alpha, upper_all_char, train_text_normalization
-from train_subformer_with_style import (
+from train_subformer_with_init import (
     add_model_arguments,
     get_params,
     get_tokenizer,
@@ -902,7 +902,8 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
-                )
+                ),
+                strict=False
             )
 
     model.to(device)

@@ -663,8 +663,8 @@ def decode_dataset(
                 )  # remove full-width symbols & some book marks
                 ref_words = ref_text.split()
                 this_batch.append((cut_id, ref_words, hyp_words))
-            if not params.use_ls_test_set:
-                results[name + "_" + book_name].extend(this_batch)
+            # if not params.use_ls_test_set:
+            #     results[name + "_" + book_name].extend(this_batch)
             results[name].extend(this_batch)
 
         num_cuts += len(texts)
@@ -913,7 +913,8 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
-                )
+                ),
+                strict=False,
             )
 
     model.to(device)
