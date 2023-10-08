@@ -260,7 +260,6 @@ class CodebookIndexExtractor:
             else:
                 # in case of ID mismatch, remap them
                 # get the mapping between audio and cut ID
-                logging
                 ori_id_map = {}
                 for id in cuts_ori.ids:
                     # some text normalization
