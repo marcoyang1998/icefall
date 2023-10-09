@@ -27,7 +27,7 @@ from icefall.utils import add_sos, make_pad_mask
 from scaling import ScaledLinear
 
 
-class AsrModel(nn.Module):
+class MultiKDModel(nn.Module):
     def __init__(
         self,
         encoder_embed: nn.Module,
@@ -71,8 +71,7 @@ class AsrModel(nn.Module):
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
-
-        self.use_transducer = use_transducer
+        self.encoder_dim = encoder_dim
         
 
     def forward_encoder(
