@@ -66,12 +66,10 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 from asr_datamodule import LibriSpeechAsrDataModule
-from decoder import Decoder
-from joiner import Joiner
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model import AsrModel
+from model import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -582,27 +580,6 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     )
     return encoder
 
-
-def get_decoder_model(params: AttributeDict) -> nn.Module:
-    decoder = Decoder(
-        vocab_size=params.vocab_size,
-        decoder_dim=params.decoder_dim,
-        blank_id=params.blank_id,
-        context_size=params.context_size,
-    )
-    return decoder
-
-
-def get_joiner_model(params: AttributeDict) -> nn.Module:
-    joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        decoder_dim=params.decoder_dim,
-        joiner_dim=params.joiner_dim,
-        vocab_size=params.vocab_size,
-    )
-    return joiner
-
-
 def get_model(params: AttributeDict) -> nn.Module:
     assert params.use_transducer or params.use_ctc, (
         f"At least one of them should be True, "
@@ -613,26 +590,12 @@ def get_model(params: AttributeDict) -> nn.Module:
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
-    if params.use_transducer:
-        decoder = get_decoder_model(params)
-        joiner = get_joiner_model(params)
-    else:
-        decoder = None
-        joiner = None
-
-    model = AsrModel(
+    model = MultiKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
-        decoder=decoder,
-        joiner=joiner,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        decoder_dim=params.decoder_dim,
-        vocab_size=params.vocab_size,
-        use_transducer=params.use_transducer,
-        use_ctc=params.use_ctc,
     )
     return model
-
 
 def load_checkpoint_if_available(
     params: AttributeDict,
@@ -938,10 +901,15 @@ def train_one_epoch(
             rank=0,
         )
 
+    import time
+    start = time.time()
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
-
+            logging.info(
+                f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+            )
+        torch.cuda.empty_cache()
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
 
@@ -1172,7 +1140,8 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    librispeech = LibriSpeechAsrDataModule(args)
+    librispeech = LibriSpeechAsrDataModule(args, device=device)
+    # librispeech = LibriSpeechAsrDataModule(args,)
 
     train_cuts = librispeech.train_clean_100_cuts()
     if params.full_libri:
@@ -1233,14 +1202,14 @@ def run(rank, world_size, args):
     valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
