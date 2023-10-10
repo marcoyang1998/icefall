@@ -17,6 +17,8 @@
 import random
 from typing import Callable, Dict, List, Optional, Union
 
+from utils import get_class_dict
+
 import numpy as np
 import torch
 from lhotse import validate
@@ -72,6 +74,8 @@ class MultiKDDataset(torch.utils.data.Dataset):
         self.beats = beats
         self.ecapa = ecapa
         self.whisper = whisper
+        
+        self.beats_class_dict = get_class_dict()
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
@@ -121,7 +125,6 @@ class MultiKDDataset(torch.utils.data.Dataset):
             else:
                 whisper_embeddings = torch.tensor(0.)
         
-        
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
@@ -139,13 +142,14 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 [
                     {
                         "text": supervision.text,
-                        "beats_embedding": beats_embeddings,
-                        "whisper_embedding": whisper_embeddings,
                     }
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions
                 ]
             ),
+            "beats_embedding": beats_embeddings,
+            "ecapa_embedding": ecapa_embeddings,
+            "whisper_embedding": whisper_embeddings,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)
