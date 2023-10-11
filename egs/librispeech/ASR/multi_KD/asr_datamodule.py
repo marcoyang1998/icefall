@@ -248,6 +248,12 @@ class LibriSpeechAsrDataModule:
             help="When enabled, select noise from MUSAN and mix it"
             "with training dataset. ",
         )
+        
+        group.add_argument(
+            "--use-musan-separately",
+            default=False,
+            help="Use musan as an individual dataset",
+        )
 
         group.add_argument(
             "--input-strategy",
@@ -415,13 +421,16 @@ class LibriSpeechAsrDataModule:
 
         logging.info("About to create dev dataset")
         if self.args.on_the_fly_feats:
-            validate = K2SpeechRecognitionDataset(
+            validate = MultiKDDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)), return_audio=self.args.return_audio),
                 return_cuts=self.args.return_cuts,
+                beats=self.beats,
+                ecapa=self.ecapa,
+                whisper=self.whisper,
             )
         else:
-            validate = K2SpeechRecognitionDataset(
+            validate = MultiKDDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
             )
@@ -435,7 +444,7 @@ class LibriSpeechAsrDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=2,
+            num_workers=0,
             persistent_workers=False,
         )
 
@@ -534,4 +543,11 @@ class LibriSpeechAsrDataModule:
         logging.info("About to get test-other cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_test-other.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def musan_cuts(self) -> CutSet:
+        logging.info("About to get musan cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "musan_cuts.jsonl.gz"
         )
