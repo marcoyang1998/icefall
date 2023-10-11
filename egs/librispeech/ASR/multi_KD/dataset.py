@@ -25,6 +25,7 @@ from lhotse import validate
 from lhotse.cut import CutSet
 from lhotse.dataset import K2SpeechRecognitionDataset
 from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
+from lhotse.supervision import SupervisionSegment
 from lhotse.utils import compute_num_frames, ifnone
 
 from torch.utils.data.dataloader import DataLoader, default_collate
@@ -112,9 +113,10 @@ class MultiKDDataset(torch.utils.data.Dataset):
         with torch.no_grad():
             if self.beats is not None:
                 beats_embeddings = self.beats.get_embeddings(audio=audios, audio_lens=audio_lens)
+                beats_embeddings = beats_embeddings.unsqueeze(1)
             else:
                 beats_embeddings = torch.tensor(0.)
-                
+            
             if self.ecapa is not None:
                 ecapa_embeddings = self.ecapa.get_embeddings(audio=audios, audio_lens=audio_lens)
             else:
@@ -128,7 +130,14 @@ class MultiKDDataset(torch.utils.data.Dataset):
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
-        supervision_intervals = self.input_strategy.supervision_intervals(cuts)
+        if len(cuts[0].supervisions) != 0:
+            supervision_intervals = self.input_strategy.supervision_intervals(cuts)
+        else:
+            for c in cuts:
+                c.supervisions = [
+                    SupervisionSegment(id=c.id, recording_id=c.id, start=c.start, duration=c.duration, channel=0, text="")
+                ]
+            supervision_intervals = self.input_strategy.supervision_intervals(cuts)
 
         # Apply all available transforms on the inputs, i.e. either audio or features.
         # This could be feature extraction, global MVN, SpecAugment, etc.
