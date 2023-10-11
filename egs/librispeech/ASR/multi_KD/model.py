@@ -21,10 +21,13 @@ from typing import Optional, Tuple
 import k2
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from encoder_interface import EncoderInterface
 
 from icefall.utils import add_sos, make_pad_mask
 from scaling import ScaledLinear
+
+from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
 
 
 class MultiKDModel(nn.Module):
@@ -73,6 +76,12 @@ class MultiKDModel(nn.Module):
         self.encoder = encoder
         self.encoder_dim = encoder_dim
         
+        self.beats_decoder = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Linear(encoder_dim, 527),
+        ) # 527 classes
+        self.ecapa_asp = AttentiveStatisticsPooling(channels=encoder_dim)
+        self.ecapa_linear = nn.Linear(2 * encoder_dim, 192 )# fixed 192-D vector
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -110,9 +119,9 @@ class MultiKDModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         y: k2.RaggedTensor,
-        prune_range: int = 5,
-        am_scale: float = 0.0,
-        lm_scale: float = 0.0,
+        teacher_beats_embeddings: torch.Tensor = None,
+        teacher_ecapa_embeddings: torch.Tensor = None,
+        teacher_whisper_embeddings: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -150,6 +159,44 @@ class MultiKDModel(nn.Module):
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
 
         # Compute encoder outputs
-        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
+        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens) # (N,T,C)
 
-        return encoder_out, encoder_out_lens
+        # beats loss
+        if teacher_beats_embeddings is not None:
+            beats_logits = self.forward_beats(encoder_out, encoder_out_lens)
+            
+            # normalize the teacher probabilities
+            teacher_beats_embeddings = teacher_beats_embeddings / teacher_beats_embeddings.sum(dim=-1).unsqueeze(-1).expand_as(teacher_beats_embeddings)
+            
+            beats_loss = F.kl_div(beats_logits, teacher_beats_embeddings, reduction="sum")
+        else:
+            beats_loss = torch.empty(0)
+        
+        # ecapa loss
+        if teacher_ecapa_embeddings is not None:
+            encoder_out = encoder_out.permute(0,2,1)
+            ecapa_embeddings = self.ecapa_asp(encoder_out) # (N,C,T)
+            ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
+            ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
+            ecapa_loss = 1 - F.cosine_similarity(ecapa_embeddings, teacher_ecapa_embeddings, dim=-1, eps=1e-6)
+            ecapa_loss = ecapa_loss.sum()
+        else:
+            ecapa_loss = torch.empty(0)
+        
+        whisper_loss = torch.empty(0)
+        
+        return beats_loss, ecapa_loss, whisper_loss
+    
+    def forward_beats(
+        self,
+		encoder_out: torch.Tensor,
+  		encoder_out_lens: torch.Tensor,
+	):
+        beats_logits = self.beats_decoder(encoder_out) # (N,)
+        padding_mask = make_pad_mask(encoder_out_lens) 
+        beats_logits[padding_mask] = 0
+        beats_logits = beats_logits.sum(dim=1)
+        beats_logits = beats_logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(beats_logits)
+        beats_logits = torch.log_softmax(beats_logits, dim=-1).unsqueeze(1)
+        
+        return beats_logits
