@@ -200,3 +200,15 @@ class MultiKDModel(nn.Module):
         beats_logits = torch.log_softmax(beats_logits, dim=-1).unsqueeze(1)
         
         return beats_logits
+    
+    def forward_ecapa(
+        self,
+		encoder_out: torch.Tensor,
+  		encoder_out_lens: torch.Tensor,
+    ):
+        encoder_out = encoder_out.permute(0,2,1)
+        ecapa_embeddings = self.ecapa_asp(encoder_out) # (N,C,T)
+        ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
+        ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
+        
+        return ecapa_embeddings
