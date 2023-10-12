@@ -43,6 +43,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
     AudioSamples,
     OnTheFlyFeatures,
 )
+from lhotse.supervision import SupervisionSegment
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
@@ -358,24 +359,6 @@ class LibriSpeechAsrDataModule:
             whisper=self.whisper,
         )
 
-        # if self.args.on_the_fly_feats:
-        #     # NOTE: the PerturbSpeed transform should be added only if we
-        #     # remove it from data prep stage.
-        #     # Add on-the-fly speed perturbation; since originally it would
-        #     # have increased epoch size by 3, we will apply prob 2/3 and use
-        #     # 3x more epochs.
-        #     # Speed perturbation probably should come first before
-        #     # concatenation, but in principle the transforms order doesn't have
-        #     # to be strict (e.g. could be randomized)
-        #     # transforms = [PerturbSpeed(factors=[0.9, 1.1], p=2/3)] + transforms   # noqa
-        #     # Drop feats to be on the safe side.
-        #     train = K2SpeechRecognitionDataset(
-        #         cut_transforms=transforms,
-        #         input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
-        #         input_transforms=input_transforms,
-        #         return_cuts=self.args.return_cuts,
-        #     )
-
         if self.args.drop_features:
             cuts_train = cuts_train.drop_features()
         
@@ -387,7 +370,18 @@ class LibriSpeechAsrDataModule:
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
                 drop_last=self.args.drop_last,
+                buffer_size=15000,
+                shuffle_buffer_size=25000,
             )
+        else:
+            logging.info("Using SingleCutSampler")
+            train_sampler = SimpleCutSampler(
+                cuts_train,
+                max_duration=self.args.max_duration,
+                shuffle=self.args.shuffle,
+                drop_last=self.args.drop_last,
+            )
+            
         logging.info("About to create train dataloader")
 
         if sampler_state_dict is not None:
@@ -481,10 +475,16 @@ class LibriSpeechAsrDataModule:
 
     @lru_cache()
     def train_clean_100_cuts(self) -> CutSet:
-        logging.info("About to get train-clean-100 cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_train-clean-100.jsonl.gz"
-        )
+        if self.args.use_musan_separately:
+            logging.info("About to get the shuffled train-clean-100 + musan cuts. No speed perturbation will be used.")
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_train_clean_100_no_sp_with_musan_shuf.jsonl.gz"
+            )
+        else:
+            logging.info("About to get train-clean-100 cuts")
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_train-clean-100.jsonl.gz"
+            )
 
     @lru_cache()
     def train_clean_360_cuts(self) -> CutSet:
@@ -548,6 +548,19 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def musan_cuts(self) -> CutSet:
         logging.info("About to get musan cuts")
-        return load_manifest_lazy(
+        cuts =  load_manifest_lazy(
             self.args.manifest_dir / "musan_cuts.jsonl.gz"
         )
+        dummy_text = "It is just a place holder and will not be used."
+        
+        new_cuts = []
+        for c in cuts:
+            assert len(c.supervisions) == 0
+            c.supervisions = [
+                SupervisionSegment(id=c.id, recording_id=c.id, start=0.0, duration=c.duration, channel=0, text=dummy_text)
+            ]
+            new_cuts.append(c)
+        new_cuts =CutSet.from_cuts(new_cuts)
+        
+        return new_cuts
+        
