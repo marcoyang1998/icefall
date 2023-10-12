@@ -55,5 +55,24 @@ class EcapaTeacher(Teacher):
         representation = self.model.encode_batch(
             wavs=audio,
             wav_lens=audio_lens/torch.max(audio_lens)
-        )[0]
+        )
         return representation
+    
+if __name__=="__main__":
+    import torchaudio
+    from BEATs import BEATs, BEATsConfig
+    
+    beats_ckpt = "data/models/BEATs/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt"
+    checkpoint = torch.load(beats_ckpt)
+    cfg = BEATsConfig(checkpoint['cfg'])
+    
+    BEATs_model = BEATs(cfg)
+    BEATs_model.load_state_dict(checkpoint['model'])
+    BEATs_model.eval()
+    
+    audio_input_16khz, _ = torchaudio.load('/star-fj/fangjun/open-source/icefall/egs/librispeech/ASR/download/LibriSpeech/train-clean-100/6078/54007/6078-54007-0023.flac')
+    padding_mask = torch.zeros_like(audio_input_16khz).bool()
+    
+    features = BEATs_model.extract_features(audio_input_16khz, padding_mask=padding_mask)[0]
+    print(features.shape)
+    

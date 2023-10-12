@@ -83,7 +83,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         Return a new batch, with the batch size automatically determined using the constraints
         of max_frames and max_cuts.
         """
-        validate_for_asr(cuts)
+        # validate_for_asr(cuts)
 
         # Sort the cuts by duration so that the first one determines the batch time dimensions.
         cuts = cuts.sort_by_duration(ascending=False)
@@ -107,6 +107,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         if len(input_tpl) == 4:
             # This means we are returning the audios as well
             inputs, input_lens, audios, audio_lens = input_tpl
+            assert len(audios) == inputs.shape[0]
         else:
             inputs, _ = input_tpl
         
@@ -130,14 +131,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
-        if len(cuts[0].supervisions) != 0:
-            supervision_intervals = self.input_strategy.supervision_intervals(cuts)
-        else:
-            for c in cuts:
-                c.supervisions = [
-                    SupervisionSegment(id=c.id, recording_id=c.id, start=c.start, duration=c.duration, channel=0, text="")
-                ]
-            supervision_intervals = self.input_strategy.supervision_intervals(cuts)
+        supervision_intervals = self.input_strategy.supervision_intervals(cuts)
 
         # Apply all available transforms on the inputs, i.e. either audio or features.
         # This could be feature extraction, global MVN, SpecAugment, etc.

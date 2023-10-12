@@ -56,6 +56,7 @@ import copy
 import logging
 import warnings
 from pathlib import Path
+import random
 from shutil import copyfile
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -352,53 +353,6 @@ def get_parser():
         default=600,
         help="Reference batch duration for purposes of adjusting batch counts for setting various "
         "schedules inside the model",
-    )
-
-    parser.add_argument(
-        "--context-size",
-        type=int,
-        default=2,
-        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
-    )
-
-    parser.add_argument(
-        "--prune-range",
-        type=int,
-        default=5,
-        help="The prune range for rnnt loss, it means how many symbols(context)"
-        "we are using to compute the loss",
-    )
-
-    parser.add_argument(
-        "--lm-scale",
-        type=float,
-        default=0.25,
-        help="The scale to smooth the loss with lm "
-        "(output of prediction network) part.",
-    )
-
-    parser.add_argument(
-        "--am-scale",
-        type=float,
-        default=0.0,
-        help="The scale to smooth the loss with am (output of encoder network)" "part.",
-    )
-
-    parser.add_argument(
-        "--simple-loss-scale",
-        type=float,
-        default=0.5,
-        help="To get pruning ranges, we will calculate a simple version"
-        "loss(joiner is just addition), this simple loss also uses for"
-        "training (as a regularization item). We will scale the simple loss"
-        "with this parameter before adding to the final loss.",
-    )
-
-    parser.add_argument(
-        "--ctc-loss-scale",
-        type=float,
-        default=0.2,
-        help="Scale for CTC loss.",
     )
 
     parser.add_argument(
@@ -745,6 +699,10 @@ def compute_loss(
     feature = feature.to(device)
 
     supervisions = batch["supervisions"]
+    beats_embeddings = batch["beats_embedding"] # (N,1,527)
+    ecapa_embeddings = batch["ecapa_embedding"]
+    whisper_embeddings = batch["whisper_embedding"]
+
     feature_lens = supervisions["num_frames"].to(device)
 
     batch_idx_train = params.batch_idx_train
@@ -755,35 +713,22 @@ def compute_loss(
     y = k2.RaggedTensor(y)
 
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss = model(
+        beats_loss, ecapa_loss, whisper_loss = model(
             x=feature,
             x_lens=feature_lens,
             y=y,
-            prune_range=params.prune_range,
-            am_scale=params.am_scale,
-            lm_scale=params.lm_scale,
+            teacher_beats_embeddings=beats_embeddings,
+            teacher_ecapa_embeddings=ecapa_embeddings,
+            teacher_whisper_embeddings=whisper_embeddings,
         )
 
         loss = 0.0
-
-        if params.use_transducer:
-            s = params.simple_loss_scale
-            # take down the scale on the simple loss from 1.0 at the start
-            # to params.simple_loss scale by warm_step.
-            simple_loss_scale = (
-                s
-                if batch_idx_train >= warm_step
-                else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
-            )
-            pruned_loss_scale = (
-                1.0
-                if batch_idx_train >= warm_step
-                else 0.1 + 0.9 * (batch_idx_train / warm_step)
-            )
-            loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
-
-        if params.use_ctc:
-            loss += params.ctc_loss_scale * ctc_loss
+        if beats_embeddings is not None:
+            loss += beats_loss
+        if ecapa_embeddings is not None:
+            loss += ecapa_loss.sum()
+        if whisper_embeddings != 0:
+            loss += whisper_loss
 
     assert loss.requires_grad == is_training
 
@@ -794,11 +739,9 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.use_transducer:
-        info["simple_loss"] = simple_loss.detach().cpu().item()
-        info["pruned_loss"] = pruned_loss.detach().cpu().item()
-    if params.use_ctc:
-        info["ctc_loss"] = ctc_loss.detach().cpu().item()
+    info["beats_loss"] = loss.detach().cpu().item()
+    info["ecapa_loss"] = ecapa_loss.detach().cpu().item()
+    # info["whisper_loss"] = whisper_loss.detach().cpu().item()
 
     return loss, info
 
@@ -901,17 +844,17 @@ def train_one_epoch(
             rank=0,
         )
 
-    import time
-    start = time.time()
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
-            logging.info(
-                f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-            )
-        torch.cuda.empty_cache()
+        
+        # torch.cuda.empty_cache()
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
+        
+        if random.random() < 0.1:
+            cut_ids = [c.id for c in batch["supervisions"]["cut"]]
+            logging.info(f"Cut IDs: {cut_ids}")
 
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
@@ -1141,12 +1084,15 @@ def run(rank, world_size, args):
         register_inf_check_hooks(model)
 
     librispeech = LibriSpeechAsrDataModule(args, device=device)
-    # librispeech = LibriSpeechAsrDataModule(args,)
 
     train_cuts = librispeech.train_clean_100_cuts()
     if params.full_libri:
         train_cuts += librispeech.train_clean_360_cuts()
         train_cuts += librispeech.train_other_500_cuts()
+    
+    # if params.use_musan_separately:
+    #     logging.info(f"Adding musan as an individual dataset")
+    #     train_cuts += librispeech.musan_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1162,6 +1108,9 @@ def run(rank, world_size, args):
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )
             return False
+        
+        if len(c.supervisions) == 0:
+            return True
 
         # In pruned RNN-T, we require that T >= S
         # where T is the number of feature frames after subsampling
@@ -1184,8 +1133,13 @@ def run(rank, world_size, args):
             return False
 
         return True
+    
+    def remove_speed_perturb(c: Cut):
+        # return True if keeping the cut, otherwise False
+        return ("sp1.1" not in c.id and "sp0.9" not in c.id)
 
     train_cuts = train_cuts.filter(remove_short_and_long_utt)
+    train_cuts = train_cuts.filter(remove_speed_perturb)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
