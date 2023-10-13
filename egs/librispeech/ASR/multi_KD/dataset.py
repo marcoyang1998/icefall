@@ -170,6 +170,91 @@ class MultiKDDataset(torch.utils.data.Dataset):
         return batch
 
 
+class SpeakerRecognitionDataset(torch.utils.data.Dataset):
+    """This is a dataset for Prompt ASR. It supports the following features:
+    1. Select a tuple of (text, pre_text, style_text) randomly from a
+    list of texts as supervisions.
+
+    """
+
+    def __init__(
+        self,
+        return_cuts: bool = False,
+        cut_transforms: List[Callable[[CutSet], CutSet]] = None,
+        input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
+        input_strategy: BatchIO = PrecomputedFeatures(),
+        ecapa: torch.nn.Module = None,
+    ):
+        """
+        Icefall MultiKD IterableDataset constructor. See https://github.com/lhotse-speech/lhotse/blob/master/lhotse/dataset/speech_recognition.py
+        for more details.
+
+        :param return_cuts: When ``True``, will additionally return a "cut" field in each batch with the Cut
+            objects used to create that batch.
+        :param cut_transforms: A list of transforms to be applied on each sampled batch,
+            before converting cuts to an input representation (audio/features).
+            Examples: cut concatenation, noise cuts mixing, etc.
+        :param input_transforms: A list of transforms to be applied on each sampled batch,
+            after the cuts are converted to audio/features.
+            Examples: normalization, SpecAugment, etc.
+        :param input_strategy: Converts cuts into a collated batch of audio/features.
+            By default, reads pre-computed features from disk.
+        :param text_sampling_func: Sampling a text as transcription from a list of texts.
+        """
+        super().__init__()
+        # Initialize the fields
+        self.return_cuts = return_cuts
+        self.cut_transforms = ifnone(cut_transforms, [])
+        self.input_transforms = ifnone(input_transforms, [])
+        self.input_strategy = input_strategy
+
+        self.ecapa = ecapa
+
+    def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
+        """
+        Return a new batch, with the batch size automatically determined using the constraints
+        of max_frames and max_cuts.
+        """
+
+        # Sort the cuts by duration so that the first one determines the batch time dimensions.
+        cuts = cuts.sort_by_duration(ascending=False)
+
+        # Optional CutSet transforms - e.g. padding, or speed perturbation that adjusts
+        # the supervision boundaries.
+        for tnfm in self.cut_transforms:
+            cuts = tnfm(cuts)
+
+        # Sort the cuts again after transforms
+        cuts = cuts.sort_by_duration(ascending=False)
+
+        # Get a tensor with batched feature matrices, shape (B, T, F)
+        # Collation performs auto-padding, if necessary.
+        input_tpl = self.input_strategy(cuts)
+        if len(input_tpl) == 3:
+            # An input strategy with fault tolerant audio reading mode.
+            # "cuts" may be a subset of the original "cuts" variable,
+            # that only has cuts for which we succesfully read the audio.
+            inputs, _, cuts = input_tpl
+        if len(input_tpl) == 4:
+            # This means we are returning the audios as well
+            inputs, input_lens, audios, audio_lens = input_tpl
+            assert len(audios) == inputs.shape[0]
+        else:
+            inputs, input_lens = input_tpl
+
+        batch = {
+            "inputs": inputs,
+            "supervisions": {
+                "num_frames": input_lens,
+            },
+        }
+        if self.return_cuts:
+            batch["supervisions"]["cut"] = [c for c in cuts]
+
+        return batch
+
+
+
 def validate_for_asr(cuts: CutSet) -> None:
     validate(cuts)
     tol = 2e-3  # 1ms
