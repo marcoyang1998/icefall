@@ -563,4 +563,17 @@ class LibriSpeechAsrDataModule:
         new_cuts =CutSet.from_cuts(new_cuts)
         
         return new_cuts
+    
+    @lru_cache()
+    def voxceleb1_cuts(self) -> CutSet:
+        logging.info("About to get voxceleb1 set.")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "data/fbank/cuts_vox1_test.jsonl.gz"
+        )
         
+    @lru_cache()
+    def voxceleb1_cuts(self) -> CutSet:
+        logging.info("About to get voxceleb2 set.")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "data/fbank/cuts_vox2_test.jsonl.gz"
+        )
