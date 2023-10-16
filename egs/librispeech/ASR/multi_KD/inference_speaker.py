@@ -106,6 +106,10 @@ def get_test_pairs(dataset_name: str):
     testing_pairs = [line.split() for line in lines]
     return testing_pairs
 
+def similarity(embed1, embed2, threshold=0.25):
+    sim = F.cosine_similarity(embed1, embed2, dim=-1, eps=1e-6)
+    return sim, sim > threshold
+
 def inference_one_batch(
     params: AttributeDict,
     model: nn.Module,
@@ -136,12 +140,14 @@ def decode_dataset(
 ) -> Dict:
     num_cuts = 0
     embedding_dict = {}
+    teacher_embedding_dict = {}
 
     try:
         num_batches = len(dl)
     except TypeError:
         num_batches = "?"
-    
+        
+        
     for batch_idx, batch in enumerate(dl):
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
         num_cuts += len(cut_ids)
@@ -153,11 +159,57 @@ def decode_dataset(
         )
         for id, embedding in zip(cut_ids, speaker_embeddings):
             embedding_dict[id] = embedding
+        if batch["ecapa_embeddings"].ndim > 1:
+            for id, embedding in zip(cut_ids, batch["ecapa_embeddings"]):
+                teacher_embedding_dict[id] = embedding
+        
         if batch_idx % 20 == 1:
             logging.info(f"Processed {num_cuts} cuts already.")
     logging.info(f"Finish collecting speaker embeddings")
         
-    return embedding_dict
+    return embedding_dict, teacher_embedding_dict
+
+def evaluate_embeddings(test_set: str, embedding_dict: Dict):
+    # Evaluate the embeddings
+    # Iterate over the testing pairs and tune the threshold
+    logging.info(f"-----------For testing set: {test_set}------------")
+    fa = 0
+    fr = 0
+    testing_pairs = get_test_pairs(test_set) 
+    logging.info(f"A total of {len(testing_pairs)} pairs.")
+    
+    scores = []
+    labels = []
+    
+    for i, pair in enumerate(testing_pairs):
+        label, spkr1, spkr2 = pair
+        embed1 = embedding_dict[spkr1]
+        embed2 = embedding_dict[spkr2]
+        
+        sim, prediction = similarity(embed1, embed2)
+        scores.append(sim.item())
+        labels.append(int(label))
+    
+    thresholds = [0.1 + i*0.01 for i in range(25)]
+    scores = torch.Tensor(scores)
+    label = torch.Tensor(labels)
+    logging.info("Tuning the thresholds")
+    results = []
+    for thres in thresholds:
+        prediction = scores > thres
+        tp = prediction[label == 1].sum()
+        fp = prediction[label == 0].sum()    
+        tn = (prediction[label == 0] == 0).sum()
+        fn = (prediction[label == 1] == 0).sum()
+        FAR = fp / (fp + tp)
+        FRR = fn / len(testing_pairs)
+        results.append([thres, FAR, FRR])
+        
+        logging.info("Threshold:{:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(thres, FAR, FRR))
+    sorted_results =  sorted(results, key=lambda x: abs(x[1] - x[2]))
+    op_thres, FAR, FRR = sorted_results[0]
+    logging.info("Operating threshold: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(op_thres, FAR, FRR))
+    logging.info(f"Finished testing for {test_set}")  
         
 @torch.no_grad()
 def main():
@@ -277,59 +329,24 @@ def main():
     voxceleb1_cuts = librispeech.voxceleb1_cuts()
     test_dl = librispeech.speaker_test_dataloaders(voxceleb1_cuts)
     
-    test_sets = ["VoxCeleb1-cleaned"]
+    test_sets = ["VoxCeleb1-cleaned",]
     
-    embedding_dict = decode_dataset(
+    embedding_dict, teacher_embedding_dict = decode_dataset(
         dl=test_dl,
         params=params,
         model=model,
     )
     
-    def similarity(embed1, embed2, threshold=0.25):
-        sim = F.cosine_similarity(embed1, embed2, dim=-1, eps=1e-6)
-        return sim, sim > threshold
-    
     for test_set in test_sets:
-        logging.info(f"-----------For testing set: {test_set}------------")
-        fa = 0
-        fr = 0
-        testing_pairs = get_test_pairs(test_set) 
-        logging.info(f"A total of {len(testing_pairs)} pairs.")
+        evaluate_embeddings(
+            test_set=test_set,
+            embedding_dict=embedding_dict,
+        )
         
-        scores = []
-        labels = []
-        
-        for i, pair in enumerate(testing_pairs):
-            label, spkr1, spkr2 = pair
-            embed1 = embedding_dict[spkr1]
-            embed2 = embedding_dict[spkr2]
-            
-            sim, prediction = similarity(embed1, embed2)
-            scores.append(sim.item())
-            labels.append(int(label))
-        
-        thresholds = [0.1 + i*0.01 for i in range(25)]
-        scores = torch.Tensor(scores)
-        label = torch.Tensor(labels)
-        import pdb; pdb.set_trace()
-        logging.info("Tuning the thresholds")
-        results = []
-        for thres in thresholds:
-            prediction = scores > thres
-            tp = prediction[label == 1].sum()
-            fp = prediction[label == 0].sum()    
-            tn = (prediction[label == 0] == 0).sum()
-            fn = (prediction[label == 1] == 0).sum()
-            FAR = fp / (fp + tp)
-            FRR = fn / len(testing_pairs)
-            results.append([thres, FAR, FRR])
-            
-            logging.info("Threshold:{:.2f}, FAR: {:.2f}, FRR: {:.2f}".format(thres, FAR, FRR))
-        import pdb; pdb.set_trace()
-        sorted_results =  sorted(results, key=lambda x: abs(x[1] - x[2]))
-        op_thres, FAR, FRR = sorted_results[0]
-        logging.info("Operating threshold: {:.2f}, FAR: {:.2f}, FRR: {:.2f}".format(op_thres, FAR, FRR))
-        logging.info(f"Finished testing for {test_set}")        
+        # evaluate_embeddings(
+        #     test_set=test_set,
+        #     embedding_dict=teacher_embedding_dict,
+        # )
         
     logging.info("Done!")
 

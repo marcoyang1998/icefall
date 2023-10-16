@@ -241,12 +241,20 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
             assert len(audios) == inputs.shape[0]
         else:
             inputs, input_lens = input_tpl
+            audios = None
+            
+        with torch.no_grad():
+            if self.ecapa is not None and audios is not None:
+                ecapa_embeddings = self.ecapa.get_embeddings(audio=audios, audio_lens=audio_lens)
+            else:
+                ecapa_embeddings = torch.tensor(0.)
 
         batch = {
             "inputs": inputs,
             "supervisions": {
                 "num_frames": input_lens,
             },
+            "ecapa_embeddings": ecapa_embeddings,
         }
         if self.return_cuts:
             batch["supervisions"]["cut"] = [c for c in cuts]

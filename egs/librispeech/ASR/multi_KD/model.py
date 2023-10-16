@@ -207,7 +207,8 @@ class MultiKDModel(nn.Module):
   		encoder_out_lens: torch.Tensor,
     ):
         encoder_out = encoder_out.permute(0,2,1)
-        ecapa_embeddings = self.ecapa_asp(encoder_out) # (N,C,T)
+        encoder_out_lens = encoder_out_lens / torch.max(encoder_out_lens)
+        ecapa_embeddings = self.ecapa_asp(encoder_out, encoder_out_lens) # (N,C,T)
         ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
         ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
         
