@@ -54,7 +54,9 @@ def main():
         audio_files = glob.glob(f"{dataset_dir}/*/*/*/*.wav")
         dataset = "vox1"
     elif "vox2" in dataset_dir:
-        audio_files = glob.glob(f"{dataset_dir}/*/*/*/*.m4a")
+        # need to first convert w4a to wav
+        # reference: https://gist.github.com/seungwonpark/4f273739beef2691cd53b5c39629d830
+        audio_files = glob.glob(f"{dataset_dir}/*/*/*/*.wav")
         dataset = "vox2"
     else:
         raise ValueError()
