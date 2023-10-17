@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from encoder_interface import EncoderInterface
 
-from icefall.utils import add_sos, make_pad_mask
+from icefall.utils import add_sos, make_pad_mask, AttributeDict
 from scaling import ScaledLinear
 
 from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
@@ -36,6 +36,10 @@ class MultiKDModel(nn.Module):
         encoder_embed: nn.Module,
         encoder: EncoderInterface,
         encoder_dim: int = 384,
+        whisper_dim: int = 768,
+        use_beats: bool = True,
+        use_ecapa: bool = True,
+        use_whisper: bool = True,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -76,12 +80,26 @@ class MultiKDModel(nn.Module):
         self.encoder = encoder
         self.encoder_dim = encoder_dim
         
-        self.beats_decoder = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(encoder_dim, 527),
-        ) # 527 classes
-        self.ecapa_asp = AttentiveStatisticsPooling(channels=encoder_dim)
-        self.ecapa_linear = nn.Linear(2 * encoder_dim, 192 )# fixed 192-D vector
+        # KD modules
+        if use_beats:
+            self.beats_decoder = nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Linear(encoder_dim, 527),
+            ) # 527 classes
+        else:
+            self.beats_decoder = None
+            
+        if use_ecapa:
+            self.ecapa_asp = AttentiveStatisticsPooling(channels=encoder_dim)
+            self.ecapa_linear = nn.Linear(2 * encoder_dim, 192 ) # fixed 192-D vector
+        else:
+            self.ecapa_asp = None
+            self.ecapa_linear = None
+            
+        if use_whisper:
+            self.whisper_projection = nn.Linear(encoder_dim, whisper_dim) # a linear transform
+        else:
+            self.whisper_projection = None
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -170,20 +188,29 @@ class MultiKDModel(nn.Module):
             
             beats_loss = F.kl_div(beats_logits, teacher_beats_embeddings, reduction="sum")
         else:
-            beats_loss = torch.empty(0)
+            beats_loss = None
         
         # ecapa loss
         if teacher_ecapa_embeddings is not None:
             encoder_out = encoder_out.permute(0,2,1)
             ecapa_embeddings = self.ecapa_asp(encoder_out) # (N,C,T)
+            encoder_out = encoder_out.permute(0,2,1)
             ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
             ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
             ecapa_loss = 1 - F.cosine_similarity(ecapa_embeddings, teacher_ecapa_embeddings, dim=-1, eps=1e-6)
             ecapa_loss = ecapa_loss.sum()
         else:
-            ecapa_loss = torch.empty(0)
+            ecapa_loss = None
         
-        whisper_loss = torch.empty(0)
+        if teacher_whisper_embeddings is not None:
+            whisper_embeddings = self.forward_whisper(encoder_out, encoder_out_lens)
+            teacher_whisper_embeddings = self.concat_successive_whisper_embeddings(
+                whisper_embeddings,
+                teacher_whisper_embeddings,
+            )
+            whisper_loss = F.l1_loss(whisper_embeddings, teacher_whisper_embeddings, reduction="mean")
+        else:
+            whisper_loss = None
         
         return beats_loss, ecapa_loss, whisper_loss
     
@@ -203,8 +230,8 @@ class MultiKDModel(nn.Module):
     
     def forward_ecapa(
         self,
-		encoder_out: torch.Tensor,
-  		encoder_out_lens: torch.Tensor,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
     ):
         encoder_out = encoder_out.permute(0,2,1)
         encoder_out_lens = encoder_out_lens / torch.max(encoder_out_lens)
@@ -213,3 +240,22 @@ class MultiKDModel(nn.Module):
         ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
         
         return ecapa_embeddings
+    
+    def forward_whisper(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+    ):
+        return self.whisper_projection(F.relu(encoder_out))
+    
+    @staticmethod
+    def concat_successive_whisper_embeddings(encoder_out, whisper_embeddings):
+        t_expected = encoder_out.shape[1]
+        N, T, C = whisper_embeddings.shape
+        
+        if T >= t_expected * 2:
+            whisper_embeddings = whisper_embeddings[:, : t_expected * 2, :]
+            
+        whisper_embeddings = whisper_embeddings.reshape(N, t_expected, C * 2)
+        assert whisper_embeddings.shape[1] == encoder_out.shape[1]
+        return whisper_embeddings

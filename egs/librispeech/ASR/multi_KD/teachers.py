@@ -103,6 +103,9 @@ class WhisperTeacher(Teacher):
     ):
         # return the embeddings of the input audio
         # audio_lens is the number of raw samples (i.e waveform)
+        device = next(self.model.parameters()).device
+        audio = audio.to(device)
+        audio_lens = audio_lens.to(device)
         mel = log_mel_spectrogram(audio) # (N, n_mel, T)
         
         if mel.ndim == 2:
