@@ -124,7 +124,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 ecapa_embeddings = torch.tensor(0.)
                 
             if self.whisper is not None:
-                whisper_embeddings = self.whisper.get_embeddings(audio=audios, audio_lens=audio_lens)
+                whisper_embeddings = self.whisper.get_embeddings(audio=audios, audio_lens=audio_lens) # (N,T,C)
             else:
                 whisper_embeddings = torch.tensor(0.)
         
