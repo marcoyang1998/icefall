@@ -190,7 +190,7 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         scores.append(sim.item())
         labels.append(int(label))
     
-    thresholds = [0.1 + i*0.01 for i in range(25)]
+    thresholds = [0.1 + i*0.01 for i in range(40)]
     scores = torch.Tensor(scores)
     label = torch.Tensor(labels)
     logging.info("Tuning the thresholds")
@@ -205,7 +205,7 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         FRR = fn / len(testing_pairs)
         results.append([thres, FAR, FRR])
         
-        logging.info("Threshold:{:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(thres, FAR, FRR))
+        logging.info("Threshold: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(thres, FAR, FRR))
     sorted_results =  sorted(results, key=lambda x: abs(x[1] - x[2]))
     op_thres, FAR, FRR = sorted_results[0]
     logging.info("Operating threshold: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(op_thres, FAR, FRR))
@@ -313,7 +313,8 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
-                )
+                ),
+                strict=False,
             )
 
     model.to(device)

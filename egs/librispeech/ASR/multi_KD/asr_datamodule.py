@@ -23,10 +23,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import whisper
 from BEATs import BEATs, BEATsConfig
-from dataset import MultiKDDataset
+from dataset import MultiKDDataset, SpeakerRecognitionDataset
 from speechbrain.pretrained import EncoderClassifier, SpeakerRecognition
-from teachers import Teacher, BEATsTeacher, EcapaTeacher
+from teachers import Teacher, BEATsTeacher, EcapaTeacher, WhisperTeacher
 
 import torch
 from lhotse import CutSet, Fbank, FbankConfig, load_manifest, load_manifest_lazy
@@ -79,14 +80,21 @@ class LibriSpeechAsrDataModule:
     def __init__(
         self, 
         args: argparse.Namespace,
-        device: torch.device = torch.device("cpu")
+        device: torch.device = torch.device("cpu"),
+        evaluation: bool = False,
     ):
         self.args = args
+        self.device = device
         
         # Teacher models
-        self.beats = self.load_beats(args, device)
-        self.ecapa = self.load_ecapa(args, device)
-        self.whisper = self.load_whisper(args, device)
+        if not evaluation:
+            self.beats = self.load_beats(args, device) if self.args.use_beats else None
+            self.ecapa = self.load_ecapa(args, device) if self.args.use_ecapa else None
+            self.whisper = self.load_whisper(args, device) if self.args.use_whisper else None
+        else:
+            self.beats = None
+            self.ecapa = None
+            self.whisper = None
 
     def load_beats(self, args, device):
         
@@ -113,7 +121,13 @@ class LibriSpeechAsrDataModule:
         return EcapaTeacher(model=classifier)
     
     def load_whisper(self, args, device):
-        return None
+        # Currently only load the encoder model
+        model = whisper.load_model(self.args.whisper_version, device=device)
+        model = model.encoder
+        
+        logging.info(f"Number of whisper params: {sum(p.numel()) for p in model.parameters()}")
+        
+        return WhisperTeacher(model=model)
     
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser):
@@ -278,9 +292,37 @@ class LibriSpeechAsrDataModule:
         )
         
         group.add_argument(
+            "--use-beats",
+            type=str2bool,
+            help="If use BEATs teacher model",
+            default=True,
+        )
+        
+        group.add_argument(
+            "--use-ecapa",
+            type=str2bool,
+            help="If use ECAPA teacher model",
+            default=True,
+        )
+        
+        group.add_argument(
+            "--use-whisper",
+            type=str2bool,
+            help="If use whisper teacher model",
+            default=True,
+        )
+        
+        group.add_argument(
             "--beats-ckpt",
             type=str,
             default="data/models/BEATs/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt",
+        )
+        
+        group.add_argument(
+            "--whisper-version",
+            type=str,
+            default="base",
+            help="The version of whisper to be used"
         )
 
     def train_dataloaders(
@@ -465,6 +507,31 @@ class LibriSpeechAsrDataModule:
             num_workers=self.args.num_workers,
         )
         return test_dl
+    
+    def speaker_test_dataloaders(self, cuts: CutSet) -> DataLoader:
+        logging.debug("About to create test dataset")
+        ecapa = self.load_ecapa(self.args, self.device)
+        test = SpeakerRecognitionDataset(
+            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)), return_audio=self.args.return_audio)
+            if self.args.on_the_fly_feats
+            else eval(self.args.input_strategy)(),
+            return_cuts=self.args.return_cuts,
+            ecapa=ecapa,
+        )
+        sampler = DynamicBucketingSampler(
+            cuts,
+            max_duration=self.args.max_duration,
+            shuffle=False,
+        )
+        logging.debug("About to create test dataloader")
+        test_dl = DataLoader(
+            test,
+            batch_size=None,
+            sampler=sampler,
+            num_workers=self.args.num_workers,
+        )
+        return test_dl
+
 
     @lru_cache()
     def train_clean_5_cuts(self) -> CutSet:
@@ -502,13 +569,19 @@ class LibriSpeechAsrDataModule:
 
     @lru_cache()
     def train_all_shuf_cuts(self) -> CutSet:
-        logging.info(
-            "About to get the shuffled train-clean-100, \
-            train-clean-360 and train-other-500 cuts"
-        )
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
-        )
+        if self.args.use_musan_separately:
+            logging.info("About to get the shuffled train-960 + musan cuts. No speed perturbation will be used.")
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-musan-shuf.jsonl.gz"
+            )
+        else:
+            logging.info(
+                "About to get the shuffled train-clean-100, \
+                train-clean-360 and train-other-500 cuts"
+            )
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
+            )
 
     @lru_cache()
     def dev_clean_2_cuts(self) -> CutSet:
@@ -568,12 +641,12 @@ class LibriSpeechAsrDataModule:
     def voxceleb1_cuts(self) -> CutSet:
         logging.info("About to get voxceleb1 set.")
         return load_manifest_lazy(
-            self.args.manifest_dir / "data/fbank/cuts_vox1_test.jsonl.gz"
+            self.args.manifest_dir / "cuts_vox1_test.jsonl.gz"
         )
         
     @lru_cache()
-    def voxceleb1_cuts(self) -> CutSet:
+    def voxceleb2_cuts(self) -> CutSet:
         logging.info("About to get voxceleb2 set.")
         return load_manifest_lazy(
-            self.args.manifest_dir / "data/fbank/cuts_vox2_test.jsonl.gz"
+            self.args.manifest_dir / "cuts_vox2_test.jsonl.gz"
         )
