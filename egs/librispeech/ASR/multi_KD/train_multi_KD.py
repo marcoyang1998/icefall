@@ -548,6 +548,9 @@ def get_model(params: AttributeDict) -> nn.Module:
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        use_beats=params.use_beats,
+        use_ecapa=params.use_ecapa,
+        use_whisper=params.use_whisper,
     )
     return model
 
@@ -727,7 +730,7 @@ def compute_loss(
             loss += beats_loss
         if ecapa_embeddings is not None:
             loss += ecapa_loss.sum()
-        if whisper_embeddings != 0:
+        if whisper_embeddings is not None:
             loss += whisper_loss
 
     assert loss.requires_grad == is_training
@@ -739,9 +742,12 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    info["beats_loss"] = loss.detach().cpu().item()
-    info["ecapa_loss"] = ecapa_loss.detach().cpu().item()
-    # info["whisper_loss"] = whisper_loss.detach().cpu().item()
+    if beats_loss is not None:
+        info["beats_loss"] = loss.detach().cpu().item()
+    if ecapa_loss is not None:
+        info["ecapa_loss"] = ecapa_loss.detach().cpu().item()
+    if whisper_loss is not None:
+        info["whisper_loss"] = whisper_loss.detach().cpu().item()
 
     return loss, info
 
@@ -848,7 +854,8 @@ def train_one_epoch(
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
         
-        # torch.cuda.empty_cache()
+        if params.on_the_fly_feats:
+            torch.cuda.empty_cache()
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
         
@@ -1085,14 +1092,10 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args, device=device)
 
-    train_cuts = librispeech.train_clean_100_cuts()
-    if params.full_libri:
-        train_cuts += librispeech.train_clean_360_cuts()
-        train_cuts += librispeech.train_other_500_cuts()
-    
-    # if params.use_musan_separately:
-    #     logging.info(f"Adding musan as an individual dataset")
-    #     train_cuts += librispeech.musan_cuts()
+    if not params.full_libri:
+        train_cuts = librispeech.train_clean_100_cuts()
+    else:
+        train_cuts = librispeech.train_all_shuf_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1154,6 +1157,7 @@ def run(rank, world_size, args):
 
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
+    valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     # if not params.print_diagnostics:
