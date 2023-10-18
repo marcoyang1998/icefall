@@ -702,9 +702,10 @@ def compute_loss(
     feature = feature.to(device)
 
     supervisions = batch["supervisions"]
-    beats_embeddings = batch["beats_embedding"] # (N,1,527)
-    ecapa_embeddings = batch["ecapa_embedding"]
-    whisper_embeddings = batch["whisper_embedding"]
+    beats_embeddings = batch["beats_embedding"].to(device) # (N,1,527)
+    ecapa_embeddings = batch["ecapa_embedding"].to(device)
+    whisper_embeddings = batch["whisper_embedding"].to(device)
+    whisper_embedding_lens = batch["whisper_embedding_lens"].to(device)
 
     feature_lens = supervisions["num_frames"].to(device)
 
@@ -723,6 +724,7 @@ def compute_loss(
             teacher_beats_embeddings=beats_embeddings,
             teacher_ecapa_embeddings=ecapa_embeddings,
             teacher_whisper_embeddings=whisper_embeddings,
+            teacher_whisper_embedding_lens=whisper_embedding_lens,
         )
 
         loss = 0.0
@@ -1113,7 +1115,10 @@ def run(rank, world_size, args):
             return False
         
         if len(c.supervisions) == 0:
-            return True
+            logging.warning(
+                f"Exclude cut with ID {c.id} from training as it does not have supervisions"
+            )
+            return False
 
         # In pruned RNN-T, we require that T >= S
         # where T is the number of feature frames after subsampling
