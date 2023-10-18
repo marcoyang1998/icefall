@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from lhotse import load_manifest
-from asr_datamodule import LibriSpeechAsrDataModule
+from kd_datamodule import LibriSpeechKDDataModule
 
 from train_multi_KD import add_model_arguments, get_model, get_params
 from utils import get_class_dict
@@ -214,7 +214,7 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
 @torch.no_grad()
 def main():
     parser = get_parser()
-    LibriSpeechAsrDataModule.add_arguments(parser)
+    LibriSpeechKDDataModule.add_arguments(parser)
     LmScorer.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
@@ -330,7 +330,7 @@ def main():
 
     # we need cut ids to store speaker embeddings
     args.return_cuts = True
-    librispeech = LibriSpeechAsrDataModule(args, device=device, evaluation=True)
+    librispeech = LibriSpeechKDDataModule(args, device=device, evaluation=True)
     
     voxceleb1_cuts = librispeech.voxceleb1_cuts()
     test_dl = librispeech.speaker_test_dataloaders(voxceleb1_cuts)
