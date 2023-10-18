@@ -9,9 +9,12 @@ from icefall.utils import AttributeDict, setup_logger
 import torch
 import torch.multiprocessing as mp
 import torchaudio
+from torch.utils.data import DataLoader
+
 from lhotse import load_manifest, CutSet
 from lhotse.cut import MonoCut
 from lhotse.features.io import NumpyHdf5Writer
+from lhotse.dataset import DynamicBucketingSampler, SimpleCutSampler, UnsupervisedWaveformDataset
 
 import torch.nn.functional as F
 import torchaudio
@@ -40,6 +43,12 @@ def get_parser():
         type=str,
         required=True,
         help="name of the manifest, e.g embeddings-dev-clean"
+    )
+    
+    parser.add_argument(
+        "--max-duration",
+        type=int,
+        default=1000,
     )
     
     parser.add_argument(
@@ -95,36 +104,62 @@ def extract_embeddings(
     if params.num_jobs > 1:
         manifest = manifest[rank]
         output_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'{params.model_id}_dev_clean-{rank}.h5'
+        embedding_path = params.embedding_dir / f'{params.model_id}_{params.output_manifest}-{rank}.h5'
     else:
         output_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'{params.model_id}_dev_clean.h5'
+        embedding_path =  params.embedding_dir / f'{params.model_id}_{params.output_manifest}.h5'
         
+    dataset = UnsupervisedWaveformDataset(
+        manifest
+    )
+    
+    sampler = DynamicBucketingSampler(
+        manifest,
+        max_duration=params.max_duration,
+        shuffle=False,
+        drop_last=False,
+    )
+    
+    dl = DataLoader(
+        dataset,
+        sampler=sampler,
+        batch_size=None,
+        num_workers=1,
+        persistent_workers=False,
+    )
+    
     new_cuts = []
+    num_cuts = 0
     
     # Compute the embeddings and save it
     with NumpyHdf5Writer(embedding_path) as writer:
         logging.info(f"Writing Ecapa embeddings to {embedding_path}")
-        for i, cut in enumerate(manifest):
-            source = cut.recording.sources[0].source
-            audio_input_16khz, _ = torchaudio.load(source)
-            audio_input_16khz = audio_input_16khz.to(device)
+        for i, batch in enumerate(dl):
+            cuts = batch["cuts"]
+            audio_input_16khz = batch["audio"].to(device)
+            audio_lens = batch["audio_lens"].to(device)
             
-            embeddings = model.encode_batch(audio_input_16khz).detach().to("cpu").numpy()
-            new_cut = MonoCut(
-                id=cut.id,
-                start=cut.start,
-                duration=cut.duration,
-                channel=cut.channel,
-            )
-            new_cut.ecapa_embedding = writer.store_array(
-                key=cut.id,
-                value=embeddings,
-            )
-            new_cuts.append(new_cut)
-            if i and i % 100 == 0:
-                logging.info(f"Cuts processed until now: {i}")
-    logging.info(f"Finished extracting Ecapa embeddings, processed a total of {i} cuts.")
+            embeddings = model.encode_batch(
+                wavs=audio_input_16khz,
+                wav_lens=audio_lens/torch.max(audio_lens)
+            ).detach().to("cpu").numpy()
+            
+            for idx, cut in enumerate(cuts):
+                new_cut = MonoCut(
+                    id=cut.id,
+                    start=cut.start,
+                    duration=cut.duration,
+                    channel=cut.channel,
+                )
+                new_cut.ecapa_embedding = writer.store_array(
+                    key=cut.id,
+                    value=embeddings[idx],
+                )
+                new_cuts.append(new_cut)
+                num_cuts += 1
+            if num_cuts and num_cuts % 100 == 0:
+                logging.info(f"Cuts processed until now: {num_cuts}")
+    logging.info(f"Finished extracting Ecapa embeddings, processed a total of {num_cuts} cuts.")
                 
     CutSet.from_cuts(new_cuts).to_jsonl(output_manifest)
     logging.info(f"Saved manifest to {output_manifest}")            

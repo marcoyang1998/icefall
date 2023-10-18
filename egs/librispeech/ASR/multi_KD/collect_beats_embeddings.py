@@ -4,14 +4,17 @@ import os
 import logging
 from pathlib import Path
 
-from icefall.utils import AttributeDict, setup_logger
+from icefall.utils import AttributeDict, setup_logger, make_pad_mask
 
 import torch
 import torch.multiprocessing as mp
 import torchaudio
+from torch.utils.data import DataLoader
+
 from lhotse import load_manifest, CutSet
 from lhotse.cut import MonoCut
 from lhotse.features.io import NumpyHdf5Writer
+from lhotse.dataset import DynamicBucketingSampler, SimpleCutSampler, UnsupervisedWaveformDataset
 
 from BEATs import BEATs, BEATsConfig
 from Tokenizers import TokenizersConfig, Tokenizers
@@ -25,6 +28,12 @@ def get_parser():
         "--num-jobs",
         type=int,
         default=1,
+    )
+    
+    parser.add_argument(
+        "--max-duration",
+        type=int,
+        default=1000,
     )
     
     parser.add_argument(
@@ -43,7 +52,7 @@ def get_parser():
     parser.add_argument(
         "--beats-ckpt",
         type=str,
-        default="data/models/BEATs/BEATs_iter3_plus_AS2M.pt",
+        default="data/models/BEATs/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt",
     )
     
     parser.add_argument(
@@ -64,12 +73,10 @@ def tokenize():
     BEATs_tokenizer.eval()
     BEATs_tokenizer.to("cuda")
 
-
     # tokenize the audio and generate the labels
     audio_input_16khz, _ = torchaudio.load('/star-xy/data/LibriSpeech/dev-clean/1272/128104/1272-128104-0000.flac')
     padding_mask = torch.zeros_like(audio_input_16khz).bool()
 
-    import pdb; pdb.set_trace()
     labels = BEATs_tokenizer.extract_labels(audio_input_16khz, padding_mask=padding_mask)
     print(labels)
     
@@ -92,6 +99,7 @@ def get_embeddings():
     representation = BEATs_model.extract_features(audio_input_16khz, padding_mask=padding_mask)[0]
     print(representation.shape)
 
+@torch.no_grad()
 def extract_embeddings(
     rank: int,
     manifest: str,
@@ -112,37 +120,62 @@ def extract_embeddings(
     cfg = BEATsConfig(checkpoint['cfg'])
     logging.info(f"Successfully load BEATs model.")
     
-    device = torch.device("cuda")
+    device = torch.device("cuda", rank)
     BEATs_model = BEATs(cfg)
     BEATs_model.load_state_dict(checkpoint['model'])
     BEATs_model.eval()
     BEATs_model.to(device)    
     
+    dataset = UnsupervisedWaveformDataset(
+        manifest
+    )
+    
+    sampler = DynamicBucketingSampler(
+        manifest,
+        max_duration=params.max_duration,
+        shuffle=False,
+        drop_last=False,
+    )
+    
+    dl = DataLoader(
+        dataset,
+        sampler=sampler,
+        batch_size=None,
+        num_workers=1,
+        persistent_workers=False,
+    )
+    
     new_cuts = []
+    num_cuts = 0
     
     with NumpyHdf5Writer(embedding_path) as writer:
         logging.info(f"Writing BEATs embeddings to {embedding_path}")
-        for i, cut in enumerate(manifest):
-            source = cut.recording.sources[0].source
-            audio_input_16khz, _ = torchaudio.load(source)
-            audio_input_16khz = audio_input_16khz.to(device)
-            padding_mask = torch.zeros_like(audio_input_16khz).bool().to(device)
+        for i, batch in enumerate(dl):
+            cuts = batch["cuts"]
+            audio_input_16khz = batch["audio"].to(device)
+            audio_lens = batch["audio_lens"].to(device)
+            padding_mask = make_pad_mask(audio_lens)
             
-            embeddings = BEATs_model.extract_features(audio_input_16khz, padding_mask=padding_mask)[0].detach().to("cpu").numpy()
-            new_cut = MonoCut(
-                id=cut.id,
-                start=cut.start,
-                duration=cut.duration,
-                channel=cut.channel,
-            )
-            new_cut.beats_embedding = writer.store_array(
-                key=cut.id,
-                value=embeddings,
-            )
-            new_cuts.append(new_cut)
-            if i and i % 100 == 0:
-                logging.info(f"Cuts processed until now: {i}")
-    logging.info(f"Finished extracting BEATs embeddings, processed a total of {i} cuts.")
+            embeddings = BEATs_model.extract_features(
+                audio_input_16khz, padding_mask=padding_mask
+            )[0].detach().to("cpu").numpy() # (N, C)
+            
+            for idx, cut in enumerate(cuts):
+                new_cut = MonoCut(
+                    id=cut.id,
+                    start=cut.start,
+                    duration=cut.duration,
+                    channel=cut.channel,
+                )
+                new_cut.beats_embedding = writer.store_array(
+                    key=cut.id,
+                    value=embeddings[idx],
+                )
+                new_cuts.append(new_cut)
+                num_cuts += 1
+            if num_cuts and num_cuts % 100 == 0:
+                logging.info(f"Cuts processed until now: {num_cuts}")
+    logging.info(f"Finished extracting BEATs embeddings, processed a total of {num_cuts} cuts.")
                 
     CutSet.from_cuts(new_cuts).to_jsonl(output_manifest)
     logging.info(f"Saved manifest to {output_manifest}")
