@@ -190,7 +190,7 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         scores.append(sim.item())
         labels.append(int(label))
     
-    thresholds = [0.1 + i*0.01 for i in range(40)]
+    thresholds = [0.1 + i*0.005 for i in range(80)]
     scores = torch.Tensor(scores)
     label = torch.Tensor(labels)
     logging.info("Tuning the thresholds")
@@ -229,8 +229,13 @@ def main():
     else:
         params.suffix = f"epoch-{params.epoch}-avg-{params.avg}"
         
+    if params.use_averaged_model:
+        params.suffix += "-use-averaged-model"
+        
     setup_logger(f"{params.res_dir}/log-decode-{params.suffix}")
     logging.info("Evaluation started")
+    
+    logging.info(params)
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
@@ -267,7 +272,7 @@ def main():
                     filenames.append(f"{params.exp_dir}/epoch-{i}.pt")
             logging.info(f"averaging {filenames}")
             model.to(device)
-            model.load_state_dict(average_checkpoints(filenames, device=device))
+            model.load_state_dict(average_checkpoints(filenames, device=device), strict=False)
     else:
         if params.iter > 0:
             filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[

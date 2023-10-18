@@ -93,7 +93,7 @@ class WhisperTeacher(Teacher):
             x = block(x)
         
         x = self.model.ln_post(x)
-        return x
+        return x, x_lens
             
     @torch.no_grad()
     def get_embeddings(
@@ -113,12 +113,12 @@ class WhisperTeacher(Teacher):
         
         mel_lens = torch.floor(audio_lens/160).int()
         assert mel_lens.max() <= mel.size(-1)
-        audio_features = self.forward_encoder(
+        features, feature_lens = self.forward_encoder(
             mel,
             mel_lens,
         )
         
-        return audio_features
+        return features, feature_lens
         
     
     
