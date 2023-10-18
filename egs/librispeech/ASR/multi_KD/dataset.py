@@ -22,9 +22,10 @@ from utils import get_class_dict
 import numpy as np
 import torch
 from lhotse import validate
-from lhotse.cut import CutSet
+from lhotse.cut import CutSet, MonoCut
 from lhotse.dataset import K2SpeechRecognitionDataset
 from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
+from lhotse.dataset.collation import collate_custom_field
 from lhotse.supervision import SupervisionSegment
 from lhotse.utils import compute_num_frames, ifnone
 
@@ -44,6 +45,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
+        on_the_fly_feats: bool = False,
         beats: torch.nn.Module = None,
         ecapa: torch.nn.Module = None,
         whisper: torch.nn.Module = None,
@@ -70,6 +72,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         self.cut_transforms = ifnone(cut_transforms, [])
         self.input_transforms = ifnone(input_transforms, [])
         self.input_strategy = input_strategy
+        self.on_the_fly_feats = on_the_fly_feats
         
         # The teacher models
         self.beats = beats
@@ -111,7 +114,8 @@ class MultiKDDataset(torch.utils.data.Dataset):
         else:
             inputs, _ = input_tpl
         
-        with torch.no_grad():
+        # Extract the teacher embeddings on the fly
+        if self.on_the_fly_feats:
             if self.beats is not None:
                 beats_embeddings = self.beats.get_embeddings(audio=audios, audio_lens=audio_lens)
                 beats_embeddings = beats_embeddings.unsqueeze(1)
@@ -124,9 +128,27 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 ecapa_embeddings = torch.tensor(0.)
                 
             if self.whisper is not None:
-                whisper_embeddings = self.whisper.get_embeddings(audio=audios, audio_lens=audio_lens) # (N,T,C)
+                whisper_embeddings, _ = self.whisper.get_embeddings(audio=audios, audio_lens=audio_lens) # (N,T,C)
             else:
                 whisper_embeddings = torch.tensor(0.)
+                whisper_embedding_lens = torch.tensor(0.)
+        else:
+            # collate the pre-computed teacher embeddings
+            cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+            
+            beats_embeddings = collate_custom_field(
+                cuts_pre_mixed, "beats_embedding", pad_value=-100
+            ) # (N,C)
+            beats_embeddings = beats_embeddings.unsqueeze(1)
+            
+            ecapa_embeddings = collate_custom_field(
+                cuts_pre_mixed, "ecapa_embedding", pad_value=-100
+            ) # (N,C)
+            
+            whisper_embeddings, whisper_embedding_lens = collate_custom_field(
+                cuts_pre_mixed, "whisper_embedding", pad_value=-100
+            ) # (B,T,C), (B, )
+            
         
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
@@ -153,6 +175,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
             "beats_embedding": beats_embeddings,
             "ecapa_embedding": ecapa_embeddings,
             "whisper_embedding": whisper_embeddings,
+            "whisper_embedding_lens": whisper_embedding_lens,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)

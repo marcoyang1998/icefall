@@ -86,8 +86,8 @@ class LibriSpeechAsrDataModule:
         self.args = args
         self.device = device
         
-        # Teacher models
-        if not evaluation:
+        # Only load the teacher if using on the fly features
+        if not evaluation and self.args.on_the_fly_feats:
             self.beats = self.load_beats(args, device) if self.args.use_beats else None
             self.ecapa = self.load_ecapa(args, device) if self.args.use_ecapa else None
             self.whisper = self.load_whisper(args, device) if self.args.use_whisper else None
@@ -103,7 +103,7 @@ class LibriSpeechAsrDataModule:
     
         BEATs_model = BEATs(cfg)
         BEATs_model.load_state_dict(checkpoint['model'])
-        BEATs_model.eval()
+        BEATs_model.eval() # deactivate dropout/normalization
         BEATs_model.to(torch.float16)
         BEATs_model.to(device)
         logging.info(f"Successfully load BEATs model.")
@@ -124,6 +124,7 @@ class LibriSpeechAsrDataModule:
         # Currently only load the encoder model
         model = whisper.load_model(self.args.whisper_version, device=device)
         model = model.encoder
+        model.eval()
         
         logging.info(f"Number of whisper params: {sum(p.numel()) for p in model.parameters()}")
         
@@ -308,7 +309,7 @@ class LibriSpeechAsrDataModule:
         group.add_argument(
             "--use-whisper",
             type=str2bool,
-            help="If use whisper teacher model",
+            help="If use whisper teacher model when collecting batch;",
             default=True,
         )
         
@@ -342,7 +343,7 @@ class LibriSpeechAsrDataModule:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest(self.args.manifest_dir / "musan_cuts.jsonl.gz")
-            if self.args.drop_features:
+            if self.args.drop_features and self.args.on_the_fly_feats:
                 cuts_musan = cuts_musan.drop_features()
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
@@ -391,17 +392,27 @@ class LibriSpeechAsrDataModule:
             logging.info("Disable SpecAugment")
 
         logging.info("About to create train dataset")
-        train = MultiKDDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)), return_audio=self.args.return_audio),
-            cut_transforms=transforms,
-            input_transforms=input_transforms,
-            return_cuts=self.args.return_cuts,
-            beats=self.beats,
-            ecapa=self.ecapa,
-            whisper=self.whisper,
-        )
+        if self.args.on_the_fly_feats:
+            train = MultiKDDataset(
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)), return_audio=self.args.return_audio),
+                cut_transforms=transforms,
+                input_transforms=input_transforms,
+                return_cuts=self.args.return_cuts,
+                on_the_fly_feats=True,
+                beats=self.beats,
+                ecapa=self.ecapa,
+                whisper=self.whisper,
+            )
+        else:
+            train = MultiKDDataset(
+                input_strategy=PrecomputedFeatures(),
+                cut_transforms=transforms,
+                input_transforms=input_transforms,
+                return_cuts=self.args.return_cuts,
+                on_the_fly_feats=False,
+            )
 
-        if self.args.drop_features:
+        if self.args.drop_features and self.args.on_the_fly_feats:
             cuts_train = cuts_train.drop_features()
         
         if self.args.bucketing_sampler:
@@ -416,7 +427,7 @@ class LibriSpeechAsrDataModule:
                 shuffle_buffer_size=25000,
             )
         else:
-            logging.info("Using SingleCutSampler")
+            logging.info("Using SimpleCutSampler")
             train_sampler = SimpleCutSampler(
                 cuts_train,
                 max_duration=self.args.max_duration,
@@ -439,7 +450,7 @@ class LibriSpeechAsrDataModule:
             train,
             sampler=train_sampler,
             batch_size=None,
-            num_workers=self.args.num_workers,
+            num_workers=self.args.num_workers if not self.args.on_the_fly_feats else 0,
             persistent_workers=False,
             worker_init_fn=worker_init_fn,
         )
@@ -480,7 +491,7 @@ class LibriSpeechAsrDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=0,
+            num_workers=self.args.num_workers if not self.args.on_the_fly_feats else 0,
             persistent_workers=False,
         )
 
@@ -542,11 +553,16 @@ class LibriSpeechAsrDataModule:
 
     @lru_cache()
     def train_clean_100_cuts(self) -> CutSet:
-        if self.args.use_musan_separately:
-            logging.info("About to get the shuffled train-clean-100 + musan cuts. No speed perturbation will be used.")
-            return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_train_clean_100_no_sp_with_musan_shuf.jsonl.gz"
-            )
+        if not self.args.on_the_fly_feats:
+            if self.args.use_musan_separately:
+                logging.info("About to get the shuffled train-clean-100 + musan cuts. No speed perturbation will be used.")
+                return load_manifest_lazy(
+                    self.args.manifest_dir / "librispeech_cuts_train_clean_100_no_sp_with_musan_shuf.jsonl.gz"
+                )
+            else:
+                return load_manifest_lazy(
+                    self.args.manifest_dir / "librispeech_cuts_train-clean-100-with-3-embeddings.jsonl.gz"
+                )
         else:
             logging.info("About to get train-clean-100 cuts")
             return load_manifest_lazy(
@@ -569,11 +585,18 @@ class LibriSpeechAsrDataModule:
 
     @lru_cache()
     def train_all_shuf_cuts(self) -> CutSet:
-        if self.args.use_musan_separately:
-            logging.info("About to get the shuffled train-960 + musan cuts. No speed perturbation will be used.")
-            return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-musan-shuf.jsonl.gz"
-            )
+        if not self.args.on_the_fly_feats:
+            if self.args.use_musan_separately:
+                logging.info("About to get the shuffled train-960 + musan cuts. No speed perturbation will be used.")
+                return load_manifest_lazy(
+                    self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-musan-shuf.jsonl.gz"
+                )
+            else:
+                logging.info("About to get the shuffled train-960 with 3 teacher embeddings.")
+                return load_manifest_lazy(
+                    self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-musan-shuf.jsonl.gz"
+                )
+                
         else:
             logging.info(
                 "About to get the shuffled train-clean-100, \
@@ -593,16 +616,26 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def dev_clean_cuts(self) -> CutSet:
         logging.info("About to get dev-clean cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
-        )
+        if not self.args.on_the_fly_feats:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-clean-with-3-embeddings.jsonl.gz"
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
+            )
 
     @lru_cache()
     def dev_other_cuts(self) -> CutSet:
         logging.info("About to get dev-other cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
-        )
+        if not self.args.on_the_fly_feats:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-other-with-3-embeddings.jsonl.gz"
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
+            )
 
     @lru_cache()
     def test_clean_cuts(self) -> CutSet:
