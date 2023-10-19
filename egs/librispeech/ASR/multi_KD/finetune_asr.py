@@ -57,7 +57,7 @@ import logging
 import warnings
 from pathlib import Path
 from shutil import copyfile
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import k2
 import optim
@@ -80,8 +80,7 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from train_multi_KD import get_encoder_embed
-from train_multi_KD import get_encoder_model
+from train_multi_KD import get_encoder_embed, get_encoder_model
 
 from zipformer import Zipformer2
 
@@ -162,6 +161,13 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="Fine-tuning from which checkpoint (a path to a .pt file)",
+    )
+    
+    parser.add_argument(
+        "--freeze-encoder",
+        type=str2bool,
+        default=False,
+        help="If freeze the parameters in encoder and encoder_embed and set them to eval() mode",
     )
 
 
@@ -673,6 +679,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
+        freeze_encoder=params.freeze_encoder,
     )
     return model
 
@@ -774,8 +781,8 @@ def load_model_params(
         dst_state_dict = model.state_dict()
         for module in init_modules:
             logging.info(f"Loading parameters starting with prefix {module}")
-            src_keys = [k for k in src_state_dict.keys() if k.startswith(module)]
-            dst_keys = [k for k in dst_state_dict.keys() if k.startswith(module)]
+            src_keys = [k for k in src_state_dict.keys() if k.startswith(module.strip() + ".")]
+            dst_keys = [k for k in dst_state_dict.keys() if k.startswith(module.strip() + ".")]
             assert set(src_keys) == set(dst_keys)  # two sets should match exactly
             for key in src_keys:
                 dst_state_dict[key] = src_state_dict.pop(key)
@@ -1219,18 +1226,31 @@ def run(rank, world_size, args):
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
 
-    assert params.start_epoch > 0, params.start_epoch
-    checkpoints = load_checkpoint_if_available(
-        params=params, model=model, model_avg=model_avg
-    )
+    # load model parameters for model fine-tuning
+    if params.do_finetune:
+        modules = params.init_modules.split(",") if params.init_modules else None
+        checkpoints = load_model_params(
+            ckpt=params.finetune_ckpt, model=model, init_modules=modules
+        )
+        if rank == 0:
+            # model_avg is only used with rank 0
+            model_avg = copy.deepcopy(model).to(torch.float64)
+    else:
+        assert params.start_epoch > 0, params.start_epoch
+        checkpoints = load_checkpoint_if_available(
+            params=params, model=model, model_avg=model_avg
+        )
 
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
+    freeze_modules = ["encoder.", "encoder_embed."] # manually set the freezing parameters
     optimizer = ScaledAdam(
-        get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
+        get_parameter_groups_with_lrs(
+            model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules
+        ),
         lr=params.base_lr,  # should have no effect
         clipping_scale=2.0,
     )
@@ -1260,10 +1280,10 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args)
 
-    train_cuts = librispeech.train_clean_100_cuts()
-    if params.full_libri:
-        train_cuts += librispeech.train_clean_360_cuts()
-        train_cuts += librispeech.train_other_500_cuts()
+    if not params.full_libri:
+        train_cuts = librispeech.train_clean_100_cuts()
+    else:
+        train_cuts = librispeech.train_all_shuf_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1319,14 +1339,14 @@ def run(rank, world_size, args):
     valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
@@ -1466,10 +1486,6 @@ def main():
         mp.spawn(run, args=(world_size, args), nprocs=world_size, join=True)
     else:
         run(rank=0, world_size=1, args=args)
-
-
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
 
 if __name__ == "__main__":
     main()

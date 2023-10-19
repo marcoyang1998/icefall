@@ -277,6 +277,7 @@ class AsrModel(nn.Module):
         vocab_size: int = 500,
         use_transducer: bool = True,
         use_ctc: bool = False,
+        freeze_encoder: bool = False,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -306,6 +307,8 @@ class AsrModel(nn.Module):
             It is used when use_transducer is True.
           use_transducer:
             Whether use transducer head. Default: True.
+          freeze_encoder:
+            Whether to freeze the parameters in encoder and encoder_embed
           use_ctc:
             Whether use CTC head. Default: False.
         """
@@ -348,6 +351,8 @@ class AsrModel(nn.Module):
                 nn.Linear(encoder_dim, vocab_size),
                 nn.LogSoftmax(dim=-1),
             )
+            
+        self.freeze_encoder = freeze_encoder
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -561,7 +566,11 @@ class AsrModel(nn.Module):
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
 
         # Compute encoder outputs
-        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
+        with torch.set_grad_enabled(not self.freeze_encoder):
+            if self.freeze_encoder: # If freezing the encoder, set them to eval mode
+                self.encoder.eval()
+                self.encoder_embed.eval()
+            encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
 
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1]
