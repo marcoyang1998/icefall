@@ -208,7 +208,7 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         logging.info("Threshold: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(thres, FAR, FRR))
     sorted_results =  sorted(results, key=lambda x: abs(x[1] - x[2]))
     op_thres, FAR, FRR = sorted_results[0]
-    logging.info("Operating threshold: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(op_thres, FAR, FRR))
+    logging.info("Operating threshold for {}: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(test_set, op_thres, FAR, FRR))
     logging.info(f"Finished testing for {test_set}")  
         
 @torch.no_grad()
@@ -332,13 +332,16 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechKDDataModule(args, device=device, evaluation=True)
     
+    voxceleb1_test_cuts = librispeech.voxceleb1_test_cuts()
     voxceleb1_cuts = librispeech.voxceleb1_cuts()
-    test_dl = librispeech.speaker_test_dataloaders(voxceleb1_cuts)
+    voxceleb1_cuts += voxceleb1_test_cuts
     
-    test_sets = ["VoxCeleb1-cleaned",]
+    vox1_dl = librispeech.speaker_test_dataloaders(voxceleb1_cuts)
+    
+    test_sets = ["VoxCeleb1-cleaned", "VoxCeleb1-E-cleaned", "VoxCeleb1-H-cleaned"]
     
     embedding_dict, teacher_embedding_dict = decode_dataset(
-        dl=test_dl,
+        dl=vox1_dl,
         params=params,
         model=model,
     )
