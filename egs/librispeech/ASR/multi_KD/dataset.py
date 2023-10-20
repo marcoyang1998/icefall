@@ -194,9 +194,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
 
 
 class SpeakerRecognitionDataset(torch.utils.data.Dataset):
-    """This is a dataset for Prompt ASR. It supports the following features:
-    1. Select a tuple of (text, pre_text, style_text) randomly from a
-    list of texts as supervisions.
+    """This is a dataset for Speaker verification. It supports the following features:
 
     """
 
@@ -207,6 +205,7 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
         ecapa: torch.nn.Module = None,
+        spkr2id: Dict = None
     ):
         """
         Icefall MultiKD IterableDataset constructor. See https://github.com/lhotse-speech/lhotse/blob/master/lhotse/dataset/speech_recognition.py
@@ -241,6 +240,8 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
 
         # Sort the cuts by duration so that the first one determines the batch time dimensions.
         cuts = cuts.sort_by_duration(ascending=False)
+        for c in cuts:
+            assert len(c.supervisions) == 1, "Assume all cuts having exact one supervision"
 
         # Optional CutSet transforms - e.g. padding, or speed perturbation that adjusts
         # the supervision boundaries.
@@ -265,6 +266,17 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
         else:
             inputs, input_lens = input_tpl
             audios = None
+        
+        # Get a dict of tensors that encode the positional information about supervisions
+        # in the batch of feature matrices. The tensors are named "sequence_idx",
+        # "start_frame/sample" and "num_frames/samples".
+        supervision_intervals = self.input_strategy.supervision_intervals(cuts)
+
+        # Apply all available transforms on the inputs, i.e. either audio or features.
+        # This could be feature extraction, global MVN, SpecAugment, etc.
+        segments = torch.stack(list(supervision_intervals.values()), dim=1)
+        for tnfm in self.input_transforms:
+            inputs = tnfm(inputs, supervision_segments=segments)
             
         with torch.no_grad():
             if self.ecapa is not None and audios is not None:
@@ -276,11 +288,15 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
             "inputs": inputs,
             "supervisions": {
                 "num_frames": input_lens,
+                "speaker": [supervision.speaker for sequence_idx, cut in enumerate(cuts) for supervision in cut.supervisions],
             },
             "ecapa_embeddings": ecapa_embeddings,
         }
+        batch["supervisions"].update(supervision_intervals)
         if self.return_cuts:
-            batch["supervisions"]["cut"] = [c for c in cuts]
+            batch["supervisions"]["cut"] = [
+                cut for cut in cuts for sup in cut.supervisions
+            ]
 
         return batch
 
