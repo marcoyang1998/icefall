@@ -7,6 +7,7 @@ import glob
 from lhotse import load_manifest, CutSet, Fbank, FbankConfig, LilcomChunkyWriter
 from lhotse.cut import MonoCut
 from lhotse.audio import Recording
+from lhotse.supervision import SupervisionSegment
 from argparse import ArgumentParser
 
 from icefall.utils import get_executor, str2bool
@@ -32,9 +33,16 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--split",
+        type=str,
+        default="dev",
+        choices=["dev", "test"]
+    )
+    
+    parser.add_argument(
         "--feat-output-dir",
         type=str,
-        default=None,
+        default="data/fbank",
     )
     
     return parser
@@ -85,7 +93,7 @@ def main():
     with get_executor() as ex:
         cuts = cuts.compute_and_store_features(
             extractor=extractor,
-            storage_path=f"{feat_output_dir}/{dataset}_feats",
+            storage_path=f"{feat_output_dir}/{dataset}_{args.split}_feats",
             num_jobs=num_jobs if ex is None else 80,
             executor=ex,
             storage_type=LilcomChunkyWriter,
@@ -94,9 +102,30 @@ def main():
     logging.info(f"Storing the manifest to {manifest_output_dir}")
     cuts.to_jsonl(manifest_output_dir)
     
+def update_manifest(manifest, output_manifest):
+    cuts = load_manifest(manifest)
+    def _add_speaker(c):
+        c.supervisions = [
+            SupervisionSegment(
+                id=c.id,
+                recording_id=c.recording.id,
+                start=0.0,
+                channel=0,
+                duration=c.duration,
+                speaker=c.id.split('/')[0]
+            )
+        ]
+        return c
+        
+    cuts.map(_add_speaker)
+    logging.info(f"Saving to {output_manifest}")
+    cuts.to_jsonl(output_manifest)
     
 if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
 
     logging.basicConfig(format=formatter, level=logging.INFO)
-    main()
+    # main()
+    manifest = 'data/fbank/cuts_vox1.jsonl.gz'
+    output_manifest = 'data/fbank/cuts_vox1.jsonl.gz'
+    update_manifest(manifest, output_manifest)
