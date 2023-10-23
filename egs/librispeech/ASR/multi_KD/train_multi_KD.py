@@ -419,6 +419,27 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--beats-loss-scale",
+        type=float,
+        default=1.0,
+        help="Scale of the beats loss"
+    )
+    
+    parser.add_argument(
+        "--ecapa-loss-scale",
+        type=float,
+        default=1.0,
+        help="Scale of the ecapa loss"
+    )
+    
+    parser.add_argument(
+        "--whisper-loss-scale",
+        type=float,
+        default=1.0,
+        help="Scale of the whisper loss"
+    )
 
     add_model_arguments(parser)
 
@@ -721,19 +742,19 @@ def compute_loss(
             x=feature,
             x_lens=feature_lens,
             y=y,
-            teacher_beats_embeddings=beats_embeddings,
-            teacher_ecapa_embeddings=ecapa_embeddings,
-            teacher_whisper_embeddings=whisper_embeddings,
-            teacher_whisper_embedding_lens=whisper_embedding_lens,
+            teacher_beats_embeddings=beats_embeddings if params.use_beats else None,
+            teacher_ecapa_embeddings=ecapa_embeddings if params.use_ecapa else None,
+            teacher_whisper_embeddings=whisper_embeddings if params.use_whisper else None,
+            teacher_whisper_embedding_lens=whisper_embedding_lens if params.use_whisper else None,
         )
 
         loss = 0.0
-        if beats_embeddings is not None:
-            loss += beats_loss
-        if ecapa_embeddings is not None:
-            loss += ecapa_loss.sum()
-        if whisper_embeddings is not None:
-            loss += whisper_loss
+        if params.use_beats:
+            loss += beats_loss * params.beats_loss_scale
+        if params.use_ecapa:
+            loss += ecapa_loss.sum() * params.ecapa_loss_scale
+        if params.use_whisper:
+            loss += whisper_loss * params.whisper_loss_scale
 
     assert loss.requires_grad == is_training
 
@@ -745,7 +766,7 @@ def compute_loss(
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
     if beats_loss is not None:
-        info["beats_loss"] = loss.detach().cpu().item()
+        info["beats_loss"] = beats_loss.detach().cpu().item()
     if ecapa_loss is not None:
         info["ecapa_loss"] = ecapa_loss.detach().cpu().item()
     if whisper_loss is not None:
@@ -861,7 +882,7 @@ def train_one_epoch(
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
         
-        if random.random() < 0.1:
+        if random.random() < 0.03:
             cut_ids = [c.id for c in batch["supervisions"]["cut"]]
             logging.info(f"Cut IDs: {cut_ids}")
 
