@@ -258,7 +258,27 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If True, use CTC head.",
     )
-
+    
+    parser.add_argument(
+        "--enable-distillation",
+        type=str2bool,
+        default=True,
+        help="Whether to eanble distillation.",
+    )
+    
+    parser.add_argument(
+        "--num-codebooks",
+        type=int,
+        default=16,
+        help="Number of codebooks used for the extracted CI",
+    )
+    
+    parser.add_argument(
+        "--distillation-layer",
+        type=int,
+        default=4,
+        help="Where to perform MVQ-KD",
+    )
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -405,31 +425,10 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--enable-distillation",
-        type=str2bool,
-        default=True,
-        help="Whether to eanble distillation.",
-    )
-
-    parser.add_argument(
         "--codebook-loss-scale",
         type=float,
         default=0.1,
         help="The scale of codebook loss.",
-    )
-
-    parser.add_argument(
-        "--num-codebooks",
-        type=int,
-        default=16,
-        help="Number of codebooks used for the extracted CI",
-    )
-
-    parser.add_argument(
-        "--distillation-layer",
-        type=int,
-        default=4,
-        help="Where to perform MVQ-KD",
     )
 
     parser.add_argument(
