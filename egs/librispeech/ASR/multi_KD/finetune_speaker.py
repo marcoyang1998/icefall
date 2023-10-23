@@ -62,12 +62,10 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 from speaker_datamodule import LibriSpeechSpeakerDataModule
-from decoder import Decoder
-from joiner import Joiner
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model import AsrModel
+from model import SpeakerModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -77,6 +75,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from train_multi_KD import get_encoder_embed, get_encoder_model
+from utils import get_spkr_dict
 
 from zipformer import Zipformer2
 
@@ -142,6 +141,20 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         "--init-modules",
         type=str,
         default=None,
+        help="""
+        Modules to be initialized. It matches all parameters starting with
+        a specific key. The keys are given with Comma seperated. If None,
+        all modules will be initialised. For example, if you only want to
+        initialise all parameters staring with "encoder", use "encoder";
+        if you want to initialise parameters starting with encoder or decoder,
+        use "encoder,joiner".
+        """,
+    )
+    
+    parser.add_argument(
+        "--freeze-modules",
+        type=str,
+        default="encoder, encoder_embed",
         help="""
         Modules to be initialized. It matches all parameters starting with
         a specific key. The keys are given with Comma seperated. If None,
@@ -366,13 +379,6 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--bpe-model",
-        type=str,
-        default="data/lang_bpe_500/bpe.model",
-        help="Path to the BPE model",
-    )
-
-    parser.add_argument(
         "--base-lr", type=float, default=0.045, help="The base learning rate."
     )
 
@@ -398,53 +404,6 @@ def get_parser():
         default=600,
         help="Reference batch duration for purposes of adjusting batch counts for setting various "
         "schedules inside the model",
-    )
-
-    parser.add_argument(
-        "--context-size",
-        type=int,
-        default=2,
-        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
-    )
-
-    parser.add_argument(
-        "--prune-range",
-        type=int,
-        default=5,
-        help="The prune range for rnnt loss, it means how many symbols(context)"
-        "we are using to compute the loss",
-    )
-
-    parser.add_argument(
-        "--lm-scale",
-        type=float,
-        default=0.25,
-        help="The scale to smooth the loss with lm "
-        "(output of prediction network) part.",
-    )
-
-    parser.add_argument(
-        "--am-scale",
-        type=float,
-        default=0.0,
-        help="The scale to smooth the loss with am (output of encoder network)" "part.",
-    )
-
-    parser.add_argument(
-        "--simple-loss-scale",
-        type=float,
-        default=0.5,
-        help="To get pruning ranges, we will calculate a simple version"
-        "loss(joiner is just addition), this simple loss also uses for"
-        "training (as a regularization item). We will scale the simple loss"
-        "with this parameter before adding to the final loss.",
-    )
-
-    parser.add_argument(
-        "--ctc-loss-scale",
-        type=float,
-        default=0.2,
-        help="Scale for CTC loss.",
     )
 
     parser.add_argument(
@@ -517,6 +476,8 @@ def get_parser():
 
     return parser
 
+def _str2modulelist(s: str):
+    return [ss.strip()+"." for ss in s.split(",")] if s is not None else None
 
 def get_params() -> AttributeDict:
     """Return a dict containing training parameters.
@@ -587,95 +548,17 @@ def get_params() -> AttributeDict:
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(",")))
 
-
-def get_encoder_embed(params: AttributeDict) -> nn.Module:
-    # encoder_embed converts the input of shape (N, T, num_features)
-    # to the shape (N, (T - 7) // 2, encoder_dims).
-    # That is, it does two things simultaneously:
-    #   (1) subsampling: T -> (T - 7) // 2
-    #   (2) embedding: num_features -> encoder_dims
-    # In the normal configuration, we will downsample once more at the end
-    # by a factor of 2, and most of the encoder stacks will run at a lower
-    # sampling rate.
-    encoder_embed = Conv2dSubsampling(
-        in_channels=params.feature_dim,
-        out_channels=_to_int_tuple(params.encoder_dim)[0],
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
-    )
-    return encoder_embed
-
-
-def get_encoder_model(params: AttributeDict) -> nn.Module:
-    encoder = Zipformer2(
-        output_downsampling_factor=2,
-        downsampling_factor=_to_int_tuple(params.downsampling_factor),
-        num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
-        encoder_dim=_to_int_tuple(params.encoder_dim),
-        encoder_unmasked_dim=_to_int_tuple(params.encoder_unmasked_dim),
-        query_head_dim=_to_int_tuple(params.query_head_dim),
-        pos_head_dim=_to_int_tuple(params.pos_head_dim),
-        value_head_dim=_to_int_tuple(params.value_head_dim),
-        pos_dim=params.pos_dim,
-        num_heads=_to_int_tuple(params.num_heads),
-        feedforward_dim=_to_int_tuple(params.feedforward_dim),
-        cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
-        warmup_batches=4000.0,
-        causal=params.causal,
-        chunk_size=_to_int_tuple(params.chunk_size),
-        left_context_frames=_to_int_tuple(params.left_context_frames),
-    )
-    return encoder
-
-
-def get_decoder_model(params: AttributeDict) -> nn.Module:
-    decoder = Decoder(
-        vocab_size=params.vocab_size,
-        decoder_dim=params.decoder_dim,
-        blank_id=params.blank_id,
-        context_size=params.context_size,
-    )
-    return decoder
-
-
-def get_joiner_model(params: AttributeDict) -> nn.Module:
-    joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        decoder_dim=params.decoder_dim,
-        joiner_dim=params.joiner_dim,
-        vocab_size=params.vocab_size,
-    )
-    return joiner
-
-
 def get_model(params: AttributeDict) -> nn.Module:
-    assert params.use_transducer or params.use_ctc, (
-        f"At least one of them should be True, "
-        f"but got params.use_transducer={params.use_transducer}, "
-        f"params.use_ctc={params.use_ctc}"
-    )
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
-    if params.use_transducer:
-        decoder = get_decoder_model(params)
-        joiner = get_joiner_model(params)
-    else:
-        decoder = None
-        joiner = None
-
-    model = AsrModel(
+    model = SpeakerModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
-        decoder=decoder,
-        joiner=joiner,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        decoder_dim=params.decoder_dim,
-        vocab_size=params.vocab_size,
-        use_transducer=params.use_transducer,
-        use_ctc=params.use_ctc,
-        freeze_encoder=params.freeze_encoder,
+        num_spkrs=params.num_spkrs,
+        freeze_encoder=params.freeze_encoder and params.do_finetune,
     )
     return model
 
@@ -777,8 +660,8 @@ def load_model_params(
         dst_state_dict = model.state_dict()
         for module in init_modules:
             logging.info(f"Loading parameters starting with prefix {module}")
-            src_keys = [k for k in src_state_dict.keys() if k.startswith(module.strip() + ".")]
-            dst_keys = [k for k in dst_state_dict.keys() if k.startswith(module.strip() + ".")]
+            src_keys = [k for k in src_state_dict.keys() if k.startswith(module)]
+            dst_keys = [k for k in dst_state_dict.keys() if k.startswith(module)]
             assert set(src_keys) == set(dst_keys)  # two sets should match exactly
             for key in src_keys:
                 dst_state_dict[key] = src_state_dict.pop(key)
@@ -842,7 +725,6 @@ def save_checkpoint(
 def compute_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
-    sp: spm.SentencePieceProcessor,
     batch: dict,
     is_training: bool,
 ) -> Tuple[Tensor, MetricsTracker]:
@@ -871,43 +753,21 @@ def compute_loss(
     feature = feature.to(device)
 
     supervisions = batch["supervisions"]
-    spkr_label = supervisions["speaker"]
+    spkr_label = torch.tensor(supervisions["speaker"]).to(device) # (N,)
     feature_lens = supervisions["num_frames"].to(device)
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss = model(
+        speaker_loss = model(
             x=feature,
             x_lens=feature_lens,
-            y=y,
-            prune_range=params.prune_range,
-            am_scale=params.am_scale,
-            lm_scale=params.lm_scale,
+            target=spkr_label,
         )
 
         loss = 0.0
-
-        if params.use_transducer:
-            s = params.simple_loss_scale
-            # take down the scale on the simple loss from 1.0 at the start
-            # to params.simple_loss scale by warm_step.
-            simple_loss_scale = (
-                s
-                if batch_idx_train >= warm_step
-                else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
-            )
-            pruned_loss_scale = (
-                1.0
-                if batch_idx_train >= warm_step
-                else 0.1 + 0.9 * (batch_idx_train / warm_step)
-            )
-            loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
-
-        if params.use_ctc:
-            loss += params.ctc_loss_scale * ctc_loss
+        loss += speaker_loss
 
     assert loss.requires_grad == is_training
 
@@ -918,11 +778,7 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.use_transducer:
-        info["simple_loss"] = simple_loss.detach().cpu().item()
-        info["pruned_loss"] = pruned_loss.detach().cpu().item()
-    if params.use_ctc:
-        info["ctc_loss"] = ctc_loss.detach().cpu().item()
+    info["speaker_loss"] = speaker_loss.detach().cpu().item()
 
     return loss, info
 
@@ -930,7 +786,6 @@ def compute_loss(
 def compute_validation_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
-    sp: spm.SentencePieceProcessor,
     valid_dl: torch.utils.data.DataLoader,
     world_size: int = 1,
 ) -> MetricsTracker:
@@ -943,7 +798,6 @@ def compute_validation_loss(
         loss, loss_info = compute_loss(
             params=params,
             model=model,
-            sp=sp,
             batch=batch,
             is_training=False,
         )
@@ -966,7 +820,6 @@ def train_one_epoch(
     model: Union[nn.Module, DDP],
     optimizer: torch.optim.Optimizer,
     scheduler: LRSchedulerType,
-    sp: spm.SentencePieceProcessor,
     train_dl: torch.utils.data.DataLoader,
     valid_dl: torch.utils.data.DataLoader,
     scaler: GradScaler,
@@ -1030,14 +883,13 @@ def train_one_epoch(
             set_batch_count(model, get_adjusted_batch_count(params))
 
         params.batch_idx_train += 1
-        batch_size = len(batch["supervisions"]["text"])
+        batch_size = batch["inputs"].size(0)
 
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
-                    sp=sp,
                     batch=batch,
                     is_training=True,
                 )
@@ -1054,7 +906,7 @@ def train_one_epoch(
             optimizer.zero_grad()
         except:  # noqa
             save_bad_model()
-            display_and_save_batch(batch, params=params, sp=sp)
+            display_and_save_batch(batch, params=params)
             raise
 
         if params.print_diagnostics and batch_idx == 5:
@@ -1138,12 +990,11 @@ def train_one_epoch(
                         "train/grad_scale", cur_grad_scale, params.batch_idx_train
                     )
 
-        if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
+        if batch_idx % params.valid_interval == 0 and (not params.print_diagnostics and params.training_set != "train-all-shuf"):
             logging.info("Computing validation loss")
             valid_info = compute_validation_loss(
                 params=params,
                 model=model,
-                sp=sp,
                 valid_dl=valid_dl,
                 world_size=world_size,
             )
@@ -1196,15 +1047,13 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
-
-    if not params.use_transducer:
-        params.ctc_loss_scale = 1.0
+    # get the speaker number
+    num_speakers = {
+        "voxceleb2": 5994,
+        "voxceleb1": 1211,
+        "train-all-shuf": 2338,
+    }
+    params.num_spkrs = num_speakers[params.training_set]
 
     logging.info(params)
 
@@ -1222,9 +1071,9 @@ def run(rank, world_size, args):
 
     # load model parameters for model fine-tuning
     if params.do_finetune:
-        modules = params.init_modules.split(",") if params.init_modules else None
+        init_modules = _str2modulelist(params.init_modules)
         checkpoints = load_model_params(
-            ckpt=params.finetune_ckpt, model=model, init_modules=modules
+            ckpt=params.finetune_ckpt, model=model, init_modules=init_modules
         )
         if rank == 0:
             # model_avg is only used with rank 0
@@ -1240,7 +1089,13 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    freeze_modules = ["encoder.", "encoder_embed."] # manually set the freezing parameters
+    # only set the freeze_modules if we are doing finetuning and we want to freeze
+    if params.freeze_encoder and params.do_finetune:
+        freeze_modules = _str2modulelist(params.freeze_modules) 
+        logging.info(f"Freezing the following modules {freeze_modules}")
+    else:
+        freeze_modules = []
+        
     optimizer = ScaledAdam(
         get_parameter_groups_with_lrs(
             model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules
@@ -1272,12 +1127,21 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    librispeech = LibriSpeechAsrDataModule(args)
+    librispeech = LibriSpeechSpeakerDataModule(args)
 
-    if not params.full_libri:
-        train_cuts = librispeech.train_clean_100_cuts()
+    if params.training_set == "voxceleb2":
+        train_cuts = librispeech.voxceleb2_train_cuts()
+        spkr_dict = librispeech.voxceleb2_train_spkr_dict()
+    elif params.training_set == "voxceleb1":
+        train_cuts = librispeech.voxceleb1_dev_cuts()
+        spkr_dict = librispeech.voxceleb1_train_spkr_dict()
+    elif params.training_set == "train-all-shuf":
+        train_cuts = librispeech.librispeech_train_all_shuf()
+        spkr_dict = librispeech.librispeech_train_all_shuf_spkr_dict()
     else:
-        train_cuts = librispeech.train_all_shuf_cuts()
+        raise ValueError()
+    
+    assert len(spkr_dict) == params.num_spkrs
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1288,30 +1152,7 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
-        if c.duration < 1.0 or c.duration > 20.0:
-            # logging.warning(
-            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            # )
-            return False
-
-        # In pruned RNN-T, we require that T >= S
-        # where T is the number of feature frames after subsampling
-        # and S is the number of tokens in the utterance
-
-        # In ./zipformer.py, the conv module uses the following expression
-        # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
-
-        if T < len(tokens):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. "
-                f"Number of frames (before subsampling): {c.num_frames}. "
-                f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
-                f"Tokens: {tokens}. "
-                f"Number of tokens: {len(tokens)}"
-            )
+        if c.duration < 1.0 or c.duration > 30.0:
             return False
 
         return True
@@ -1326,21 +1167,11 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict
+        train_cuts, spkr_dict=spkr_dict, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.dev_clean_cuts()
-    valid_cuts += librispeech.dev_other_cuts()
-    valid_dl = librispeech.valid_dataloaders(valid_cuts)
-
-    # if not params.print_diagnostics:
-    #     scan_pessimistic_batches_for_oom(
-    #         model=model,
-    #         train_dl=train_dl,
-    #         optimizer=optimizer,
-    #         sp=sp,
-    #         params=params,
-    #     )
+    valid_cuts = librispeech.voxceleb2_dev_cuts()
+    valid_dl = librispeech.valid_dataloaders(valid_cuts, spkr_dict=spkr_dict)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
@@ -1363,7 +1194,6 @@ def run(rank, world_size, args):
             model_avg=model_avg,
             optimizer=optimizer,
             scheduler=scheduler,
-            sp=sp,
             train_dl=train_dl,
             valid_dl=valid_dl,
             scaler=scaler,
@@ -1397,7 +1227,6 @@ def run(rank, world_size, args):
 def display_and_save_batch(
     batch: dict,
     params: AttributeDict,
-    sp: spm.SentencePieceProcessor,
 ) -> None:
     """Display the batch statistics and save the batch into disk.
 
@@ -1407,8 +1236,6 @@ def display_and_save_batch(
         for the content in it.
       params:
         Parameters for training. See :func:`get_params`.
-      sp:
-        The BPE model.
     """
     from lhotse.utils import uuid4
 
@@ -1421,16 +1248,11 @@ def display_and_save_batch(
 
     logging.info(f"features shape: {features.shape}")
 
-    y = sp.encode(supervisions["text"], out_type=int)
-    num_tokens = sum(len(i) for i in y)
-    logging.info(f"num tokens: {num_tokens}")
-
 
 def scan_pessimistic_batches_for_oom(
     model: Union[nn.Module, DDP],
     train_dl: torch.utils.data.DataLoader,
     optimizer: torch.optim.Optimizer,
-    sp: spm.SentencePieceProcessor,
     params: AttributeDict,
 ):
     from lhotse.dataset import find_pessimistic_batches
@@ -1446,7 +1268,6 @@ def scan_pessimistic_batches_for_oom(
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
-                    sp=sp,
                     batch=batch,
                     is_training=True,
                 )
@@ -1461,7 +1282,7 @@ def scan_pessimistic_batches_for_oom(
                     f"Failing criterion: {criterion} "
                     f"(={crit_values[criterion]}) ..."
                 )
-            display_and_save_batch(batch, params=params, sp=sp)
+            display_and_save_batch(batch, params=params,)
             raise
         logging.info(
             f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
@@ -1470,7 +1291,7 @@ def scan_pessimistic_batches_for_oom(
 
 def main():
     parser = get_parser()
-    LibriSpeechAsrDataModule.add_arguments(parser)
+    LibriSpeechSpeakerDataModule.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 

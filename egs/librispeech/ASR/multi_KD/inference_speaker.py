@@ -86,6 +86,18 @@ def get_parser():
         default="zipformer/exp",
         help="The experiment dir",
     )
+    
+    parser.add_argument(
+        "--trained-with-distillation",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--freeze-encoder",
+        type=str2bool,
+        default=False,
+    )
     add_model_arguments(parser)
 
     return parser
@@ -242,6 +254,17 @@ def main():
         device = torch.device("cuda", 0)
         
     logging.info("About to create model")
+    
+    if not params.trained_with_distillation:
+        # get the speaker number
+        num_speakers = {
+            "voxceleb2": 5994,
+            "voxceleb1": 1211,
+            "train-all-shuf": 2398,
+        }
+        params.num_spkrs = 5994
+        from finetune_speaker import get_model
+    
     model = get_model(params)
 
     if not params.use_averaged_model:

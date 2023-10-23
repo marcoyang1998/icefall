@@ -662,6 +662,7 @@ class SpeakerModel(nn.Module):
         self.classifier = nn.Linear(192, num_spkrs)
         
         self.freeze_encoder = freeze_encoder
+        self.forward_ecapa = self.forward_speaker
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -721,9 +722,6 @@ class SpeakerModel(nn.Module):
         """
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
-        assert y.num_axes == 2, y.num_axes
-
-        assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
 
         # Compute encoder outputs
         with torch.set_grad_enabled(not self.freeze_encoder):
@@ -734,11 +732,10 @@ class SpeakerModel(nn.Module):
         
         # Forward the speaker module
         ecapa_embeddings = self.forward_speaker(encoder_out, encoder_out_lens)
-        ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
         ecapa_embeddings = ecapa_embeddings.squeeze(1) # (N, 192)
         
         logits = self.classifier(ecapa_embeddings) # (N, 1, num_spkrs)
-        loss = F.cross_entropy(logits, target)
+        loss = F.cross_entropy(logits, target, reduction="mean")
         
         return loss
     
@@ -754,5 +751,3 @@ class SpeakerModel(nn.Module):
         ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
         
         return ecapa_embeddings
-    
-
