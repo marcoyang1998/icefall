@@ -205,7 +205,7 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
         ecapa: torch.nn.Module = None,
-        spkr2id: Dict = None
+        spkr2id: Dict = None,
     ):
         """
         Icefall MultiKD IterableDataset constructor. See https://github.com/lhotse-speech/lhotse/blob/master/lhotse/dataset/speech_recognition.py
@@ -221,7 +221,7 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
             Examples: normalization, SpecAugment, etc.
         :param input_strategy: Converts cuts into a collated batch of audio/features.
             By default, reads pre-computed features from disk.
-        :param text_sampling_func: Sampling a text as transcription from a list of texts.
+        :param spkr2id: A dict mapping the speaker name to speaker id
         """
         super().__init__()
         # Initialize the fields
@@ -231,6 +231,7 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
         self.input_strategy = input_strategy
 
         self.ecapa = ecapa
+        self.spkr2id = spkr2id
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
@@ -283,12 +284,17 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
                 ecapa_embeddings = self.ecapa.get_embeddings(audio=audios, audio_lens=audio_lens)
             else:
                 ecapa_embeddings = torch.tensor(0.)
-
+        
+        if self.spkr2id is not None:
+            spkrs = [self.spkr2id[supervision.speaker] for sequence_idx, cut in enumerate(cuts) for supervision in cut.supervisions]
+        else:
+            spkrs = []
+        
         batch = {
             "inputs": inputs,
             "supervisions": {
                 "num_frames": input_lens,
-                "speaker": [supervision.speaker for sequence_idx, cut in enumerate(cuts) for supervision in cut.supervisions],
+                "speaker": spkrs
             },
             "ecapa_embeddings": ecapa_embeddings,
         }
