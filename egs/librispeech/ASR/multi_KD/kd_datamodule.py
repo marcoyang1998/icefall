@@ -267,6 +267,7 @@ class LibriSpeechKDDataModule:
         
         group.add_argument(
             "--use-musan-separately",
+            type=str2bool,
             default=False,
             help="Use musan as an individual dataset",
         )
@@ -594,7 +595,7 @@ class LibriSpeechKDDataModule:
             else:
                 logging.info("About to get the shuffled train-960 with 3 teacher embeddings.")
                 return load_manifest_lazy(
-                    self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-musan-shuf.jsonl.gz"
+                    self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-3-embeddings.jsonl.gz"
                 )
                 
         else:
@@ -671,15 +672,29 @@ class LibriSpeechKDDataModule:
         return new_cuts
     
     @lru_cache()
-    def voxceleb1_cuts(self) -> CutSet:
-        logging.info("About to get voxceleb1 set.")
+    def voxceleb1_test_cuts(self) -> CutSet:
+        logging.info("About to get the test set of voxceleb1 set.")
         return load_manifest_lazy(
             self.args.manifest_dir / "cuts_vox1_test.jsonl.gz"
         )
         
     @lru_cache()
-    def voxceleb2_cuts(self) -> CutSet:
-        logging.info("About to get voxceleb2 set.")
+    def voxceleb1_cuts(self) -> CutSet:
+        logging.info("About to get the voxceleb1 set.")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_vox1.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def voxceleb2_test_cuts(self) -> CutSet:
+        logging.info("About to get the test set of voxceleb2 set.")
         return load_manifest_lazy(
             self.args.manifest_dir / "cuts_vox2_test.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def voxceleb2_cuts(self) -> CutSet:
+        logging.info("About to get the voxceleb2 set.")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_vox2.jsonl.gz"
         )

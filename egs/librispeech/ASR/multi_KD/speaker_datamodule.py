@@ -21,6 +21,7 @@ import inspect
 import logging
 from functools import lru_cache
 from pathlib import Path
+import pickle
 from typing import Any, Dict, Optional
 
 import torch
@@ -86,7 +87,8 @@ class LibriSpeechSpeakerDataModule:
         group.add_argument(
             "--training-set",
             type=str,
-            default="voxceleb2"
+            default="voxceleb2",
+            choices=["voxceleb2", "voxceleb1", "train-all-shuf"]
         )
 
         group.add_argument(
@@ -211,6 +213,7 @@ class LibriSpeechSpeakerDataModule:
     def train_dataloaders(
         self,
         cuts_train: CutSet,
+        spkr_dict: Dict,
         sampler_state_dict: Optional[Dict[str, Any]] = None,
     ) -> DataLoader:
         """
@@ -277,6 +280,7 @@ class LibriSpeechSpeakerDataModule:
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
+            spkr2id=spkr_dict,
         )
 
         if self.args.on_the_fly_feats:
@@ -295,6 +299,7 @@ class LibriSpeechSpeakerDataModule:
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
+                spkr2id=spkr_dict,
             )
 
         if self.args.bucketing_sampler:
@@ -335,7 +340,7 @@ class LibriSpeechSpeakerDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+    def valid_dataloaders(self, cuts_valid: CutSet, spkr_dict: Dict) -> DataLoader:
         transforms = []
         if self.args.concatenate_cuts:
             transforms = [
@@ -350,11 +355,13 @@ class LibriSpeechSpeakerDataModule:
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 return_cuts=self.args.return_cuts,
+                spkr2id=spkr_dict,
             )
         else:
             validate = SpeakerRecognitionDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
+                spkr2id=spkr_dict,
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -395,9 +402,15 @@ class LibriSpeechSpeakerDataModule:
         return test_dl
 
     @lru_cache()
+    def voxceleb2_train_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_vox2_train.jsonl.gz"
+        )
+
+    @lru_cache()
     def voxceleb2_dev_cuts(self) -> CutSet:
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_vox2.jsonl.gz"
+            self.args.manifest_dir / "cuts_vox2_dev.jsonl.gz"
         )
 
     @lru_cache()
@@ -405,5 +418,26 @@ class LibriSpeechSpeakerDataModule:
         return load_manifest_lazy(
             self.args.manifest_dir / "cuts_vox2_test.jsonl.gz"
         )
+        
+    @lru_cache()
+    def librispeech_train_all_shuf(self) -> CutSet:
+        logging.info(f"Loading the non-perturbed manifest from")
+        manifest_path = "data/fbank2/librispeech_cuts_train-all-shuf.jsonl.gz"
+        return load_manifest_lazy(manifest_path)
+        
+    def voxceleb2_train_spkr_dict(self) -> Dict:
+        with open("data/speaker/voxceleb2_spkr.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
+    
+    def voxceleb1_train_spkr_dict(self) -> Dict:
+        with open("data/speaker/voxceleb1_spkr.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
+    
+    def librispeech_train_all_shuf_spkr_dict(self) -> Dict:
+        with open("data/speaker/librispeech_cuts_train-all-shuf.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
 
 
