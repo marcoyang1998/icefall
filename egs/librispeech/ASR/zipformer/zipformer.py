@@ -163,7 +163,6 @@ class Zipformer2(EncoderInterface):
 
         num_encoders = len(downsampling_factor)
         for i in range(num_encoders):
-
             encoder_layer = Zipformer2EncoderLayer(
                 embed_dim=encoder_dim[i],
                 pos_dim=pos_dim,
@@ -2122,7 +2121,7 @@ class NonlinAttention(nn.Module):
         (seq_len, batch_size, _) = x.shape
         hidden_channels = self.hidden_channels
 
-        s, x, y = x.chunk(3, dim=-1)
+        s, x, y = x.chunk(3, dim=2)
 
         # s will go through tanh.
 
@@ -2175,7 +2174,7 @@ class NonlinAttention(nn.Module):
         (seq_len, batch_size, _) = x.shape
         hidden_channels = self.hidden_channels
 
-        s, x, y = x.chunk(3, dim=-1)
+        s, x, y = x.chunk(3, dim=2)
 
         # s will go through tanh.
         s = self.tanh(s)
@@ -2332,7 +2331,7 @@ class ConvolutionModule(nn.Module):
 
         x = self.in_proj(x)  # (time, batch, 2*channels)
 
-        x, s = x.chunk(2, dim=-1)
+        x, s = x.chunk(2, dim=2)
         s = self.balancer1(s)
         s = self.sigmoid(s)
         x = self.activation1(x)  # identity.
