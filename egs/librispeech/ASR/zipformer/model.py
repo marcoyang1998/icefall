@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple
 import k2
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from encoder_interface import EncoderInterface
 from multi_quantization.prediction import JointCodebookLoss
 from scaling import ScaledLinear
@@ -41,6 +42,7 @@ class AsrModel(nn.Module):
         use_transducer: bool = True,
         use_ctc: bool = False,
         num_codebooks: int = 8,
+        teacher_embedding_dim: int = 768,
         cb_input_dim: int = 384,
     ):
         """A joint CTC & Transducer ASR model.
@@ -76,6 +78,8 @@ class AsrModel(nn.Module):
             Whether use CTC head. Default: False.
           num_codebooks:
             Greater than 0 if we want to do MVQ knowledge distillation.
+          kd_dim:
+            The dimension of teacher embeddings
           cb_input_dim:
             The input dimension to the codebook loss module.
         """
@@ -124,6 +128,9 @@ class AsrModel(nn.Module):
                 predictor_channels=cb_input_dim,
                 num_codebooks=num_codebooks,
             )
+            
+        if teacher_embedding_dim > 0:
+            self.embedding_loss_net = nn.Linear(cb_input_dim, teacher_embedding_dim)
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -306,6 +313,8 @@ class AsrModel(nn.Module):
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
         codebook_indexes: torch.Tensor = None,
+        teacher_embeddings: torch.Tensor = None,
+        teacher_embedding_lens: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -386,8 +395,28 @@ class AsrModel(nn.Module):
             )
         else:
             codebook_loss = torch.empty(0)
+            
+        if self.training and hasattr(self, "embedding_loss_net"):
+            middle_out = middle_out[0]
+            assert self.embedding_loss_net is not None
+            
+            projected_embeddings = self.embedding_loss_net(middle_out) # (N,T,C)
+            assert teacher_embeddings.size(1) >= middle_out.size(1)
+            expected_T = middle_out.size(1)
+            teacher_embeddings = teacher_embeddings[:,:expected_T,:]
+            assert teacher_embeddings.shape == projected_embeddings.shape
+            embedding_loss = F.l1_loss(projected_embeddings, teacher_embeddings, reduction="none")
+            
+            estimated_lens = (encoder_out_lens * 2).clamp(max=expected_T)
+            mask = make_pad_mask(estimated_lens)
+            embedding_loss.masked_fill_(mask.unsqueeze(-1), 0.0)
+            # embedding_loss = embedding_loss.sum()/((~mask).sum() * teacher_embeddings.shape[-1])
+            embedding_loss = embedding_loss.sum()/teacher_embeddings.shape[-1]
+        else:
+            embedding_loss = torch.empty(0)
+            
 
-        return simple_loss, pruned_loss, ctc_loss, codebook_loss
+        return simple_loss, pruned_loss, ctc_loss, codebook_loss, embedding_loss
 
     def forward_codebook(
         self,
