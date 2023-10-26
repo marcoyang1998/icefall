@@ -51,6 +51,13 @@ def get_parser():
         type=str,
         default="data/embeddings"
     )
+
+    parser.add_argument(
+        "--embedding-layer",
+        type=int,
+        default=-1,
+        help="Which layer's representation should be extracted",
+    )
     
     parser.add_argument(
         "--max-duration",
@@ -75,11 +82,11 @@ def extract_embeddings(
     setup_logger(f"data/embeddings/log/log-whisper-embeddings")
     if params.num_jobs > 1:
         manifest = manifest[rank]
-        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-{params.output_manifest}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'whisper-{params.whisper_version}-{params.output_manifest}-{rank}.h5'
+        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.output_manifest}-{rank}.jsonl.gz"
+        embedding_path = params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.output_manifest}-{rank}.h5'
     else:
-        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-{params.output_manifest}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'whisper-{params.whisper_version}-{params.output_manifest}.h5'
+        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.output_manifest}.jsonl.gz"
+        embedding_path =  params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.output_manifest}.h5'
     
     device = torch.device("cuda", rank)
     
@@ -125,6 +132,7 @@ def extract_embeddings(
             embeddings, embedding_lens = whisper_model.get_embeddings(
                 audio, 
                 audio_lens,
+                layer_idx=params.embedding_layer # which layer's embedding to be stored
             )
             embeddings = embeddings.detach().to("cpu").numpy()
             
@@ -190,7 +198,7 @@ if __name__=="__main__":
     cuts = load_manifest(params.input_manifest)
     print(f"Finished loading manifest")
     
-    target_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-{params.output_manifest}.jsonl.gz"
+    target_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.output_manifest}.jsonl.gz"
     
     if not target_manifest.exists():
         if nj == 1:
@@ -203,12 +211,12 @@ if __name__=="__main__":
             splitted_cuts = cuts.split(num_splits=nj)
             print(f"Finished splitting manifest")
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
-            manifests =  f"{str(params.embedding_dir)}/whisper-{params.whisper_version}-{params.output_manifest}-*.jsonl.gz"
+            manifests =  f"{str(params.embedding_dir)}/whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.output_manifest}-*.jsonl.gz"
             os.system(f"lhotse combine {manifests} {target_manifest}")
     else:
         print(f"Skip embedding extraction: the manifest is already generated.")
     
-    output_manifest = params.input_manifest.replace(".jsonl.gz", "-with-whisper-embeddings.jsonl.gz")
+    output_manifest = params.input_manifest.replace(".jsonl.gz", f"-with-{params.whisper_version}-layer-{params.embedding_layer}-embeddings.jsonl.gz")
     if not os.path.exists(output_manifest):
         join_manifests(
             input_cuts=cuts,

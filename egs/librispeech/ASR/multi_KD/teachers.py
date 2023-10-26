@@ -73,11 +73,13 @@ class WhisperTeacher(Teacher):
         self,
         x: torch.Tensor,
         x_lens: torch.Tensor,
+        layer_idx: int = -1,
     ):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
         x_lens: torch.Tensor, shape = (batch_size)
+        layer_idx:
         """
         x = F.gelu(self.model.conv1(x))
         x = F.gelu(self.model.conv2(x))
@@ -89,10 +91,15 @@ class WhisperTeacher(Teacher):
         pos_emb = self.model.positional_embedding.masked_fill(mask.unsqueeze(-1), 0.0)
         x = (x + pos_emb[:,:x_lens.max(),:]).to(x.dtype)
         
+        results = []
         for block in self.model.blocks:
             x = block(x)
-        
-        x = self.model.ln_post(x)
+            results.append(x)
+        if layer_idx == -1: # use the last layer
+            x = self.model.ln_post(x)
+        else:
+            x = results[layer_idx] # zero-based index
+
         return x, x_lens
             
     @torch.no_grad()
@@ -100,6 +107,7 @@ class WhisperTeacher(Teacher):
         self,
         audio: torch.Tensor,
         audio_lens: torch.Tensor,
+        layer_idx: int = -1
     ):
         # return the embeddings of the input audio
         # audio_lens is the number of raw samples (i.e waveform)
@@ -113,9 +121,11 @@ class WhisperTeacher(Teacher):
         
         mel_lens = torch.floor(audio_lens/160).int()
         assert mel_lens.max() <= mel.size(-1)
+
         features, feature_lens = self.forward_encoder(
             mel,
             mel_lens,
+            layer_idx=layer_idx,
         )
         
         return features, feature_lens
@@ -140,7 +150,7 @@ if __name__=="__main__":
     # features = BEATs_model.extract_features(audio_input_16khz, padding_mask=padding_mask)[0]
     # print(features.shape)
     
-    # import pdb; pdb.set_trace()
+    
     audio = "/star-xy/data/LibriSpeech/dev-clean/1272/128104/1272-128104-0000.flac"
     audio = torchaudio.load(audio)[0]
     audio = torch.cat([audio, audio],dim=0)
@@ -154,5 +164,6 @@ if __name__=="__main__":
     teacher.get_embeddings(
         audio.to(device),
         audio_lens.to(device),
+        layer_idx=6,
     )
     
