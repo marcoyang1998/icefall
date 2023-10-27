@@ -215,7 +215,8 @@ class MultiKDModel(nn.Module):
             whisper_loss = F.l1_loss(whisper_embeddings, teacher_whisper_embeddings, reduction="none")
             mask = make_pad_mask(encoder_out_lens)
             whisper_loss.masked_fill_(mask.unsqueeze(-1), 0.0)
-            whisper_loss = whisper_loss.sum()/((~mask).sum() * teacher_whisper_embeddings.shape[-1])
+            # whisper_loss = whisper_loss.sum()/((~mask).sum() * teacher_whisper_embeddings.shape[-1])
+            whisper_loss = whisper_loss.sum() / teacher_whisper_embeddings.shape[-1]
         else:
             whisper_loss = None
         
