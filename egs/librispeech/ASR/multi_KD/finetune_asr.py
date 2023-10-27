@@ -157,6 +157,20 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--freeze-modules",
+        type=str,
+        default=None,
+        help="""
+        Modules to be frozen. It matches all parameters starting with
+        a specific key. The keys are given with Comma seperated. If None,
+        all modules will be initialised. For example, if you only want to
+        initialise all parameters staring with "encoder", use "encoder";
+        if you want to initialise parameters starting with encoder or decoder,
+        use "encoder,joiner".
+        """,
+    )
+
+    parser.add_argument(
         "--finetune-ckpt",
         type=str,
         default=None,
@@ -785,6 +799,7 @@ def load_model_params(
             dst_keys = [k for k in dst_state_dict.keys() if k.startswith(module.strip() + ".")]
             assert set(src_keys) == set(dst_keys)  # two sets should match exactly
             for key in src_keys:
+                logging.info(f"Loading {key} from init ckpt")
                 dst_state_dict[key] = src_state_dict.pop(key)
 
         model.load_state_dict(dst_state_dict, strict=strict)
@@ -1246,7 +1261,12 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    freeze_modules = ["encoder.", "encoder_embed."] # manually set the freezing parameters
+    if params.freeze_encoder and params.do_finetune:
+        freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
+        freeze_modules = [m.strip() for m in freeze_modules]
+    else:
+        freeze_modules = []
+
     optimizer = ScaledAdam(
         get_parameter_groups_with_lrs(
             model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules

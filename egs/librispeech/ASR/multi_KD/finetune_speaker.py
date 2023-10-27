@@ -476,8 +476,11 @@ def get_parser():
 
     return parser
 
-def _str2modulelist(s: str):
-    return [ss.strip()+"." for ss in s.split(",")] if s is not None else None
+def _str2modulelist(s: str, add_dot: bool = True):
+    if add_dot:
+        return [ss.strip()+"." for ss in s.split(",")] if s is not None else None
+    else:
+        return [ss.strip() for ss in s.split(",")] if s is not None else None
 
 def get_params() -> AttributeDict:
     """Return a dict containing training parameters.
@@ -1091,7 +1094,7 @@ def run(rank, world_size, args):
 
     # only set the freeze_modules if we are doing finetuning and we want to freeze
     if params.freeze_encoder and params.do_finetune:
-        freeze_modules = _str2modulelist(params.freeze_modules) 
+        freeze_modules = _str2modulelist(params.freeze_modules, add_dot=False) 
         logging.info(f"Freezing the following modules {freeze_modules}")
     else:
         freeze_modules = []
