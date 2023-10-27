@@ -1243,6 +1243,7 @@ def run(rank, world_size, args):
 
     # load model parameters for model fine-tuning
     if params.do_finetune:
+        assert params.start_epoch == 1, "Finetune need to start from epoch 0"
         modules = params.init_modules.split(",") if params.init_modules else None
         checkpoints = load_model_params(
             ckpt=params.finetune_ckpt, model=model, init_modules=modules
