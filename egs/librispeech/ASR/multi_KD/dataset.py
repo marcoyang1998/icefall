@@ -136,19 +136,28 @@ class MultiKDDataset(torch.utils.data.Dataset):
             # collate the pre-computed teacher embeddings
             cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
             
-            beats_embeddings = collate_custom_field(
-                cuts_pre_mixed, "beats_embedding", pad_value=-100
-            ) # (N,C)
-            beats_embeddings = beats_embeddings.unsqueeze(1)
+            if hasattr(cuts_pre_mixed[0], "beats_embedding"):
+                beats_embeddings = collate_custom_field(
+                    cuts_pre_mixed, "beats_embedding", pad_value=-100
+                ) # (N,C)
+                beats_embeddings = beats_embeddings.unsqueeze(1)
+            else:
+                beats_embeddings = torch.tensor(0.)
             
-            ecapa_embeddings = collate_custom_field(
-                cuts_pre_mixed, "ecapa_embedding", pad_value=-100
-            ) # (N,C)
+            if hasattr(cuts_pre_mixed[0], "ecapa_embedding"):
+                ecapa_embeddings = collate_custom_field(
+                    cuts_pre_mixed, "ecapa_embedding", pad_value=-100
+                ) # (N,C)
+            else:
+                ecapa_embeddings = torch.tensor(0.)
             
-            whisper_embeddings, whisper_embedding_lens = collate_custom_field(
-                cuts_pre_mixed, "whisper_embedding", pad_value=-100
-            ) # (B,T,C), (B, )
-            
+            if hasattr(cuts_pre_mixed[0], "whisper_embedding"):
+                whisper_embeddings, whisper_embedding_lens = collate_custom_field(
+                    cuts_pre_mixed, "whisper_embedding", pad_value=-100
+                ) # (B,T,C), (B, )
+            else:
+                whisper_embeddings = torch.tensor(0.)
+                whisper_embedding_lens = torch.tensor(0.)            
         
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
@@ -166,7 +175,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
             "supervisions": default_collate(
                 [
                     {
-                        "text": supervision.text,
+                        "text": supervision.text if supervision.text is not None else "Random text",
                     }
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions
