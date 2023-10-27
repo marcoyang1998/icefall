@@ -1120,6 +1120,12 @@ def run(rank, world_size, args):
     else:
         train_cuts = librispeech.train_all_shuf_cuts()
 
+    if params.use_vox2:
+        from lhotse import load_manifest_lazy
+        train_cuts = load_manifest_lazy(
+            "data/fbank/cuts_vox2_train-with-ecapa-embeddings.jsonl.gz"
+        )
+
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
         #
@@ -1147,19 +1153,19 @@ def run(rank, world_size, args):
 
         # In ./zipformer.py, the conv module uses the following expression
         # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
+        # T = ((c.num_frames - 7) // 2 + 1) // 2
+        # tokens = sp.encode(c.supervisions[0].text, out_type=str)
 
-        if T < len(tokens):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. "
-                f"Number of frames (before subsampling): {c.num_frames}. "
-                f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
-                f"Tokens: {tokens}. "
-                f"Number of tokens: {len(tokens)}"
-            )
-            return False
+        # if T < len(tokens):
+        #     logging.warning(
+        #         f"Exclude cut with ID {c.id} from training. "
+        #         f"Number of frames (before subsampling): {c.num_frames}. "
+        #         f"Number of frames (after subsampling): {T}. "
+        #         f"Text: {c.supervisions[0].text}. "
+        #         f"Tokens: {tokens}. "
+        #         f"Number of tokens: {len(tokens)}"
+        #     )
+        #     return False
 
         return True
     

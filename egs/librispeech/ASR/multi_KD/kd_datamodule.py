@@ -154,6 +154,13 @@ class LibriSpeechKDDataModule:
         )
 
         group.add_argument(
+            "--use-vox2",
+            type=str2bool,
+            default=False,
+            help="Only use vox2 as training set.",
+        )
+
+        group.add_argument(
             "--manifest-dir",
             type=Path,
             default=Path("data/fbank"),

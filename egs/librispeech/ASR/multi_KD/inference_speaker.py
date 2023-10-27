@@ -260,10 +260,16 @@ def main():
         num_speakers = {
             "voxceleb2": 5994,
             "voxceleb1": 1211,
-            "train-all-shuf": 2398,
+            "train-all-shuf": 2338,
         }
-        params.num_spkrs = 5994
         from finetune_speaker import get_model
+    else:
+        from train_multi_KD import get_model
+        
+    if "voxceleb" in str(params.exp_dir):
+        params.num_spkrs = 5994
+    else:
+        params.num_spkrs = 2338
     
     model = get_model(params)
 
