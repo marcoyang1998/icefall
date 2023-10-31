@@ -291,6 +291,7 @@ class Zipformer2(EncoderInterface):
         x: Tensor,
         x_lens: Tensor,
         src_key_padding_mask: Optional[Tensor] = None,
+        return_middle_out: bool = False,
     ) -> Tuple[Tensor, Tensor]:
         """
         Args:
@@ -353,8 +354,10 @@ class Zipformer2(EncoderInterface):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 lengths = (x_lens + 1) // 2
-
-        return x, lengths
+        if return_middle_out:
+            return x, lengths, outputs
+        else:
+            return x, lengths
 
     def _get_attn_mask(
         self, x: Tensor, chunk_size: int, left_context_chunks: int

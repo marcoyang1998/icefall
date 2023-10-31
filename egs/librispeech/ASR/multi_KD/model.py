@@ -40,6 +40,7 @@ class MultiKDModel(nn.Module):
         use_beats: bool = True,
         use_ecapa: bool = True,
         use_whisper: bool = True,
+        use_subsampled_output: bool = True
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -71,6 +72,8 @@ class MultiKDModel(nn.Module):
             Whether use transducer head. Default: True.
           use_ctc:
             Whether use CTC head. Default: False.
+          use_subsampled_output:
+            If use the final subsampled output i.e 25 Hz
         """
         super().__init__()
 
@@ -100,12 +103,18 @@ class MultiKDModel(nn.Module):
             
         self.use_whisper = use_whisper
         if use_whisper:
-            self.whisper_projection = nn.Linear(encoder_dim, 2 * whisper_dim) # a linear transform
+            if use_subsampled_output:
+                self.whisper_projection = nn.Linear(encoder_dim, 2 * whisper_dim) # a linear transform
+            else:
+                self.whisper_projection = nn.Linear(256, whisper_dim) # a linear transform
         else:
             self.whisper_projection = None
 
     def forward_encoder(
-        self, x: torch.Tensor, x_lens: torch.Tensor
+        self, 
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        return_middle_out: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute encoder outputs.
         Args:
@@ -128,7 +137,7 @@ class MultiKDModel(nn.Module):
         src_key_padding_mask = make_pad_mask(x_lens)
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
+        encoder_out, encoder_out_lens, middle_out = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out=return_middle_out)
 
         encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
@@ -144,6 +153,7 @@ class MultiKDModel(nn.Module):
         teacher_ecapa_embeddings: torch.Tensor = None,
         teacher_whisper_embeddings: torch.Tensor = None,
         teacher_whisper_embedding_lens: torch.Tensor = None,
+        return_middle_out: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -181,7 +191,7 @@ class MultiKDModel(nn.Module):
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
 
         # Compute encoder outputs
-        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens) # (N,T,C)
+        encoder_out, encoder_out_lens, middle_out = self.forward_encoder(x, x_lens, return_middle_out=True) # (N,T,C)
 
         # beats loss
         if self.use_beats and teacher_beats_embeddings is not None:
@@ -196,6 +206,7 @@ class MultiKDModel(nn.Module):
         
         # ecapa loss
         if self.use_ecapa and teacher_ecapa_embeddings is not None:
+            assert middle_out is not None
             encoder_out = encoder_out.permute(0,2,1)
             ecapa_embeddings = self.ecapa_asp(encoder_out) # (N,C,T)
             encoder_out = encoder_out.permute(0,2,1)
@@ -263,8 +274,9 @@ class MultiKDModel(nn.Module):
         
         if T >= t_expected * 2:
             whisper_embeddings = whisper_embeddings[:, : t_expected * 2, :]
-            
-        whisper_embeddings = whisper_embeddings.reshape(N, t_expected, C * 2)
+            whisper_embeddings = whisper_embeddings.reshape(N, t_expected, C * 2)
+        else:
+            whisper_embeddings = whisper_embeddings[:, : t_expected, :]
         assert whisper_embeddings.shape[1] == encoder_out.shape[1]
         return whisper_embeddings
     
@@ -359,7 +371,7 @@ class AsrModel(nn.Module):
         self.freeze_encoder = freeze_encoder
 
     def forward_encoder(
-        self, x: torch.Tensor, x_lens: torch.Tensor
+        self, x: torch.Tensor, x_lens: torch.Tensor, return_middle_out: bool=False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute encoder outputs.
         Args:
@@ -382,12 +394,18 @@ class AsrModel(nn.Module):
         src_key_padding_mask = make_pad_mask(x_lens)
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
+        # encoder_out, encoder_out_lens, middle_out = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out=return_middle_out)
+        outputs = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out=return_middle_out)
+        if len(outputs) == 3:
+            encoder_out, encoder_out_lens, middle_out = outputs
+        else:
+            encoder_out, encoder_out_lens = outputs
+            middle_out = None
 
         encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
-        return encoder_out, encoder_out_lens
+        return encoder_out, encoder_out_lens, middle_out
 
     def forward_ctc(
         self,
@@ -533,6 +551,7 @@ class AsrModel(nn.Module):
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
+        return_middle_out: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -574,7 +593,7 @@ class AsrModel(nn.Module):
             if self.freeze_encoder: # If freezing the encoder, set them to eval mode
                 self.encoder.eval()
                 self.encoder_embed.eval()
-            encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
+            encoder_out, encoder_out_lens, middle_out = self.forward_encoder(x, x_lens, return_middle_out=return_middle_out)
 
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1]
