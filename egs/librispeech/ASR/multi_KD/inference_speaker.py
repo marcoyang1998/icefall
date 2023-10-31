@@ -202,7 +202,7 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         scores.append(sim.item())
         labels.append(int(label))
     
-    thresholds = [0.1 + i*0.005 for i in range(80)]
+    thresholds = [0.1 + i*0.005 for i in range(180)]
     scores = torch.Tensor(scores)
     label = torch.Tensor(labels)
     logging.info("Tuning the thresholds")
