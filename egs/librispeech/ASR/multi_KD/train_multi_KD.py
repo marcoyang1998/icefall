@@ -257,6 +257,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="If True, use CTC head.",
     )
 
+    parser.add_argument(
+        "--use-subsampled_output",
+        type=str2bool,
+        default=True,
+        help="If use the last subsampled output"
+    )
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -572,6 +579,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_beats=params.use_beats,
         use_ecapa=params.use_ecapa,
         use_whisper=params.use_whisper,
+        use_subsampled_output=params.use_subsampled_output,
     )
     return model
 
@@ -746,6 +754,7 @@ def compute_loss(
             teacher_ecapa_embeddings=ecapa_embeddings if params.use_ecapa else None,
             teacher_whisper_embeddings=whisper_embeddings if params.use_whisper else None,
             teacher_whisper_embedding_lens=whisper_embedding_lens if params.use_whisper else None,
+            return_middle_out=True,
         )
 
         loss = 0.0
