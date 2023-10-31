@@ -1094,7 +1094,7 @@ def run(rank, world_size, args):
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     # only set the freeze_modules if we are doing finetuning and we want to freeze
-    if params.freeze_encoder and params.do_finetune:
+    if params.freeze_encoder:
         freeze_modules = _str2modulelist(params.freeze_modules, add_dot=False) 
         logging.info(f"Freezing the following modules {freeze_modules}")
     else:

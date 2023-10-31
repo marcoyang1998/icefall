@@ -176,14 +176,6 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="Fine-tuning from which checkpoint (a path to a .pt file)",
     )
-    
-    parser.add_argument(
-        "--freeze-encoder",
-        type=str2bool,
-        default=False,
-        help="If freeze the parameters in encoder and encoder_embed and set them to eval() mode",
-    )
-
 
 def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
@@ -318,6 +310,19 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If True, use CTC head.",
+    )
+
+    parser.add_argument(
+        "--freeze-encoder",
+        type=str2bool,
+        default=False,
+        help="If freeze the parameters in encoder and encoder_embed and set them to eval() mode",
+    )
+
+    parser.add_argument(
+        "--encoder-lr-scale",
+        type=float,
+        default=1.0,
     )
 
 
@@ -1251,6 +1256,10 @@ def run(rank, world_size, args):
         if rank == 0:
             # model_avg is only used with rank 0
             model_avg = copy.deepcopy(model).to(torch.float64)
+
+        logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
+        model.encoder.lr_scale = params.encoder_lr_scale
+        model.encoder_embed.lr_scale = params.encoder_lr_scale
     else:
         assert params.start_epoch > 0, params.start_epoch
         checkpoints = load_checkpoint_if_available(
@@ -1262,7 +1271,7 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    if params.freeze_encoder and params.do_finetune:
+    if params.freeze_encoder:
         freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
         freeze_modules = [m.strip() for m in freeze_modules]
     else:
