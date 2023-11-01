@@ -137,10 +137,16 @@ def inference_one_batch(
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
     
-    encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens)
+    encoder_out, encoder_out_lens, middle_out = model.forward_encoder(feature, feature_lens, return_middle_out=True)
     
     # speaker
-    ecapa_embeddings = model.forward_ecapa(encoder_out, encoder_out_lens)
+    if params.speaker_input_idx == -1:
+        ecapa_embeddings = model.forward_ecapa(encoder_out, encoder_out_lens)
+    else:
+        ecapa_input_embeddings = middle_out[params.speaker_input_idx]
+        ecapa_input_embeddings = sum(ecapa_input_embeddings) / len(ecapa_input_embeddings)
+        ecapa_input_embeddings = ecapa_input_embeddings.permute(1,0,2)
+        ecapa_embeddings = model.forward_ecapa(ecapa_input_embeddings, encoder_out_lens)
     
     return ecapa_embeddings
     
