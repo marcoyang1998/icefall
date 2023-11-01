@@ -258,6 +258,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--speaker-input-idx",
+        type=int,
+        default=-1,
+        help="Which layer's output to be used for speaker embeddings"
+    )
+
+    parser.add_argument(
         "--use-subsampled_output",
         type=str2bool,
         default=True,
@@ -579,6 +586,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_beats=params.use_beats,
         use_ecapa=params.use_ecapa,
         use_whisper=params.use_whisper,
+        speaker_input_idx=params.speaker_input_idx,
         use_subsampled_output=params.use_subsampled_output,
     )
     return model

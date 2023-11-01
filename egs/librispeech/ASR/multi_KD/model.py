@@ -40,6 +40,7 @@ class MultiKDModel(nn.Module):
         use_beats: bool = True,
         use_ecapa: bool = True,
         use_whisper: bool = True,
+        speaker_input_idx: int = -1,
         use_subsampled_output: bool = True
     ):
         """A joint CTC & Transducer ASR model.
@@ -72,6 +73,8 @@ class MultiKDModel(nn.Module):
             Whether use transducer head. Default: True.
           use_ctc:
             Whether use CTC head. Default: False.
+          speaker_input_idx:
+            Which modules results to be inputted to the ecapa module
           use_subsampled_output:
             If use the final subsampled output i.e 25 Hz
         """
@@ -82,6 +85,8 @@ class MultiKDModel(nn.Module):
         self.encoder_embed = encoder_embed
         self.encoder = encoder
         self.encoder_dim = encoder_dim
+        self.encoder_dims = self.encoder.encoder_dim # tuple
+        self.num_layers = self.encoder.num_encoder_layers # tuple
         
         # KD modules
         self.use_beats = use_beats
@@ -94,9 +99,15 @@ class MultiKDModel(nn.Module):
             self.beats_decoder = None
         
         self.use_ecapa = use_ecapa
+        self.speaker_input_idx = speaker_input_idx
         if use_ecapa:
-            self.ecapa_asp = AttentiveStatisticsPooling(channels=encoder_dim)
-            self.ecapa_linear = nn.Linear(2 * encoder_dim, 192 ) # fixed 192-D vector
+            if speaker_input_idx == -1: # use the last layer
+                self.ecapa_asp = AttentiveStatisticsPooling(channels=encoder_dim)
+                self.ecapa_linear = nn.Linear(2 * encoder_dim, 192 ) # fixed 192-D vector
+            else:
+                speaker_input_dim = self.encoder_dims[speaker_input_idx]
+                self.ecapa_asp = AttentiveStatisticsPooling(channels=speaker_input_dim)
+                self.ecapa_linear = nn.Linear(2 * speaker_input_dim, 192 ) # fixed 192-D vector
         else:
             self.ecapa_asp = None
             self.ecapa_linear = None
@@ -142,7 +153,7 @@ class MultiKDModel(nn.Module):
         encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
-        return encoder_out, encoder_out_lens
+        return encoder_out, encoder_out_lens, middle_out
 
     def forward(
         self,
@@ -207,11 +218,27 @@ class MultiKDModel(nn.Module):
         # ecapa loss
         if self.use_ecapa and teacher_ecapa_embeddings is not None:
             assert middle_out is not None
-            encoder_out = encoder_out.permute(0,2,1)
-            ecapa_embeddings = self.ecapa_asp(encoder_out) # (N,C,T)
-            encoder_out = encoder_out.permute(0,2,1)
-            ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
-            ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
+            if self.speaker_input_idx == -1:
+                ecapa_embeddings = self.forward_ecapa(
+                    encoder_out, # (N,T,C)
+                    encoder_out_lens,
+                )
+            else:
+                ecapa_input_embeddings = middle_out[self.speaker_input_idx] # a list of (T,N,C)
+                # ecapa_input_embeddings = torch.mean(torch.stack(ecapa_input_embeddings), dim=0)
+                ecapa_input_embeddings = sum(ecapa_input_embeddings) / len(ecapa_input_embeddings)
+                ecapa_input_embeddings = ecapa_input_embeddings.permute(1,0,2)
+
+                ecapa_embeddings = self.forward_ecapa(
+                    ecapa_input_embeddings,
+                    encoder_out_lens,
+                )
+            
+            # encoder_out = encoder_out.permute(0,2,1)
+            # ecapa_embeddings = self.ecapa_asp(encoder_out) # (N,C,T)
+            # encoder_out = encoder_out.permute(0,2,1)
+            # ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
+            # ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
             ecapa_loss = 1 - F.cosine_similarity(ecapa_embeddings, teacher_ecapa_embeddings, dim=-1, eps=1e-6)
             ecapa_loss = ecapa_loss.sum()
         else:
@@ -235,7 +262,7 @@ class MultiKDModel(nn.Module):
     
     def forward_beats(
         self,
-		encoder_out: torch.Tensor,
+        encoder_out: torch.Tensor,
   		encoder_out_lens: torch.Tensor,
 	):
         beats_logits = self.beats_decoder(encoder_out) # (N,)
