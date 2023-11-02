@@ -216,7 +216,7 @@ if __name__=="__main__":
     else:
         print(f"Skip embedding extraction: the manifest is already generated.")
     
-    output_manifest = params.input_manifest.replace(".jsonl.gz", f"-with-{params.whisper_version}-layer-{params.embedding_layer}-embeddings.jsonl.gz")
+    output_manifest = params.input_manifest.replace(".jsonl.gz", f"-with-whisper-{params.whisper_version}-layer-{params.embedding_layer}-embeddings.jsonl.gz")
     if not os.path.exists(output_manifest):
         join_manifests(
             input_cuts=cuts,

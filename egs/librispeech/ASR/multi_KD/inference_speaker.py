@@ -179,7 +179,7 @@ def decode_dataset(
             embedding_dict[id] = embedding
         if batch["ecapa_embeddings"].ndim > 1:
             for id, embedding in zip(cut_ids, batch["ecapa_embeddings"]):
-                teacher_embedding_dict[id] = embedding
+                teacher_embedding_dict[id] = embedding.detach().cpu()
         
         if batch_idx % 20 == 1:
             logging.info(f"Processed {num_cuts} cuts already.")
@@ -387,6 +387,7 @@ def main():
             embedding_dict=embedding_dict,
         )
         
+        # logging.info("Evaluating the embeddings generated from the teacher model")
         # evaluate_embeddings(
         #     test_set=test_set,
         #     embedding_dict=teacher_embedding_dict,
