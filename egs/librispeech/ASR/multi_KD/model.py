@@ -16,7 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
+import logging
 
 import k2
 import torch
@@ -321,6 +322,8 @@ class AsrModel(nn.Module):
         use_transducer: bool = True,
         use_ctc: bool = False,
         freeze_encoder: bool = False,
+        freezing_encoder_layer_index: List[int] = [],
+        freeze_encoder_steps: int = -1,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -351,7 +354,12 @@ class AsrModel(nn.Module):
           use_transducer:
             Whether use transducer head. Default: True.
           freeze_encoder:
-            Whether to freeze the parameters in encoder and encoder_embed
+            Whether to freeze the parameters in encoder and encoder_embed. 
+          freezing_encoder_layer_index:
+            Specify which encoder layer should be frozen; Used when the speaker module
+            use the middle out as input. Will be ignored in `freeze_encoder=True`
+          freeze_encoder_steps:
+            Specify for how many steps should the encoder be frozen. Will be ignored in `freeze_encoder=True`
           use_ctc:
             Whether use CTC head. Default: False.
         """
@@ -394,11 +402,17 @@ class AsrModel(nn.Module):
                 nn.Linear(encoder_dim, vocab_size),
                 nn.LogSoftmax(dim=-1),
             )
-            
+        
         self.freeze_encoder = freeze_encoder
+        self.freezing_encoder_layer_index = freezing_encoder_layer_index
+        self.freeze_encoder_steps = freeze_encoder_steps
 
     def forward_encoder(
-        self, x: torch.Tensor, x_lens: torch.Tensor, return_middle_out: bool=False,
+        self,
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        return_middle_out: bool=False,
+        freezing_encoder_layer_index: List[int] = []
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute encoder outputs.
         Args:
@@ -422,7 +436,13 @@ class AsrModel(nn.Module):
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
         # encoder_out, encoder_out_lens, middle_out = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out=return_middle_out)
-        outputs = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out=return_middle_out)
+        outputs = self.encoder(
+            x, 
+            x_lens,
+            src_key_padding_mask,
+            return_middle_out=return_middle_out,
+            freezing_layer_idx=freezing_encoder_layer_index,
+        )
         if len(outputs) == 3:
             encoder_out, encoder_out_lens, middle_out = outputs
         else:
@@ -579,6 +599,7 @@ class AsrModel(nn.Module):
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
         return_middle_out: bool = False,
+        batch_idx: int = 1e10,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -599,6 +620,10 @@ class AsrModel(nn.Module):
           lm_scale:
             The scale to smooth the loss with lm (output of predictor network)
             part
+          return_middle_out:
+            Return the layer-wise output of encoder
+          batch_idx:
+            The absolute batch index
         Returns:
           Return the transducer losses and CTC loss,
           in form of (simple_loss, pruned_loss, ctc_loss)
@@ -615,15 +640,24 @@ class AsrModel(nn.Module):
 
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
 
+        _freeze_encoder = self.freeze_encoder or (batch_idx < self.freeze_encoder_steps)
+        if batch_idx % 100 == 0:
+            logging.info(f"Freeze_encoder: {_freeze_encoder}; Current batch idx: {batch_idx}")
+
         # Compute encoder outputs
-        with torch.set_grad_enabled(not self.freeze_encoder):
-            if self.freeze_encoder: # If freezing the encoder, set them to eval mode
+        with torch.set_grad_enabled(not _freeze_encoder):
+            if _freeze_encoder: # If freezing the encoder, set them to eval mode
                 self.encoder.eval()
                 self.encoder_embed.eval()
-            encoder_out, encoder_out_lens, middle_out = self.forward_encoder(x, x_lens, return_middle_out=return_middle_out)
+            encoder_out, encoder_out_lens, middle_out = self.forward_encoder(
+                x,
+                x_lens,
+                return_middle_out=return_middle_out,
+                freezing_encoder_layer_index=self.freezing_encoder_layer_index
+            )
 
         row_splits = y.shape.row_splits(1)
-        y_lens = row_splits[1:] - row_splits[:-1]
+        y_lens = row_splits[1:] - row_splits[:-1] 
 
         if self.use_transducer:
             # Compute transducer loss

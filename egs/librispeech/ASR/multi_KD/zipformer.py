@@ -292,6 +292,7 @@ class Zipformer2(EncoderInterface):
         x_lens: Tensor,
         src_key_padding_mask: Optional[Tensor] = None,
         return_middle_out: bool = False,
+        freezing_layer_idx: List[int] = [],
     ) -> Tuple[Tensor, Tensor]:
         """
         Args:
@@ -303,6 +304,11 @@ class Zipformer2(EncoderInterface):
           src_key_padding_mask:
             The mask for padding, of shape (batch_size, seq_len); True means
             masked position. May be None.
+          return_middle_out:
+            Return the layer-wise output
+          freezing_layer_idx:
+            A list of integers, indicating which layers in the encoder should
+            be frozen. If not initialized, it will be an empty list.
         Returns:
           Return a tuple containing 2 tensors:
             - embeddings: its shape is (output_seq_len, batch_size, max(encoder_dim))
@@ -327,18 +333,22 @@ class Zipformer2(EncoderInterface):
         for i, module in enumerate(self.encoders):
             ds = self.downsampling_factor[i]
             x = convert_num_channels(x, self.encoder_dim[i])
+            freeze_current_layer = i in freezing_layer_idx # should return False for an empty list
+            if freeze_current_layer:
+                module.eval()
 
-            x, layer_results = module(
-                x,
-                chunk_size=chunk_size,
-                feature_mask=feature_masks[i],
-                src_key_padding_mask=(
-                    None
-                    if src_key_padding_mask is None
-                    else src_key_padding_mask[..., ::ds]
-                ),
-                attn_mask=attn_mask,
-            )
+            with torch.set_grad_enabled(not freeze_current_layer):
+                x, layer_results = module(
+                    x,
+                    chunk_size=chunk_size,
+                    feature_mask=feature_masks[i],
+                    src_key_padding_mask=(
+                        None
+                        if src_key_padding_mask is None
+                        else src_key_padding_mask[..., ::ds]
+                    ),
+                    attn_mask=attn_mask,
+                )
             outputs.append(x)
             layerwise_outputs.append(layer_results)
 

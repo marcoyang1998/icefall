@@ -320,6 +320,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--freezing-encoder-layer-index",
+        type=str,
+        default="-1",
+        help="Comma separated. start from 0, 0,1,2 means the first three encoder stacks are frozen",
+    )
+
+    parser.add_argument(
+        "--freeze-encoder-steps",
+        type=int,
+        default=-1,
+        help="Freeze the encoder for how many steps. Deactivated if `freeze-encoder` is True",
+    )
+
+    parser.add_argument(
         "--encoder-lr-scale",
         type=float,
         default=1.0,
@@ -699,6 +713,8 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
         freeze_encoder=params.freeze_encoder,
+        freezing_encoder_layer_index=params.freezing_encoder_layer_index,
+        freeze_encoder_steps=params.freeze_encoder_steps,
     )
     return model
 
@@ -912,6 +928,8 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
+            return_middle_out=True,
+            batch_idx=batch_idx_train,
         )
 
         loss = 0.0
@@ -1234,6 +1252,13 @@ def run(rank, world_size, args):
 
     logging.info(params)
 
+    if params.freezing_encoder_layer_index == "-1":
+        params.freezing_encoder_layer_index = []
+    else:
+        params.freezing_encoder_layer_index = list(map(int, params.freezing_encoder_layer_index.split(',')))
+        if not params.freeze_encoder:
+            logging.info(f"The following encoder layers will be frozen: {params.freezing_encoder_layer_index}")
+
     logging.info("About to create model")
     model = get_model(params)
 
@@ -1274,6 +1299,7 @@ def run(rank, world_size, args):
     if params.freeze_encoder:
         freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
         freeze_modules = [m.strip() for m in freeze_modules]
+        logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
     else:
         freeze_modules = []
 
