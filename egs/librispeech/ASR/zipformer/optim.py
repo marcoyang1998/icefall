@@ -436,6 +436,9 @@ class ScaledAdam(BatchedOptimizer):
             else:
                 tot_sumsq += ((grad * state["param_rms"]) ** 2).sum()
 
+        if tot_sumsq == 0.0: # for freezing parameters
+            return 1.0
+
         tot_norm = tot_sumsq.sqrt()
         if "model_norms" not in first_state:
             first_state["model_norms"] = torch.zeros(
@@ -456,6 +459,11 @@ class ScaledAdam(BatchedOptimizer):
                 quartiles.append(sorted_norms[index].item())
 
             median = quartiles[2]
+            if median == 0.0:
+                # after freezing for a certain number of steps, start to optimize the
+                # parameters, they will have no accumulated stats, so the medium will be
+                # zero, this won't affect other parameters.
+                median = quartiles[-1]
             threshold = clipping_scale * median
             first_state["model_norm_threshold"] = threshold
             percent_clipped = (
@@ -538,7 +546,7 @@ class ScaledAdam(BatchedOptimizer):
         assert torch.isclose(
             sum([value[0] for value in all_sumsq_orig.values()]).cpu(),
             torch.tensor(1.0),
-        )
+        ), all_sumsq_orig.values()
         sorted_by_proportion = {
             k: v
             for k, v in sorted(
