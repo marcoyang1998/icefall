@@ -279,6 +279,13 @@ class LibriSpeechKDDataModule:
             help="When enabled, select noise from audioset and mix it"
             "with training dataset. ",
         )
+
+        group.add_argument(
+            "--audioset-kd",
+            type=str2bool,
+            default=False,
+            help="When enabled, use audioset as an extra dataset",
+        )
         
         group.add_argument(
             "--use-musan-separately",
@@ -716,4 +723,11 @@ class LibriSpeechKDDataModule:
         logging.info("About to get the voxceleb2 set.")
         return load_manifest_lazy(
             self.args.manifest_dir / "cuts_vox2.jsonl.gz"
+        )
+
+    @lru_cache()
+    def audioset_cuts(self) -> CutSet:
+        logging.info("About to get the audioset cuts.")
+        return load_manifest_lazy(
+            "data/fbank_audioset/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
         )

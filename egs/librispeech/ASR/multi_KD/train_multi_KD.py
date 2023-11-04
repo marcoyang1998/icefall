@@ -1146,6 +1146,9 @@ def run(rank, world_size, args):
     else:
         train_cuts = librispeech.train_all_shuf_cuts()
 
+    if params.audioset_kd:
+        train_cuts += librispeech.audioset_cuts()
+
     if params.use_vox2:
         from lhotse import load_manifest_lazy
         train_cuts = load_manifest_lazy(
