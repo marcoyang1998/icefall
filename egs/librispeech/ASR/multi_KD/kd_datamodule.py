@@ -271,6 +271,14 @@ class LibriSpeechKDDataModule:
             help="When enabled, select noise from MUSAN and mix it"
             "with training dataset. ",
         )
+
+        group.add_argument(
+            "--enable-audioset",
+            type=str2bool,
+            default=False,
+            help="When enabled, select noise from audioset and mix it"
+            "with training dataset. ",
+        )
         
         group.add_argument(
             "--use-musan-separately",
@@ -351,6 +359,10 @@ class LibriSpeechKDDataModule:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest(self.args.manifest_dir / "musan_cuts.jsonl.gz")
+            if self.args.enable_audioset:
+                logging.info("Enable audioset")
+                logging.info("About to get audioset cuts")
+                cuts_musan += load_manifest("data/fbank/cuts_audioset_balanced.jsonl.gz")
             if self.args.drop_features and self.args.on_the_fly_feats:
                 cuts_musan = cuts_musan.drop_features()
             transforms.append(
