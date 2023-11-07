@@ -1282,14 +1282,15 @@ def run(rank, world_size, args):
             # model_avg is only used with rank 0
             model_avg = copy.deepcopy(model).to(torch.float64)
 
-        logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
-        model.encoder.lr_scale = params.encoder_lr_scale
-        model.encoder_embed.lr_scale = params.encoder_lr_scale
     else:
         assert params.start_epoch > 0, params.start_epoch
         checkpoints = load_checkpoint_if_available(
             params=params, model=model, model_avg=model_avg
         )
+
+    logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
+    model.encoder.lr_scale = params.encoder_lr_scale
+    model.encoder_embed.lr_scale = params.encoder_lr_scale
 
     model.to(device)
     if world_size > 1:
@@ -1303,10 +1304,11 @@ def run(rank, world_size, args):
     else:
         freeze_modules = []
 
+    parameters = get_parameter_groups_with_lrs(
+        model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules
+    )
     optimizer = ScaledAdam(
-        get_parameter_groups_with_lrs(
-            model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules
-        ),
+        parameters,
         lr=params.base_lr,  # should have no effect
         clipping_scale=2.0,
     )
