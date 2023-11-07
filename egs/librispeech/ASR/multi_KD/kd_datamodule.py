@@ -345,7 +345,7 @@ class LibriSpeechKDDataModule:
         group.add_argument(
             "--whisper-version",
             type=str,
-            default="base",
+            default="small.en",
             help="The version of whisper to be used"
         )
 
@@ -492,6 +492,9 @@ class LibriSpeechKDDataModule:
                     duration_factor=self.args.duration_factor, gap=self.args.gap
                 )
             ] + transforms
+
+        if self.args.drop_features and self.args.on_the_fly_feats:
+            cuts_train = cuts_train.drop_features()
 
         logging.info("About to create dev dataset")
         if self.args.on_the_fly_feats:
