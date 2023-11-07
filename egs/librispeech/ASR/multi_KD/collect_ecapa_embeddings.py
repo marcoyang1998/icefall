@@ -69,7 +69,6 @@ def test():
         source="speechbrain/spkrec-ecapa-voxceleb",
         run_opts={"device": "cuda"}
     )
-    import pdb; pdb.set_trace()
     signal, fs = torchaudio.load('/star-xy/data/LibriSpeech/dev-clean/1272/128104/1272-128104-0000.flac') # spkr1
     embed1 = classifier.encode_batch(signal)
 
