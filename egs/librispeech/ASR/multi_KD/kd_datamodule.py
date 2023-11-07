@@ -494,7 +494,7 @@ class LibriSpeechKDDataModule:
             ] + transforms
 
         if self.args.drop_features and self.args.on_the_fly_feats:
-            cuts_train = cuts_train.drop_features()
+            cuts_valid = cuts_valid.drop_features()
 
         logging.info("About to create dev dataset")
         if self.args.on_the_fly_feats:
