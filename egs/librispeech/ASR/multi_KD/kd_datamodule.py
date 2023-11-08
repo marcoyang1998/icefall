@@ -493,24 +493,25 @@ class LibriSpeechKDDataModule:
                 )
             ] + transforms
 
-        if self.args.drop_features and self.args.on_the_fly_feats:
-            cuts_valid = cuts_valid.drop_features()
+        # if self.args.drop_features and self.args.on_the_fly_feats:
+        #     cuts_valid = cuts_valid.drop_features()
 
         logging.info("About to create dev dataset")
-        if self.args.on_the_fly_feats:
-            validate = MultiKDDataset(
-                cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)), return_audio=self.args.return_audio),
-                return_cuts=self.args.return_cuts,
-                beats=self.beats,
-                ecapa=self.ecapa,
-                whisper=self.whisper,
-            )
-        else:
-            validate = MultiKDDataset(
-                cut_transforms=transforms,
-                return_cuts=self.args.return_cuts,
-            )
+        # if self.args.on_the_fly_feats:
+        #     validate = MultiKDDataset(
+        #         cut_transforms=transforms,
+        #         input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)), return_audio=self.args.return_audio),
+        #         return_cuts=self.args.return_cuts,
+        #         on_the_fly_feats=True,
+        #         beats=self.beats,
+        #         ecapa=self.ecapa,
+        #         whisper=self.whisper,
+        #     )
+        # else:
+        validate = MultiKDDataset(
+            cut_transforms=transforms,
+            return_cuts=self.args.return_cuts,
+        )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
             max_duration=self.args.max_duration,
@@ -652,7 +653,7 @@ class LibriSpeechKDDataModule:
             )
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
+                self.args.manifest_dir / "librispeech_cuts_dev-clean-with-3-embeddings.jsonl.gz"
             )
 
     @lru_cache()
@@ -664,7 +665,7 @@ class LibriSpeechKDDataModule:
             )
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
+                self.args.manifest_dir / "librispeech_cuts_dev-other-with-3-embeddings.jsonl.gz"
             )
 
     @lru_cache()
