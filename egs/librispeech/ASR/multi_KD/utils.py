@@ -1,5 +1,6 @@
 import csv
 import logging
+import os
 
 from lhotse import load_manifest_lazy, load_manifest, CutSet
 from lhotse.supervision import SupervisionSegment
@@ -75,29 +76,36 @@ def add_fields_to_manifest(
     beats_manifest: str=None,
     ecapa_manifest: str=None,
     whisper_manifest: str=None,
+    whisper_cb_manifest: str=None,
 ):
     orig_cuts = load_manifest(orig_manifest)
     
     new_cuts = []
     field_name = []
     
-    if beats_manifest is not None:
+    if beats_manifest is not None and os.path.exists(beats_manifest):
         beats_cuts = load_manifest(beats_manifest)
         assert len(beats_cuts) == len(orig_cuts)
         new_cuts.append(beats_cuts)
         field_name.append("beats_embedding")
         
-    if ecapa_manifest is not None:
+    if ecapa_manifest is not None and os.path.exists(ecapa_manifest):
         ecapa_cuts = load_manifest(ecapa_manifest)
         assert len(ecapa_cuts) == len(orig_cuts)
         new_cuts.append(ecapa_cuts)
         field_name.append("ecapa_embedding")
     
-    if whisper_manifest is not None:
+    if whisper_manifest is not None and os.path.exists(whisper_manifest):
         whisper_cuts = load_manifest(whisper_manifest)
         assert len(whisper_cuts) == len(orig_cuts)
         new_cuts.append(whisper_cuts)
         field_name.append("whisper_embedding")
+
+    if whisper_cb_manifest is not None and os.path.exists(whisper_cb_manifest):
+        whisper_codebook_cuts = load_manifest(whisper_cb_manifest)
+        assert len(whisper_codebook_cuts) == len(orig_cuts)
+        new_cuts.append(whisper_codebook_cuts)
+        field_name.append("whisper_codebook_indexes")
         
     for cuts, name in zip(new_cuts, field_name):
         cuts = cuts.sort_like(orig_cuts)
@@ -108,6 +116,7 @@ def add_fields_to_manifest(
         logging.info(f"Finish processing cuts with field {name}.")
         
     orig_cuts.to_jsonl(output_manifest)
+    logging.info(f"Saved the output to {output_manifest}")
     
 
 if __name__=="__main__":
@@ -119,20 +128,21 @@ if __name__=="__main__":
     # output = "data/fbank2/librispeech_cuts_train-all-shuf.jsonl.gz"
     # filter_manifest(manifest, output)
     
-    # keys = ["train-all-shuf"]
-    # for key in keys:
-    #     add_fields_to_manifest(
-    #         orig_manifest=f"data/fbank2/librispeech_cuts_{key}.jsonl.gz",
-    #         output_manifest=f"data/fbank2/librispeech_cuts_{key}-with-3-embeddings.jsonl.gz",
-    #         beats_manifest=f"data/fbank2/librispeech_cuts_{key}-with-beats-embeddings.jsonl.gz",
-    #         ecapa_manifest=f"data/fbank2/librispeech_cuts_{key}-with-ecapa-embeddings.jsonl.gz",
-    #         whisper_manifest=f"data/fbank2/librispeech_cuts_{key}-with-whisper-embeddings.jsonl.gz",
-    #     )
-    import pickle
-    import pdb; pdb.set_trace()
-    cuts = load_manifest("data/fbank2/librispeech_cuts_train-all-shuf.jsonl.gz")
-    spkr_dict = get_spkr_dict(cuts)
-    print(f"Number of speakers: {len(spkr_dict)}")
-    with open("data/speaker/librispeech_cuts_train-all-shuf.pkl", "wb") as f:
-        pickle.dump(spkr_dict, f)
+    keys = ["train-clean-100", "train-all-shuf"]
+    for key in keys:
+        add_fields_to_manifest(
+            orig_manifest=f"data/vq_fbank_cb_16_with_small.en/librispeech_cuts_{key}.jsonl.gz",
+            output_manifest=f"data/vq_fbank_cb_16_with_small.en/librispeech_cuts_{key}-with-3-embeddings.jsonl.gz",
+            beats_manifest=f"data/vq_fbank_cb_16_with_small.en/librispeech_cuts_{key}-with-beats-embeddings.jsonl.gz",
+            ecapa_manifest=f"data/vq_fbank_cb_16_with_small.en/librispeech_cuts_{key}-with-ecapa-embeddings.jsonl.gz",
+            whisper_manifest=f"data/vq_fbank_cb_16_with_small.en/librispeech_cuts_{key}-with-whisper-large--1-embeddings.jsonl.gz",
+            whisper_cb_manifest=f"data/vq_fbank_cb_16_with_small.en/with_cb_librispeech_{key}.jsonl.gz",
+        )
+    # import pickle
+    # import pdb; pdb.set_trace()
+    # cuts = load_manifest("data/fbank2/librispeech_cuts_train-all-shuf.jsonl.gz")
+    # spkr_dict = get_spkr_dict(cuts)
+    # print(f"Number of speakers: {len(spkr_dict)}")
+    # with open("data/speaker/librispeech_cuts_train-all-shuf.pkl", "wb") as f:
+    #     pickle.dump(spkr_dict, f)
     
