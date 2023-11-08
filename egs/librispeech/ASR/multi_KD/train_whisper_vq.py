@@ -35,7 +35,7 @@ if not is_module_available("multi_quantization"):
 
 import multi_quantization as quantization
 from kd_datamodule import LibriSpeechKDDataModule
-from lhotse import CutSet, load_manifest
+from lhotse import CutSet, load_manifest_lazy
 from lhotse.cut import MonoCut
 from lhotse.features.io import NumpyHdf5Writer
 
@@ -105,6 +105,13 @@ class VQ_trainer:
         )
 
         parser.add_argument(
+            "--input-manifest",
+            type=str,
+            required=True,
+            help="The cuts to be encoded by the codebooks "
+        )
+
+        parser.add_argument(
             "--quantizer-file-path",
             type=str,
             default="data/quantizer/librispeech_cb16_quantizer.pt",
@@ -127,21 +134,23 @@ class VQ_trainer:
 
     def load_quantizer(self, device):
         
-        assert self.quantizer_file_path.exists()
+        assert self.params.quantizer_file_path.exists()
         quantizer = quantization.Quantizer(
             dim=self.params.embedding_dim,
             num_codebooks=self.params.num_codebooks,
             codebook_size=256,
         )
-        quantizer.load_state_dict(torch.load(self.quantizer_file_path))
+        quantizer.load_state_dict(torch.load(self.params.quantizer_file_path))
+        quantizer.to(device)
 
         return quantizer
 
     def train_quantizer(self):
-        
         if self.params.quantizer_file_path.exists():
             logging.info(f"The quantizer already exists at {self.params.quantizer_file_path}")
             return
+
+        self.params.quantizer_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         logging.info("Start to train quantizer.")
         trainer = quantization.QuantizerTrainer(
@@ -171,25 +180,25 @@ class VQ_trainer:
 
         quantizer = trainer.get_quantizer()
         torch.save(quantizer.state_dict(), self.params.quantizer_file_path)
+        logging.info(f"Saved the quantizer to {self.params.quantizer_file_path}")
 
     @torch.no_grad()
-    def extract_codebook_indexes(self, quantizer):
-        
-        
+    def extract_codebook_indexes(self, extract_dl, quantizer):
         manifest_file_path = self.params.vq_dir / f"librispeech_{params.subset}_cb_{params.num_codebooks}.h5"
 
         num_cuts = 0
         new_cuts = []
 
-        with NumpyHdf5Writer() as writer:
-            for batch_idx, batch in enumerate(self.manifest):
+        with NumpyHdf5Writer(manifest_file_path) as writer:
+            for batch_idx, batch in enumerate(extract_dl):
                 whisper_embeddings = batch["whisper_embedding"]
-                whisper_embedding_lens = batch["whisper_embedding"]
+                whisper_embedding_lens = batch["whisper_embedding_lens"]
                 supervisions = batch["supervisions"]
                 cut_list = supervisions["cut"]
 
-                codebook_indexes = quantizer.encode(encoder_embedding)
-
+                codebook_indexes = quantizer.encode(whisper_embeddings.to(self.params.device))
+                # (N,T,C)
+                codebook_indexes = codebook_indexes.to("cpu").numpy()
                 assert np.min(codebook_indexes) >= 0
                 assert np.max(codebook_indexes) < 256
                 assert len(cut_list) == codebook_indexes.shape[0]
@@ -202,9 +211,10 @@ class VQ_trainer:
                         duration=cut.duration,
                         channel=cut.channel,
                     )
-                    new_cut.codebook_indexes = writer.store_array(
+                    
+                    new_cut.whisper_codebook_indexes = writer.store_array(
                         key=cut.id,
-                        value=codebook_indexes[idx][: num_frames[idx]],
+                        value=codebook_indexes[idx][: whisper_embedding_lens[idx]],
                         frame_shift=0.02,
                         temporal_dim=0,
                         start=0,
@@ -212,7 +222,7 @@ class VQ_trainer:
                     new_cuts.append(new_cut)
                     num_cuts += 1
 
-                logging.info(f"Processed {num_cuts} so far")
+                logging.info(f"Processed {num_cuts} cuts so far")
 
 
         output_manifest = self.params.vq_dir / f"with_cb_librispeech_{self.params.subset}.jsonl.gz"
@@ -223,31 +233,42 @@ class VQ_trainer:
 
 def main(params):
     
-    setup_logger(f"{params.vq_dir}/log-vq-extraction")
+    setup_logger(f"{params.vq_dir}/log/log-vq-extraction")
 
     logging.info("Training started")
+    logging.info(params)
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda")
     params.device = device
 
+    librispeech = LibriSpeechKDDataModule(params)
+
     vq_trainer = VQ_trainer(params)
     
     vq_trainer.train_quantizer()
-    import pdb; pdb.set_trace()
-    quantizer = vq_trainer.load_quantizer()
+    
+    quantizer = vq_trainer.load_quantizer(device=device)
     quantizer.to(device)
 
-    vq_trainer.extract_codebook_indexes(quantizer=quantizer)
-    
-    pass
+    cuts = load_manifest_lazy(params.input_manifest)
+    extract_dl = librispeech.valid_dataloaders(cuts)
+
+    logging.info("Start extracting codebook indexes")
+    vq_trainer.extract_codebook_indexes(
+        extract_dl=extract_dl,
+        quantizer=quantizer,
+    )
+
+    logging.info("Finished")
 
 
 if __name__=="__main__":
 
     parser = get_parser()
     VQ_trainer.add_arguments(parser)
+    LibriSpeechKDDataModule.add_arguments(parser)
 
     args = parser.parse_args()
     params = AttributeDict()
@@ -255,6 +276,8 @@ if __name__=="__main__":
 
     params.quantizer_file_path = Path(params.quantizer_file_path)
     params.vq_dir = Path(params.vq_dir)
+
+    assert params.world_size == 1, "Currently only support 1 GPU"
 
     main(params)
 
