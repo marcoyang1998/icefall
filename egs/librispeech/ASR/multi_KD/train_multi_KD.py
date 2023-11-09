@@ -273,6 +273,22 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--num-codebooks",
+        type=int,
+        default=32,
+        help="""Number of codebooks. Note that this number need to be twice as it should be if
+        using the subsampled output of zipformer encoder;
+        """
+    )
+
+    parser.add_argument(
+        "--mvq-kd-layer-idx",
+        type=int,
+        default=-1,
+        help="Using the output of which zipformer block for MVQ",
+    )
+
+    parser.add_argument(
         "--use-subsampled_output",
         type=str2bool,
         default=True,
@@ -463,6 +479,13 @@ def get_parser():
         help="Scale of the whisper loss"
     )
 
+    parser.add_argument(
+        "--whisper-cb-loss-scale",
+        type=float,
+        default=0.01,
+        help="Scale of the whisper codebook loss"
+    )
+
     add_model_arguments(parser)
 
     return parser
@@ -596,6 +619,10 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_whisper=params.use_whisper,
         whisper_dim=params.whisper_dim,
         speaker_input_idx=params.speaker_input_idx,
+        mvq_KD=params.whisper_mvq,
+        num_codebooks=params.num_codebooks if params.whisper_mvq else -1,
+        mvq_kd_layer=params.mvq_kd_layer_idx,
+        cb_input_dim=max(_to_int_tuple(params.encoder_dim)),
         use_subsampled_output=params.use_subsampled_output,
     )
     return model
@@ -750,8 +777,10 @@ def compute_loss(
     supervisions = batch["supervisions"]
     beats_embeddings = batch["beats_embedding"].to(device) # (N,1,527)
     ecapa_embeddings = batch["ecapa_embedding"].to(device)
-    whisper_embeddings = batch["whisper_embedding"].to(device)
-    whisper_embedding_lens = batch["whisper_embedding_lens"].to(device)
+    whisper_embeddings = batch["whisper_embedding"]
+    whisper_embedding_lens = batch["whisper_embedding_lens"]
+    whisper_codebook_indexes = batch["whisper_codebook_indexes"].to(device)
+    whisper_codebook_indexes_lens = batch["whisper_codebook_indexes_lens"].to(device)
 
     feature_lens = supervisions["num_frames"].to(device)
 
@@ -763,14 +792,16 @@ def compute_loss(
     y = k2.RaggedTensor(y)
 
     with torch.set_grad_enabled(is_training):
-        beats_loss, ecapa_loss, whisper_loss = model(
+        beats_loss, ecapa_loss, whisper_loss, whisper_cb_loss = model(
             x=feature,
             x_lens=feature_lens,
             y=y,
             teacher_beats_embeddings=beats_embeddings if params.use_beats else None,
             teacher_ecapa_embeddings=ecapa_embeddings if params.use_ecapa else None,
-            teacher_whisper_embeddings=whisper_embeddings if params.use_whisper else None,
-            teacher_whisper_embedding_lens=whisper_embedding_lens if params.use_whisper else None,
+            teacher_whisper_embeddings=whisper_embeddings.to(device) if params.use_whisper else None,
+            teacher_whisper_embedding_lens=whisper_embedding_lens.to(device) if params.use_whisper else None,
+            teacher_whisper_codebook_indexes=whisper_codebook_indexes if params.whisper_mvq else None,
+            teacher_whisper_codebook_indexes_lens=whisper_codebook_indexes_lens if params.whisper_mvq else None,
             return_middle_out=True,
         )
 
@@ -781,6 +812,8 @@ def compute_loss(
             loss += ecapa_loss.sum() * params.ecapa_loss_scale
         if params.use_whisper:
             loss += whisper_loss * params.whisper_loss_scale
+        if params.whisper_mvq and is_training:
+            loss += whisper_cb_loss * params.whisper_cb_loss_scale
 
     assert loss.requires_grad == is_training
 
@@ -797,6 +830,8 @@ def compute_loss(
         info["ecapa_loss"] = ecapa_loss.detach().cpu().item()
     if whisper_loss is not None:
         info["whisper_loss"] = whisper_loss.detach().cpu().item()
+    if whisper_cb_loss is not None and is_training:
+        info["whisper_cb_loss"] = whisper_cb_loss.detach().cpu().item()
 
     return loss, info
 
