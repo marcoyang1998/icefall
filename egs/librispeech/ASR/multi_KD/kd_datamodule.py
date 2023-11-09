@@ -337,6 +337,13 @@ class LibriSpeechKDDataModule:
             help="If use whisper teacher model when collecting batch;",
             default=True,
         )
+
+        group.add_argument(
+            "--whisper-mvq",
+            type=str2bool,
+            help="If use whisper codebook indexes at targets;",
+            default=False,
+        )
         
         group.add_argument(
             "--beats-ckpt",

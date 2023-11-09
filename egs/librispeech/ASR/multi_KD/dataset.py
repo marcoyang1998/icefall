@@ -44,6 +44,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         return_cuts: bool = False,
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
+        return_codebook_indexes: bool = False,
         input_strategy: BatchIO = PrecomputedFeatures(),
         on_the_fly_feats: bool = False,
         beats: torch.nn.Module = None,
@@ -73,6 +74,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         self.input_transforms = ifnone(input_transforms, [])
         self.input_strategy = input_strategy
         self.on_the_fly_feats = on_the_fly_feats
+        self.return_codebook_indexes = return_codebook_indexes # MVQ
         
         # The teacher models
         self.beats = beats
@@ -129,9 +131,18 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 
             if self.whisper is not None:
                 whisper_embeddings, whisper_embedding_lens = self.whisper.get_embeddings(audio=audios, audio_lens=audio_lens) # (N,T,C)
+                if self.return_codebook_indexes:
+                    whisper_embeddings = torch.tensor(0.)
+                    whisper_embedding_lens = torch.tensor(0.)
+                else:
+                    whisper_embeddings = torch.tensor(0.)
+                    whisper_embedding_lens = torch.tensor(0.)
             else:
                 whisper_embeddings = torch.tensor(0.)
                 whisper_embedding_lens = torch.tensor(0.)
+                whisper_embeddings = torch.tensor(0.)
+                whisper_embedding_lens = torch.tensor(0.)
+
         else:
             # collate the pre-computed teacher embeddings
             cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
@@ -157,7 +168,15 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 ) # (B,T,C), (B, )
             else:
                 whisper_embeddings = torch.tensor(0.)
-                whisper_embedding_lens = torch.tensor(0.)            
+                whisper_embedding_lens = torch.tensor(0.)
+            
+            if hasattr(cuts_pre_mixed[0], "whisper_codebook_indexes"):
+                whisper_codebook_indexes, whisper_codebook_indexes_lens = collate_custom_field(
+                    cuts_pre_mixed, "whisper_codebook_indexes", pad_value=-100
+                ) # (B,T,C), (B, )
+            else:
+                whisper_codebook_indexes = torch.tensor(0.)
+                whisper_codebook_indexes_lens = torch.tensor(0.)
         
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
@@ -185,6 +204,8 @@ class MultiKDDataset(torch.utils.data.Dataset):
             "ecapa_embedding": ecapa_embeddings,
             "whisper_embedding": whisper_embeddings,
             "whisper_embedding_lens": whisper_embedding_lens,
+            "whisper_codebook_indexes": whisper_codebook_indexes,
+            "whisper_codebook_indexes_lens": whisper_codebook_indexes_lens
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)

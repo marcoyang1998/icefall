@@ -29,6 +29,7 @@ from icefall.utils import add_sos, make_pad_mask, AttributeDict
 from scaling import ScaledLinear
 
 from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
+from multi_quantization.prediction import JointCodebookLoss
 
 
 class MultiKDModel(nn.Module):
@@ -42,6 +43,10 @@ class MultiKDModel(nn.Module):
         use_ecapa: bool = True,
         use_whisper: bool = True,
         speaker_input_idx: int = -1,
+        mvq_KD: bool = False,
+        num_codebooks: int = 32,
+        mvq_kd_layer: int = -1,
+        cb_input_dim: int = 512,
         use_subsampled_output: bool = True
     ):
         """A joint CTC & Transducer ASR model.
@@ -74,6 +79,13 @@ class MultiKDModel(nn.Module):
             Whether use transducer head. Default: True.
           use_ctc:
             Whether use CTC head. Default: False.
+          use_whisper:
+            If use l1 embedding loss for whisper features
+          mvq_KD:
+            If use codebook loss for whisper teacher
+          mvq_kd_layer:
+            Use which zipformer block's output for MVQ-KD. If -1, use `encoder_out`, 
+            Otherwise use middle_out[mvq_kd_layer][-1]
           speaker_input_idx:
             Which modules results to be inputted to the ecapa module
           use_subsampled_output:
@@ -119,8 +131,23 @@ class MultiKDModel(nn.Module):
                 self.whisper_projection = nn.Linear(encoder_dim, 2 * whisper_dim) # a linear transform
             else:
                 self.whisper_projection = nn.Linear(256, whisper_dim) # a linear transform
+            self.codebook_loss_net = None
         else:
             self.whisper_projection = None
+
+        # if use codebook loss
+        self.mvq_KD = mvq_KD
+        self.mvq_layer = mvq_kd_layer
+        if mvq_KD:
+            assert num_codebooks > 0
+            self.codebook_loss_net = JointCodebookLoss(
+                predictor_channels=cb_input_dim,
+                num_codebooks=num_codebooks,
+                is_joint=False,
+            )
+        else:
+            self.codebook_loss_net = None
+
 
     def forward_encoder(
         self, 
@@ -165,6 +192,8 @@ class MultiKDModel(nn.Module):
         teacher_ecapa_embeddings: torch.Tensor = None,
         teacher_whisper_embeddings: torch.Tensor = None,
         teacher_whisper_embedding_lens: torch.Tensor = None,
+        teacher_whisper_codebook_indexes: torch.Tensor = None,
+        teacher_whisper_codebook_indexes_lens: torch.Tensor = None,
         return_middle_out: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -177,15 +206,19 @@ class MultiKDModel(nn.Module):
           y:
             A ragged tensor with 2 axes [utt][label]. It contains labels of each
             utterance.
-          prune_range:
-            The prune range for rnnt loss, it means how many symbols(context)
-            we are considering for each frame to compute the loss.
-          am_scale:
-            The scale to smooth the loss with am (output of encoder network)
-            part
-          lm_scale:
-            The scale to smooth the loss with lm (output of predictor network)
-            part
+          teacher_beats_embeddings:
+            BEATs teacher's embedding (N, 1, 527)
+          teacher_ecapa_embeddings:
+            Ecapa teacher's embedding (N, 1, 192)
+          teacher_whisper_embeddings:
+            Whisper teachers embeddings (N,T,C)
+          teacher_whisper_embedding_lens:
+            The length of the whisper teacher's embedding (N,)
+          teacher_whisper_codebook_indexes:
+            The whisper teacher's embeddings encoded in codebook indexes (N,T, num_cb)
+          teacher_whisper_codebook_indexes_lens:
+            The length of the whisper teacher's codebook indexes (N,)
+
         Returns:
           Return the transducer losses and CTC loss,
           in form of (simple_loss, pruned_loss, ctc_loss)
@@ -258,8 +291,16 @@ class MultiKDModel(nn.Module):
             whisper_loss = whisper_loss.sum() / teacher_whisper_embeddings.shape[-1]
         else:
             whisper_loss = None
+
+        if (self.mvq_KD and self.training) and teacher_whisper_codebook_indexes is not None:
+            whisper_cb_loss = self.forward_codebook(
+                middle_layer_output=middle_out[self.mvq_layer][-1] if self.mvq_layer != -1 else encoder_out,
+                codebook_indexes=teacher_whisper_codebook_indexes,
+            )
+        else:
+            whisper_cb_loss = None
         
-        return beats_loss, ecapa_loss, whisper_loss
+        return beats_loss, ecapa_loss, whisper_loss, whisper_cb_loss
     
     def forward_beats(
         self,
@@ -294,6 +335,43 @@ class MultiKDModel(nn.Module):
         encoder_out_lens: torch.Tensor,
     ):
         return self.whisper_projection(F.relu(encoder_out))
+
+    def forward_codebook(
+        self,
+        middle_layer_output: torch.Tensor,
+        codebook_indexes: torch.Tensor,
+    ):
+        """Calculate the codebook loss for the model (knowledge distillation)
+
+        Args:
+                middle_layer_output (torch.Tensor):
+                        The embeddings extracted from the middle layer of the zipformer encoder
+                codebook_indexes (torch.Tensor):
+                        The encoded codebook indexes for knowledge distillation
+
+        Returns:
+                The codebook loss value
+        """
+        len_CI = codebook_indexes.size(1)
+        len_mid_layer = middle_layer_output.size(1)
+        ratio = round(len_CI / len_mid_layer)
+
+        if ratio == 1:  # Having the same frame rate
+            assert len_CI > len_mid_layer, (len_CI, len_mid_layer)
+            codebook_indexes = codebook_indexes[:, :len_mid_layer, :]
+            assert codebook_indexes.size(1) == middle_layer_output.size(1)
+            codebook_loss = self.codebook_loss_net(
+                middle_layer_output, codebook_indexes
+            )
+        elif ratio == 2:
+            codebook_indexes = self.concat_successive_codebook_indexes(
+                middle_layer_output, codebook_indexes
+            )
+            codebook_loss = self.codebook_loss_net(
+                middle_layer_output, codebook_indexes
+            )
+
+        return codebook_loss
     
     @staticmethod
     def concat_successive_whisper_embeddings(encoder_out, whisper_embeddings):
@@ -307,6 +385,38 @@ class MultiKDModel(nn.Module):
             whisper_embeddings = whisper_embeddings[:, : t_expected, :]
         assert whisper_embeddings.shape[1] == encoder_out.shape[1]
         return whisper_embeddings
+
+    @staticmethod
+    def concat_successive_codebook_indexes(middle_layer_output, codebook_indexes):
+        # Output rate of hubert is 50 frames per second,
+        # while that of current encoder is 25.
+        # Following code handling two issues:
+        # 1.
+        #   Roughly speaking, to generate another frame output,
+        #   hubert needes extra two frames,
+        #   while current encoder needs extra four frames.
+        #   Suppose there are only extra three frames provided,
+        #   hubert will generate another frame while current encoder does nothing.
+        # 2.
+        #   codebook loss is a frame-wise loss, to enalbe 25 frames studnet output
+        #   learns from 50 frames teacher output, two successive frames of teacher model
+        #   output is concatenated together.
+        t_expected = middle_layer_output.shape[1]
+        N, T, C = codebook_indexes.shape
+        assert T >= t_expected, (T, t_expected)
+        # Handling issue 1.
+        if T >= t_expected * 2:
+            codebook_indexes = codebook_indexes[:, : t_expected * 2, :]
+        if (
+            T / t_expected < 1.1
+        ):  # To be changed, dirty hack to jump out of this function
+            codebook_indexes = codebook_indexes[:, :t_expected, :]
+            assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
+            return codebook_indexes
+        # Handling issue 2.
+        codebook_indexes = codebook_indexes.reshape(N, t_expected, C * 2)
+        assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
+        return codebook_indexes
     
 
 class AsrModel(nn.Module):
