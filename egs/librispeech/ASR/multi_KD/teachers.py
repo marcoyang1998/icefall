@@ -66,8 +66,10 @@ class WhisperTeacher(Teacher):
     def __init__(
         self,
         model: torch.nn.Module,
+        n_mels: int = 80,
     ):
         super().__init__(model)
+        self.n_mels = n_mels
         
     def forward_encoder(
         self,
@@ -114,7 +116,7 @@ class WhisperTeacher(Teacher):
         device = next(self.model.parameters()).device
         audio = audio.to(device)
         audio_lens = audio_lens.to(device)
-        mel = log_mel_spectrogram(audio) # (N, n_mel, T)
+        mel = log_mel_spectrogram(audio, n_mels=self.n_mels) # (N, n_mel, T)
         
         if mel.ndim == 2:
             mel = mel.unsqueeze(0)
