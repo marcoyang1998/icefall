@@ -123,12 +123,14 @@ class LibriSpeechKDDataModule:
     def load_whisper(self, args, device):
         # Currently only load the encoder model
         model = whisper.load_model(self.args.whisper_version, device=device)
+        n_mels = model.dims.n_mels
         model = model.encoder
         model.eval()
         
         logging.info(f"Number of whisper params: {sum(p.numel()) for p in model.parameters()}")
+        logging.info(f"Whisper version: {self.args.whisper_version}; Input dims {n_mels}")
         
-        return WhisperTeacher(model=model)
+        return WhisperTeacher(model=model, n_mels=n_mels)
     
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser):
