@@ -313,6 +313,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--use-encoder-projection",
+        type=str2bool,
+        default=False,
+        help="If add a final projection layer at the end of the encoder"
+    )
+
+    parser.add_argument(
+        "--encoder-projection-dim",
+        type=int,
+        default=-1,
+        help="The output dimension of the projection"
+    )
+
+    parser.add_argument(
         "--freeze-encoder",
         type=str2bool,
         default=False,
@@ -677,12 +691,19 @@ def get_decoder_model(params: AttributeDict) -> nn.Module:
 
 def get_joiner_model(params: AttributeDict) -> nn.Module:
     joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
         decoder_dim=params.decoder_dim,
         joiner_dim=params.joiner_dim,
         vocab_size=params.vocab_size,
     )
     return joiner
+
+def get_encoder_final_projection(params: AttributeDict) -> nn.Module:
+    layer = nn.Linear(
+        max(_to_int_tuple(params.encoder_dim)),
+        params.encoder_projection_dim,
+    )
+    return layer
 
 
 def get_model(params: AttributeDict) -> nn.Module:
@@ -702,12 +723,19 @@ def get_model(params: AttributeDict) -> nn.Module:
         decoder = None
         joiner = None
 
+    if params.use_encoder_projection:
+        encoder_proj = get_encoder_final_projection(params)
+    else:
+        encoder_proj = None
+        
+
     model = AsrModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
         joiner=joiner,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_projection=encoder_proj,
+        encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
         decoder_dim=params.decoder_dim,
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
@@ -1291,6 +1319,9 @@ def run(rank, world_size, args):
     logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
     model.encoder.lr_scale = params.encoder_lr_scale
     model.encoder_embed.lr_scale = params.encoder_lr_scale
+    if params.use_encoder_projection:
+        logging.info(f"Also setting the lr scale of the projection layer to {params.encoder_lr_scale}")
+        model.encoder_projection.lr_scale = params.encoder_lr_scale
 
     model.to(device)
     if world_size > 1:

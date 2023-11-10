@@ -18,6 +18,7 @@
 
 from typing import Optional, Tuple, List
 import logging
+import random
 
 import k2
 import torch
@@ -285,6 +286,11 @@ class MultiKDModel(nn.Module):
                 teacher_whisper_embeddings,
             )
             whisper_loss = F.l1_loss(whisper_embeddings, teacher_whisper_embeddings, reduction="none")
+            if self.training:
+                whisper_loss.clamp_(min=-30, max=30)
+                if random.random() < 0.1:
+                    logging.info("Clamping the whisper loss")
+                
             mask = make_pad_mask(encoder_out_lens)
             whisper_loss.masked_fill_(mask.unsqueeze(-1), 0.0)
             # whisper_loss = whisper_loss.sum()/((~mask).sum() * teacher_whisper_embeddings.shape[-1])
@@ -293,8 +299,13 @@ class MultiKDModel(nn.Module):
             whisper_loss = None
 
         if (self.mvq_KD and self.training) and teacher_whisper_codebook_indexes is not None:
+            if self.mvq_layer == -1:
+                middle_layer = encoder_out
+            else:
+                # middle_layer = self.encoder.encoders[self.mvq_layer].upsample(middle_out[self.mvq_layer][-1]).permute(1,0,2)
+                middle_layer = middle_out[self.mvq_layer][-1].permute(1,0,2)
             whisper_cb_loss = self.forward_codebook(
-                middle_layer_output=middle_out[self.mvq_layer][-1] if self.mvq_layer != -1 else encoder_out,
+                middle_layer_output=middle_layer,
                 codebook_indexes=teacher_whisper_codebook_indexes,
             )
         else:
@@ -363,9 +374,9 @@ class MultiKDModel(nn.Module):
             codebook_loss = self.codebook_loss_net(
                 middle_layer_output, codebook_indexes
             )
-        elif ratio == 2:
+        elif ratio >= 2:
             codebook_indexes = self.concat_successive_codebook_indexes(
-                middle_layer_output, codebook_indexes
+                middle_layer_output, codebook_indexes, ratio=ratio
             )
             codebook_loss = self.codebook_loss_net(
                 middle_layer_output, codebook_indexes
@@ -387,7 +398,7 @@ class MultiKDModel(nn.Module):
         return whisper_embeddings
 
     @staticmethod
-    def concat_successive_codebook_indexes(middle_layer_output, codebook_indexes):
+    def concat_successive_codebook_indexes(middle_layer_output, codebook_indexes, ratio=2):
         # Output rate of hubert is 50 frames per second,
         # while that of current encoder is 25.
         # Following code handling two issues:
@@ -406,7 +417,7 @@ class MultiKDModel(nn.Module):
         assert T >= t_expected, (T, t_expected)
         # Handling issue 1.
         if T >= t_expected * 2:
-            codebook_indexes = codebook_indexes[:, : t_expected * 2, :]
+            codebook_indexes = codebook_indexes[:, : t_expected * ratio, :]
         if (
             T / t_expected < 1.1
         ):  # To be changed, dirty hack to jump out of this function
@@ -414,7 +425,7 @@ class MultiKDModel(nn.Module):
             assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
             return codebook_indexes
         # Handling issue 2.
-        codebook_indexes = codebook_indexes.reshape(N, t_expected, C * 2)
+        codebook_indexes = codebook_indexes.reshape(N, t_expected, C * ratio)
         assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
         return codebook_indexes
     
@@ -426,6 +437,7 @@ class AsrModel(nn.Module):
         encoder: EncoderInterface,
         decoder: Optional[nn.Module] = None,
         joiner: Optional[nn.Module] = None,
+        encoder_projection: Optional[nn.Module] = None,
         encoder_dim: int = 384,
         decoder_dim: int = 512,
         vocab_size: int = 500,
@@ -483,6 +495,8 @@ class AsrModel(nn.Module):
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
+        self.whisper_projection = encoder_projection # can be None
+        self.encoder_projection = self.whisper_projection
 
         self.use_transducer = use_transducer
         if use_transducer:
@@ -561,6 +575,9 @@ class AsrModel(nn.Module):
 
         encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
+
+        if self.encoder_projection is not None:
+            encoder_out = self.encoder_projection(encoder_out)
 
         return encoder_out, encoder_out_lens, middle_out
 
