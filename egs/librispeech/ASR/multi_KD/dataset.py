@@ -132,16 +132,16 @@ class MultiKDDataset(torch.utils.data.Dataset):
             if self.whisper is not None:
                 whisper_embeddings, whisper_embedding_lens = self.whisper.get_embeddings(audio=audios, audio_lens=audio_lens) # (N,T,C)
                 if self.return_codebook_indexes:
-                    whisper_embeddings = torch.tensor(0.)
-                    whisper_embedding_lens = torch.tensor(0.)
+                    whisper_codebook_indexes = torch.tensor(0.)
+                    whisper_codebook_indexes_lens = torch.tensor(0.)
                 else:
-                    whisper_embeddings = torch.tensor(0.)
-                    whisper_embedding_lens = torch.tensor(0.)
+                    whisper_codebook_indexes = torch.tensor(0.)
+                    whisper_codebook_indexes_lens = torch.tensor(0.)
             else:
                 whisper_embeddings = torch.tensor(0.)
                 whisper_embedding_lens = torch.tensor(0.)
-                whisper_embeddings = torch.tensor(0.)
-                whisper_embedding_lens = torch.tensor(0.)
+                whisper_codebook_indexes = torch.tensor(0.)
+                whisper_codebook_indexes_lens = torch.tensor(0.)
 
         else:
             # collate the pre-computed teacher embeddings
