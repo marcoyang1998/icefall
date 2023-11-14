@@ -195,6 +195,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 [
                     {
                         "text": supervision.text if supervision.text is not None else "Random text",
+                        "audio_event": supervision.audio_event if supervision.audio_event is not None else "Speech",
                     }
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions

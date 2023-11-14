@@ -744,3 +744,10 @@ class LibriSpeechKDDataModule:
         return load_manifest_lazy(
             "data/fbank_audioset/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
         )
+
+    @lru_cache()
+    def audioset_eval_cuts(self) -> CutSet:
+        logging.info("About to get the audioset eval cuts.")
+        return load_manifest_lazy(
+            "data/fbank_audioset/cuts_audioset_eval.jsonl.gz"
+        )
