@@ -63,7 +63,10 @@ class Transformer(torch.nn.Module):
         self.d_model = d_model
 
         self.embed = nn.Linear(input_dim, d_model)
-        self.norm_before = nn.LayerNorm(d_model)
+        if use_bias_norm:
+            self.norm_before = BiasNorm(d_model)
+        else:
+            self.norm_before = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout_rate)
 
         self.encoder_pos = RelPositionalEncoding(d_model, dropout_rate)
@@ -155,7 +158,6 @@ class TransformerEncoder(torch.nn.Module):
             [copy.deepcopy(encoder_layer) for i in range(num_layers)]
         )
         self.num_layers = num_layers
-        
         
         if layer_bypass:
             delta = (1. / num_layers) * (warmup_end - warmup_begin)

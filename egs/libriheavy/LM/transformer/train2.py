@@ -437,21 +437,6 @@ def get_params() -> AttributeDict:
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(',')))
 
-def get_model_legacy(params: AttributeDict) -> nn.Module:
-    from model_old import TransformerLM
-    
-    model = TransformerLM(
-        vocab_size=params.vocab_size,
-        d_model=params.encoder_dim,
-        embedding_dim=params.embedding_dim,
-        dim_feedforward=params.dim_feedforward,
-        nhead=params.nhead,
-        num_layers=params.num_layers,
-        tie_weights=params.tie_weights,
-        params=params,
-    )
-    return model
-
 def get_model(params: AttributeDict) -> nn.Module:
     model = TransformerLM(
         vocab_size=params.vocab_size,
@@ -884,8 +869,6 @@ def train_one_epoch(
                     tb_writer.add_scalar(
                         "train/grad_scale", cur_grad_scale, params.batch_idx_train
                     )
-
-
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")

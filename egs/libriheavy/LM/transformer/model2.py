@@ -38,6 +38,7 @@ class TransformerLM(torch.nn.Module):
         emb_dropout_rate: float = 0.0,
         warmup_batches: float = 4000.0,
         layer_bypass: bool = False,
+        use_bias_norm: bool = False,
         use_balancer: bool = False,
         params: AttributeDict = None,
     ):
@@ -61,7 +62,8 @@ class TransformerLM(torch.nn.Module):
             dropout_rate=dropout,
             warmup_batches=warmup_batches,
             layer_bypass=layer_bypass,
-            use_balancer=use_balancer
+            use_balancer=use_balancer,
+            use_bias_norm=use_bias_norm,
         )
 
         self.output_linear = torch.nn.Linear(

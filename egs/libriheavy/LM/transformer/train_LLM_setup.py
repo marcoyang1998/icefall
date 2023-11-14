@@ -153,6 +153,24 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         last output linear layer
         """,
     )
+    
+    parser.add_argument(
+        "--layer-bypass",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--use-balancer",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--use-bias-norm",
+        type=str2bool,
+        default=False,
+    )
 
 
 
@@ -230,6 +248,14 @@ def get_parser():
         "--weight-decay",
         type=float,
         default=0.1
+    )
+    
+
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=12,
     )
     
     parser.add_argument(
@@ -311,19 +337,14 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
-    
-    parser.add_argument(
-        "--layer-bypass",
-        type=str2bool,
-        default=False,
-    )
-    
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=12,
-    )
 
+    parser.add_argument(
+        "--token-times",
+        type=float,
+        default=20.0,
+        help="Used to calculate LPU",
+    )
+        
     add_model_arguments(parser)
 
     return parser
@@ -387,7 +408,6 @@ def get_params() -> AttributeDict:
             "warm_step": 2000,
             "env_info": get_env_info(),
             "vocab_size": 256, # bytes
-            #"batch_size": 12,
             "bytes_per_segment": 1024,
             "train_file_list": "train.txt",
             "valid_file_list": "valid.txt",
@@ -422,7 +442,10 @@ def get_model(params: AttributeDict) -> nn.Module:
         params=params,
         warmup_batches=params.warmup_batches,
         layer_bypass=params.layer_bypass,
+        use_bias_norm=params.use_bias_norm,
+        use_balancer=params.use_balancer,
     )
+    logging.info(model.encoder.encoder.layers[0])
     return model
 
 
@@ -745,7 +768,6 @@ def train_one_epoch(
 
             # NOTE: We use reduction==sum and loss is computed over utterances
             # in the batch and there is no normalization to it so far.
-            
             scaler.scale(loss).backward()
             tokens_seen = params.batch_idx_train * params.bytes_per_segment * params.batch_size * get_world_size()
             
@@ -753,7 +775,6 @@ def train_one_epoch(
             last_lr = scheduler.step_update(params.batch_idx_train)
             scaler.update()
             optimizer.zero_grad()
-            
         except:  # noqa
             save_bad_model()
             display_and_save_batch(batch, params=params)
@@ -896,13 +917,18 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    logging.info(params)
-
     logging.info("About to create model")
     model = get_model(params)
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
+
+    total_tokens = num_param * params.token_times
+    tokens_per_update = params.world_size * params.batch_size * params.bytes_per_segment
+    params.lr_period_updates = total_tokens / tokens_per_update
+
+    logging.info(f"Set LPU to {params.lr_period_updates}")
+    logging.info(params)
 
     assert params.save_every_n >= params.average_period
     model_avg: Optional[nn.Module] = None
@@ -919,7 +945,7 @@ def run(rank, world_size, args):
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank],
-                    find_unused_parameters=True)
+                    find_unused_parameters=False)
 
     optimizer = torch.optim.Adam(
         model.parameters(),

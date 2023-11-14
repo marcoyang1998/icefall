@@ -18,11 +18,11 @@
 import argparse
 import logging
 from pathlib import Path
-from train_with_scheduled_bypass import get_model, get_model_legacy, get_params, add_model_arguments
+from train2 import get_model, get_params, add_model_arguments
 from typing import Tuple
 import torch
 
-from lm_datamodule import LmDataset, LmDataloader
+from lm_datamodule2 import LmDataset
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -104,7 +104,13 @@ def get_parser():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=12,
+        default=18,
+    )
+    
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
     )
     
     add_model_arguments(parser)
@@ -288,7 +294,8 @@ def main():
     model.eval()
     
     valid = LmDataset(params.valid_file_list,
-                      bytes_per_segment=params.bytes_per_segment)
+                      bytes_per_segment=params.bytes_per_segment,
+                      training=False)
     valid_dl = torch.utils.data.DataLoader(
         dataset=valid,
         batch_size=params.batch_size,
