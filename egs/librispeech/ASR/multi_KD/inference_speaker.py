@@ -176,7 +176,7 @@ def decode_dataset(
             batch=batch,
         )
         for id, embedding in zip(cut_ids, speaker_embeddings):
-            embedding_dict[id] = embedding
+            embedding_dict[id] = embedding.detach().cpu()
         if batch["ecapa_embeddings"].ndim > 1:
             for id, embedding in zip(cut_ids, batch["ecapa_embeddings"]):
                 teacher_embedding_dict[id] = embedding.detach().cpu()
@@ -367,13 +367,13 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechKDDataModule(args, device=device, evaluation=True)
     
-    voxceleb1_test_cuts = librispeech.voxceleb1_test_cuts()
-    voxceleb1_cuts = librispeech.voxceleb1_cuts()
-    voxceleb1_cuts += voxceleb1_test_cuts
+    voxceleb1_cuts = librispeech.voxceleb1_test_cuts()
+    # voxceleb1_cuts += librispeech.voxceleb1_cuts()
     
     vox1_dl = librispeech.speaker_test_dataloaders(voxceleb1_cuts)
     
-    test_sets = ["VoxCeleb1-cleaned", "VoxCeleb1-E-cleaned", "VoxCeleb1-H-cleaned"]
+    # test_sets = ["VoxCeleb1-cleaned", "VoxCeleb1-E-cleaned", "VoxCeleb1-H-cleaned"]
+    test_sets = ["VoxCeleb1-cleaned"]
     
     embedding_dict, teacher_embedding_dict = decode_dataset(
         dl=vox1_dl,
