@@ -67,6 +67,7 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 from kd_datamodule import LibriSpeechKDDataModule
+from lhotse import load_manifest_lazy
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
@@ -622,7 +623,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         mvq_KD=params.whisper_mvq,
         num_codebooks=params.num_codebooks if params.whisper_mvq else -1,
         mvq_kd_layer=params.mvq_kd_layer_idx,
-        cb_input_dim=max(_to_int_tuple(params.encoder_dim)),
+        cb_input_dim=max(_to_int_tuple(params.encoder_dim)) if params.mvq_kd_layer_idx == -1 else _to_int_tuple(params.encoder_dim)[params.mvq_kd_layer_idx],
         use_subsampled_output=params.use_subsampled_output,
     )
     return model
@@ -1176,13 +1177,21 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechKDDataModule(args, device=device)
 
-    if not params.full_libri:
-        train_cuts = librispeech.train_clean_100_cuts()
+    if params.use_libriheavy:
+        logging.info(f"Using the mixed dataset")
+        train_cuts = librispeech.all_mixed_cuts()
+    elif params.use_audioset:
+        logging.info(f"Getting audioset cuts")
+        train_cuts = librispeech.audioset_cuts()
     else:
-        train_cuts = librispeech.train_all_shuf_cuts()
+        if not params.full_libri:
+            train_cuts = librispeech.train_clean_100_cuts()
+        else:
+            train_cuts = librispeech.train_all_shuf_cuts()
+    
+    logging.info(train_cuts)
 
     if params.use_vox2:
-        from lhotse import load_manifest_lazy
         train_cuts = load_manifest_lazy(
             "data/fbank/cuts_vox2_train-with-ecapa-embeddings.jsonl.gz"
         )
@@ -1196,7 +1205,7 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
-        if c.duration < 1.0 or c.duration > 20.0:
+        if c.duration < 1.0 or c.duration > 28.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )
@@ -1248,8 +1257,14 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.dev_clean_cuts()
-    valid_cuts += librispeech.dev_other_cuts()
+    if params.use_audioset:
+        valid_cuts = load_manifest_lazy(
+            "data/fbank_audioset/cuts_audioset_eval-with-beats-embeddings.jsonl.gz"
+        )
+    else:
+        valid_cuts = librispeech.dev_clean_cuts()
+        valid_cuts += librispeech.dev_other_cuts()
+
     valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 

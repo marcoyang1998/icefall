@@ -163,6 +163,34 @@ class LibriSpeechKDDataModule:
         )
 
         group.add_argument(
+            "--use-libriheavy",
+            type=str2bool,
+            default=False,
+            help="If add libriheavy as an extra training set",
+        )
+
+        group.add_argument(
+            "--libriheavy-subset",
+            type=str,
+            default="small",
+            choices=["small", "medium", "large"]
+        )
+
+        group.add_argument(
+            "--use-audioset",
+            type=str2bool,
+            default=False,
+            help="If use audioset as an extra training set",
+        )
+
+        group.add_argument(
+            "--audioset-subset",
+            type=str,
+            default="balanced",
+            choices=["balanced", "unbalanced"]
+        )
+
+        group.add_argument(
             "--manifest-dir",
             type=Path,
             default=Path("data/fbank"),
@@ -280,13 +308,6 @@ class LibriSpeechKDDataModule:
             default=False,
             help="When enabled, select noise from audioset and mix it"
             "with training dataset. ",
-        )
-
-        group.add_argument(
-            "--audioset-kd",
-            type=str2bool,
-            default=False,
-            help="When enabled, use audioset as an extra dataset",
         )
         
         group.add_argument(
@@ -709,6 +730,13 @@ class LibriSpeechKDDataModule:
         new_cuts =CutSet.from_cuts(new_cuts)
         
         return new_cuts
+
+    @lru_cache()
+    def all_mixed_cuts(self) -> CutSet:
+        logging.info(f"About to get all mixed cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "all_mixed_cuts.jsonl.gz"
+        )
     
     @lru_cache()
     def voxceleb1_test_cuts(self) -> CutSet:
@@ -741,13 +769,18 @@ class LibriSpeechKDDataModule:
     @lru_cache()
     def audioset_cuts(self) -> CutSet:
         logging.info("About to get the audioset cuts.")
-        return load_manifest_lazy(
-            "data/fbank_audioset/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
+        cuts = load_manifest_lazy(
+            f"data/fbank_audioset/cuts_audioset_balanced-with-beats-embeddings.jsonl.gz"
         )
+        if self.args.audioset_subset == "unbalanced":
+            cuts += load_manifest_lazy(
+                f"data/fbank_audioset/cuts_audioset_unbalanced-with-beats-embeddings.jsonl.gz"
+            )
+        return cuts
 
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
         logging.info("About to get the audioset eval cuts.")
         return load_manifest_lazy(
-            "data/fbank_audioset/cuts_audioset_eval.jsonl.gz"
+            "data/fbank_audioset/cuts_audioset_eval-with-beats-embeddings.jsonl.gz"
         )
