@@ -17,7 +17,7 @@ from lhotse import load_manifest
 from kd_datamodule import LibriSpeechKDDataModule
 
 from train_multi_KD import add_model_arguments, get_model, get_params
-from utils import get_class_dict
+from utils import get_class_dict, str2multihot
 
 from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (
@@ -109,23 +109,16 @@ def get_parser():
         type=str2bool,
         default=False,
     )
+
+    parser.add_argument(
+        "--num-events",
+        type=int,
+        default=527,
+    )
+
     add_model_arguments(parser)
 
     return parser
-
-def str2multihot(events: List[str], n_classes=527, id_mapping=None):
-    # generate multi-hot class labels
-    labels = [list(map(int, event.split(";"))) for event in events]
-    batch_size = len(labels)
-    out = torch.zeros(batch_size, n_classes)
-
-    for i, label in enumerate(labels):
-        if id_mapping is not None:
-            label = [id_mapping[l] for l in label]
-        out[i, label] = 1
-
-    return out, labels
-    
 
 def inference_one_batch(
     params: AttributeDict,
@@ -141,17 +134,22 @@ def inference_one_batch(
 
     supervisions = batch["supervisions"]
     audio_event = supervisions["audio_event"]
-    label, orig_labels = str2multihot(audio_event, id_mapping=ced2beats_mapping)
+
+    if params.trained_with_distillation:
+        label, orig_labels = str2multihot(audio_event, id_mapping=ced2beats_mapping)
+    else:
+        label, orig_labels = str2multihot(audio_event)
+    label = label.detach().cpu()
 
     feature_lens = supervisions["num_frames"].to(device)
     
-    encoder_out, encoder_out_lens, middle_out = model.forward_encoder(feature, feature_lens, return_middle_out=True)
+    encoder_out, encoder_out_lens, _ = model.forward_encoder(feature, feature_lens, return_middle_out=True)
     
     # speaker
     audio_logits = model.forward_beats(encoder_out, encoder_out_lens)
     # sample_mean = audio_logits.mean(dim=-1)
     # audio_logits -= sample_mean.unsqueeze(-1)
-    audio_logits = audio_logits.sigmoid()
+    audio_logits = audio_logits.sigmoid().detach().cpu()
     
     return audio_logits, label
     
@@ -183,8 +181,8 @@ def decode_dataset(
             batch=batch,
         )
         
-        all_logits.append(audio_logits.cpu())
-        all_labels.append(labels.cpu())
+        all_logits.append(audio_logits)
+        all_labels.append(labels)
         
         if batch_idx % 20 == 1:
             logging.info(f"Processed {num_cuts} cuts already.")
@@ -203,7 +201,7 @@ def main():
     params = get_params()
     params.update(vars(args))
         
-    params.res_dir = params.exp_dir / "inference_speaker_verification"
+    params.res_dir = params.exp_dir / "inference_audio_tagging"
     
     if params.iter > 0:
         params.suffix = f"iter-{params.iter}-avg-{params.avg}"
@@ -224,7 +222,12 @@ def main():
         
     logging.info("About to create model")
 
-    model = get_model(params)
+    if params.trained_with_distillation:
+        from train_multi_KD import get_model
+        model = get_model(params)
+    else:
+        from train_audio_tagging import get_model
+        model = get_model(params)
 
     if not params.use_averaged_model:
         if params.iter > 0:
@@ -310,7 +313,6 @@ def main():
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
 
-    # we need cut ids to store speaker embeddings
     args.return_cuts = True
     librispeech = LibriSpeechKDDataModule(args, device=device, evaluation=True)
 
