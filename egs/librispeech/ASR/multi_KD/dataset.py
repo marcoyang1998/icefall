@@ -195,7 +195,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 [
                     {
                         "text": supervision.text if supervision.text is not None else "Random text",
-                        "audio_event": supervision.audio_event if supervision.audio_event is not None else "Speech",
+                        "audio_event": supervision.audio_event if hasattr(supervision, "audio_event") else "Speech",
                     }
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions
@@ -508,7 +508,116 @@ class SpeakerRecognitionDataset(torch.utils.data.Dataset):
 
         return batch
 
+class AudioTaggingDataset(torch.utils.data.Dataset):
+    """This is a dataset for Audio tagging. It supports the following features:
+    """
 
+    def __init__(
+        self,
+        return_cuts: bool = False,
+        cut_transforms: List[Callable[[CutSet], CutSet]] = None,
+        input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
+        input_strategy: BatchIO = PrecomputedFeatures(),
+        beats: torch.nn.Module = None,
+    ):
+        """
+        Icefall MultiKD IterableDataset constructor. See https://github.com/lhotse-speech/lhotse/blob/master/lhotse/dataset/speech_recognition.py
+        for more details.
+
+        :param return_cuts: When ``True``, will additionally return a "cut" field in each batch with the Cut
+            objects used to create that batch.
+        :param cut_transforms: A list of transforms to be applied on each sampled batch,
+            before converting cuts to an input representation (audio/features).
+            Examples: cut concatenation, noise cuts mixing, etc.
+        :param input_transforms: A list of transforms to be applied on each sampled batch,
+            after the cuts are converted to audio/features.
+            Examples: normalization, SpecAugment, etc.
+        :param input_strategy: Converts cuts into a collated batch of audio/features.
+            By default, reads pre-computed features from disk.
+        """
+        super().__init__()
+        # Initialize the fields
+        self.return_cuts = return_cuts
+        self.cut_transforms = ifnone(cut_transforms, [])
+        self.input_transforms = ifnone(input_transforms, [])
+        self.input_strategy = input_strategy
+
+        self.beats = beats
+
+    def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
+        """
+        Return a new batch, with the batch size automatically determined using the constraints
+        of max_frames and max_cuts.
+        """
+
+        # Sort the cuts by duration so that the first one determines the batch time dimensions.
+        cuts = cuts.sort_by_duration(ascending=False)
+        for c in cuts:
+            assert len(c.supervisions) == 1, "Assume all cuts having exact one supervision"
+
+        # Optional CutSet transforms - e.g. padding, or speed perturbation that adjusts
+        # the supervision boundaries.
+        for tnfm in self.cut_transforms:
+            cuts = tnfm(cuts)
+
+        # Sort the cuts again after transforms
+        cuts = cuts.sort_by_duration(ascending=False)
+
+        # Get a tensor with batched feature matrices, shape (B, T, F)
+        # Collation performs auto-padding, if necessary.
+        input_tpl = self.input_strategy(cuts)
+        if len(input_tpl) == 3:
+            # An input strategy with fault tolerant audio reading mode.
+            # "cuts" may be a subset of the original "cuts" variable,
+            # that only has cuts for which we succesfully read the audio.
+            inputs, _, cuts = input_tpl
+        if len(input_tpl) == 4:
+            # This means we are returning the audios as well
+            inputs, input_lens, audios, audio_lens = input_tpl
+            assert len(audios) == inputs.shape[0]
+        else:
+            inputs, input_lens = input_tpl
+            audios = None
+        
+        # Get a dict of tensors that encode the positional information about supervisions
+        # in the batch of feature matrices. The tensors are named "sequence_idx",
+        # "start_frame/sample" and "num_frames/samples".
+        supervision_intervals = self.input_strategy.supervision_intervals(cuts)
+
+        # Apply all available transforms on the inputs, i.e. either audio or features.
+        # This could be feature extraction, global MVN, SpecAugment, etc.
+        segments = torch.stack(list(supervision_intervals.values()), dim=1)
+        for tnfm in self.input_transforms:
+            inputs = tnfm(inputs, supervision_segments=segments)
+            
+        with torch.no_grad():
+            if self.beats is not None and audios is not None:
+                beats_embeddings = self.beats.get_embeddings(audio=audios, audio_lens=audio_lens)
+                beats_embeddings = beats_embeddings.unsqueeze(1)
+            else:
+                beats_embeddings = torch.tensor(0.)
+        
+        batch = {
+            "inputs": inputs,
+            "supervisions": default_collate(
+                [
+                    {
+                        "num_frames": input_lens,
+                        "audio_event": supervision.audio_event if supervision.audio_event is not None else "0", # 0 is the index for speech
+                    }
+                    for sequence_idx, cut in enumerate(cuts)
+                    for supervision in cut.supervisions
+                ]
+            ),
+            "beats_embeddings": beats_embeddings,
+        }
+        batch["supervisions"].update(supervision_intervals)
+        if self.return_cuts:
+            batch["supervisions"]["cut"] = [
+                cut for cut in cuts for sup in cut.supervisions
+            ]
+
+        return batch
 
 def validate_for_asr(cuts: CutSet) -> None:
     validate(cuts)
@@ -529,20 +638,3 @@ def validate_for_asr(cuts: CutSet) -> None:
                 f"are not supported for ASR"
                 f" (sup id: {supervision.id}, cut id: {cut.id})"
             )
-
-
-def get_substring(s: str, min_len: int = 40, max_len: int = 250) -> str:
-    """A helper function that generates a random substring from a given string
-
-    Args:
-        s (str): Input string
-
-    Returns:
-        str: Returned substring
-    """
-    min_len = min(len(s), min_len)
-
-    start = random.randint(0, len(s) - min_len)
-    end = min(start + max_len, random.randint(start + min_len, len(s)))
-
-    return s[start:end]
