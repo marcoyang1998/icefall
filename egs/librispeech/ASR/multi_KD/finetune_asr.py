@@ -949,7 +949,7 @@ def compute_loss(
     y = k2.RaggedTensor(y)
 
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss = model(
+        simple_loss, pruned_loss, ctc_loss, audio_tagging_loss = model(
             x=feature,
             x_lens=feature_lens,
             y=y,
