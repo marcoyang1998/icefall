@@ -180,7 +180,7 @@ class LibriSpeechKDDataModule:
             "--use-audioset",
             type=str2bool,
             default=False,
-            help="If use audioset as an extra training set",
+            help="If use audioset as the training set. If",
         )
 
         group.add_argument(
@@ -631,6 +631,12 @@ class LibriSpeechKDDataModule:
             )
 
     @lru_cache()
+    def train_clean_100_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_train-clean-100.jsonl.gz"
+        )
+
+    @lru_cache()
     def train_clean_360_cuts(self) -> CutSet:
         logging.info("About to get train-clean-360 cuts")
         return load_manifest_lazy(
@@ -668,6 +674,12 @@ class LibriSpeechKDDataModule:
             )
 
     @lru_cache()
+    def train_all_shuf_cuts_no_KD(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
+        )
+
+    @lru_cache()
     def dev_clean_2_cuts(self) -> CutSet:
         logging.info("mini_librispeech: About to get dev-clean-2 cuts")
         return load_manifest_lazy(
@@ -687,6 +699,12 @@ class LibriSpeechKDDataModule:
             )
 
     @lru_cache()
+    def dev_clean_cuts_no_KD(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
+        )
+
+    @lru_cache()
     def dev_other_cuts(self) -> CutSet:
         logging.info("About to get dev-other cuts")
         if not self.args.on_the_fly_feats:
@@ -697,6 +715,13 @@ class LibriSpeechKDDataModule:
             return load_manifest_lazy(
                 self.args.manifest_dir / "librispeech_cuts_dev-other-with-3-embeddings.jsonl.gz"
             )
+
+    @lru_cache()
+    def dev_other_cuts_no_KD(self) -> CutSet:
+        
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
+        )
 
     @lru_cache()
     def test_clean_cuts(self) -> CutSet:
@@ -783,4 +808,10 @@ class LibriSpeechKDDataModule:
         logging.info("About to get the audioset eval cuts.")
         return load_manifest_lazy(
             "data/fbank_audioset/cuts_audioset_eval-with-beats-embeddings.jsonl.gz"
+        )
+    @lru_cache()
+    def audioset_eval_cuts_no_KD(self) -> CutSet:
+        logging.info("About to get the audioset eval cuts.")
+        return load_manifest_lazy(
+            "data/fbank_audioset/cuts_audioset_eval.jsonl.gz"
         )
