@@ -103,6 +103,12 @@ def get_parser():
         type=str2bool,
         default=True,
     )
+
+    parser.add_argument(
+        "--trained-with-multitask",
+        type=str2bool,
+        default=False,
+    )
     
     parser.add_argument(
         "--freeze-encoder",
@@ -114,6 +120,47 @@ def get_parser():
         "--num-events",
         type=int,
         default=527,
+    )
+
+    # parser.add_argument(
+    #     "--decoder-dim",
+    #     type=int,
+    #     default=512,
+    #     help="Embedding dimension in the decoder model.",
+    # )
+
+    # parser.add_argument(
+    #     "--joiner-dim",
+    #     type=int,
+    #     default=512,
+    #     help="""Dimension used in the joiner model.
+    #     Outputs from the encoder and decoder model are projected
+    #     to this dimension before adding.
+    #     """,
+    # )
+
+    parser.add_argument(
+        "--vocab-size",
+        type=int,
+        default=500,
+    )
+
+    parser.add_argument(
+        "--blank-id",
+        type=int,
+        default=0,
+    )
+
+    parser.add_argument(
+        "--context-size",
+        type=int,
+        default=2,
+    )
+
+    parser.add_argument(
+        "--do-audio-tagging",
+        type=str2bool,
+        default=True,
     )
 
     add_model_arguments(parser)
@@ -222,8 +269,13 @@ def main():
         
     logging.info("About to create model")
 
+    assert (params.trained_with_distillation and params.trained_with_multitask) == False
+
     if params.trained_with_distillation:
         from train_multi_KD import get_model
+        model = get_model(params)
+    elif params.trained_with_multitask:
+        from train_asr import get_model
         model = get_model(params)
     else:
         from train_audio_tagging import get_model
