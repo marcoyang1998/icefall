@@ -65,9 +65,10 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from asr_datamodule import LibriSpeechAsrDataModule
+from kd_datamodule import LibriSpeechKDDataModule
 from decoder import Decoder
 from joiner import Joiner
+from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
@@ -81,6 +82,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from train_multi_KD import get_encoder_embed, get_encoder_model
+from utils import compare_model, str2multihot
 
 from zipformer import Zipformer2
 
@@ -124,6 +126,50 @@ def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
             module.batch_count = batch_count
         if hasattr(module, "name"):
             module.name = name
+
+
+def add_finetune_arguments(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--do-finetune",
+        type=str2bool,
+        default=False,
+        help="Whether to fine-tune.",
+    )
+
+    parser.add_argument(
+        "--init-modules",
+        type=str,
+        default=None,
+        help="""
+        Modules to be initialized. It matches all parameters starting with
+        a specific key. The keys are given with Comma seperated. If None,
+        all modules will be initialised. For example, if you only want to
+        initialise all parameters staring with "encoder", use "encoder";
+        if you want to initialise parameters starting with encoder or decoder,
+        use "encoder,joiner".
+        """,
+    )
+
+    parser.add_argument(
+        "--freeze-modules",
+        type=str,
+        default=None,
+        help="""
+        Modules to be frozen. It matches all parameters starting with
+        a specific key. The keys are given with Comma seperated. If None,
+        all modules will be initialised. For example, if you only want to
+        initialise all parameters staring with "encoder", use "encoder";
+        if you want to initialise parameters starting with encoder or decoder,
+        use "encoder,joiner".
+        """,
+    )
+
+    parser.add_argument(
+        "--finetune-ckpt",
+        type=str,
+        default=None,
+        help="Fine-tuning from which checkpoint (a path to a .pt file)",
+    )
 
 def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
@@ -258,6 +304,54 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If True, use CTC head.",
+    )
+
+    parser.add_argument(
+        "--do-audio-tagging",
+        type=str2bool,
+        default=False,
+        help="If do audio tagging multi task training"
+    )
+
+    parser.add_argument(
+        "--use-encoder-projection",
+        type=str2bool,
+        default=False,
+        help="If add a final projection layer at the end of the encoder"
+    )
+
+    parser.add_argument(
+        "--encoder-projection-dim",
+        type=int,
+        default=-1,
+        help="The output dimension of the projection"
+    )
+
+    parser.add_argument(
+        "--freeze-encoder",
+        type=str2bool,
+        default=False,
+        help="If freeze the parameters in encoder and encoder_embed and set them to eval() mode",
+    )
+
+    parser.add_argument(
+        "--freezing-encoder-layer-index",
+        type=str,
+        default="-1",
+        help="Comma separated. start from 0, 0,1,2 means the first three encoder stacks are frozen",
+    )
+
+    parser.add_argument(
+        "--freeze-encoder-steps",
+        type=int,
+        default=-1,
+        help="Freeze the encoder for how many steps. Deactivated if `freeze-encoder` is True",
+    )
+
+    parser.add_argument(
+        "--encoder-lr-scale",
+        type=float,
+        default=1.0,
     )
 
 
@@ -406,6 +500,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--audio-tagging-loss-scale",
+        type=float,
+        default=1.0,
+        help="Scale for audio tagging loss.",
+    )
+
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -470,6 +571,7 @@ def get_parser():
         help="Whether to use half precision training.",
     )
 
+    add_finetune_arguments(parser)
     add_model_arguments(parser)
 
     return parser
@@ -597,12 +699,19 @@ def get_decoder_model(params: AttributeDict) -> nn.Module:
 
 def get_joiner_model(params: AttributeDict) -> nn.Module:
     joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
         decoder_dim=params.decoder_dim,
         joiner_dim=params.joiner_dim,
         vocab_size=params.vocab_size,
     )
     return joiner
+
+def get_encoder_final_projection(params: AttributeDict) -> nn.Module:
+    layer = nn.Linear(
+        max(_to_int_tuple(params.encoder_dim)),
+        params.encoder_projection_dim,
+    )
+    return layer
 
 
 def get_model(params: AttributeDict) -> nn.Module:
@@ -622,17 +731,27 @@ def get_model(params: AttributeDict) -> nn.Module:
         decoder = None
         joiner = None
 
+    if params.use_encoder_projection:
+        encoder_proj = get_encoder_final_projection(params)
+    else:
+        encoder_proj = None
+
     model = AsrModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
         joiner=joiner,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_projection=encoder_proj,
+        encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
+        audio_tagging_input_dim=max(_to_int_tuple(params.encoder_dim)),
         decoder_dim=params.decoder_dim,
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
-        freeze_encoder=False,
+        do_audio_tagging=params.do_audio_tagging,
+        freeze_encoder=params.freeze_encoder,
+        freezing_encoder_layer_index=params.freezing_encoder_layer_index,
+        freeze_encoder_steps=params.freeze_encoder_steps,
     )
     return model
 
@@ -831,6 +950,11 @@ def compute_loss(
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
 
+    # audio tagging label
+    events = supervisions["audio_event"] # the label indices are in CED format
+    audio_tagging_label, _ = str2multihot(events)
+    audio_tagging_label = audio_tagging_label.to(device)
+
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
@@ -838,17 +962,27 @@ def compute_loss(
     y = sp.encode(texts, out_type=int)
     y = k2.RaggedTensor(y)
 
+    # 0 for ASR & SV, 1 for audio tagging
+    task_id = torch.tensor([1 if t[:5] == "Dummy" else 0 for t in texts]).to(device)
+
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss = model(
+        simple_loss, pruned_loss, ctc_loss, audio_tagging_loss = model(
             x=feature,
             x_lens=feature_lens,
+            audio_tagging_label=audio_tagging_label,
             y=y,
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
+            reduction="none",
+            batch_idx=batch_idx_train,
         )
 
         loss = 0.0
+
+        simple_loss = (simple_loss * (1 - task_id)).sum()
+        pruned_loss = (pruned_loss * (1 - task_id)).sum()
+        audio_tagging_loss = (audio_tagging_loss.sum(dim=-1) * task_id).sum()
 
         if params.use_transducer:
             s = params.simple_loss_scale
@@ -869,6 +1003,9 @@ def compute_loss(
         if params.use_ctc:
             loss += params.ctc_loss_scale * ctc_loss
 
+        if params.do_audio_tagging:
+            loss += params.audio_tagging_loss_scale * audio_tagging_loss
+
     assert loss.requires_grad == is_training
 
     info = MetricsTracker()
@@ -883,6 +1020,8 @@ def compute_loss(
         info["pruned_loss"] = pruned_loss.detach().cpu().item()
     if params.use_ctc:
         info["ctc_loss"] = ctc_loss.detach().cpu().item()
+    if params.do_audio_tagging:
+        info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1168,6 +1307,13 @@ def run(rank, world_size, args):
 
     logging.info(params)
 
+    if params.freezing_encoder_layer_index == "-1":
+        params.freezing_encoder_layer_index = []
+    else:
+        params.freezing_encoder_layer_index = list(map(int, params.freezing_encoder_layer_index.split(',')))
+        if not params.freeze_encoder:
+            logging.info(f"The following encoder layers will be frozen: {params.freezing_encoder_layer_index}")
+
     logging.info("About to create model")
     model = get_model(params)
 
@@ -1180,21 +1326,51 @@ def run(rank, world_size, args):
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
 
-    
-    assert params.start_epoch > 0, params.start_epoch
-    checkpoints = load_checkpoint_if_available(
-        params=params, model=model, model_avg=model_avg
-    )
+    if params.do_finetune:
+        assert params.start_epoch == 1, "Finetune need to start from epoch 0"
+        if params.init_modules is None:
+            logging.info(f"Init modules is not specified! Trying to load the whole model!")
+        modules = params.init_modules.split(",") if params.init_modules else None
+        checkpoints = load_model_params(
+            ckpt=params.finetune_ckpt, model=model, init_modules=modules, strict=False,
+        )
+        if rank == 0:
+            # model_avg is only used with rank 0
+            compare_model(model.state_dict(), model_avg.state_dict())
+            model_avg = copy.deepcopy(model).to(torch.float64)
+
+    else:
+        assert params.start_epoch > 0, params.start_epoch
+        checkpoints = load_checkpoint_if_available(
+            params=params, model=model, model_avg=model_avg
+        )
+
+    # Setting the encoder lr scale
+    logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
+    model.encoder.lr_scale = params.encoder_lr_scale
+    model.encoder_embed.lr_scale = params.encoder_lr_scale
+    if params.use_encoder_projection:
+        logging.info(f"Also setting the lr scale of the projection layer to {params.encoder_lr_scale}")
+        model.encoder_projection.lr_scale = params.encoder_lr_scale
 
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
+    if params.freeze_encoder and params.do_finetune:
+        freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
+        freeze_modules = [m.strip() for m in freeze_modules]
+        logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
+    else:
+        freeze_modules = []
+
+    parameters = get_parameter_groups_with_lrs(
+        model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules
+    )
+
     optimizer = ScaledAdam(
-        get_parameter_groups_with_lrs(
-            model, lr=params.base_lr, include_names=True,
-        ),
+        parameters,
         lr=params.base_lr,  # should have no effect
         clipping_scale=2.0,
     )
@@ -1222,12 +1398,38 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    librispeech = LibriSpeechAsrDataModule(args)
+    librispeech = LibriSpeechKDDataModule(args)
 
-    if not params.full_libri:
+    if not params.full_libri: 
         train_cuts = librispeech.train_clean_100_cuts()
+        librispeech_cuts_len = 28539 * 3
     else:
-        train_cuts = librispeech.train_all_shuf_cuts()
+        train_cuts = librispeech.train_all_shuf_cuts_no_KD()
+        librispeech_cuts_len = 281239 * 3
+
+    if params.use_audioset and params.do_audio_tagging:
+        logging.info(f"Getting audioset cuts")
+        audioset_cuts = librispeech.audioset_cuts()
+        audioset_cuts_lens = {
+            "balanced": 21155,
+            "unbalanced": 1883591 + 21155
+        }
+        logging.info(f"Using mux to combine Librispeech with audioset")
+        train_cuts = CutSet.mux(
+            train_cuts,
+            audioset_cuts,
+            weights=[
+                librispeech_cuts_len,
+                audioset_cuts_lens[params.audioset_subset]
+            ]
+        )
+
+    logging.info(train_cuts)
+
+    def add_dummy_text(c: Cut):
+        if c.supervisions[0].text is None:
+            c.supervisions[0].text = "Dummy text added as a place holder. Please ignore this if possible"
+        return c
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1266,6 +1468,7 @@ def run(rank, world_size, args):
 
         return True
 
+    train_cuts = train_cuts.map(add_dummy_text)
     train_cuts = train_cuts.filter(remove_short_and_long_utt)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
@@ -1279,8 +1482,13 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.dev_clean_cuts()
-    valid_cuts += librispeech.dev_other_cuts()
+    valid_cuts = librispeech.dev_clean_cuts_no_KD()
+    valid_cuts += librispeech.dev_other_cuts_no_KD()
+    if params.use_audioset:
+        valid_cuts += librispeech.audioset_eval_cuts_no_KD()
+    valid_cuts = valid_cuts.map(add_dummy_text)
+
+    logging.info(valid_cuts)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
     # if not params.print_diagnostics:
@@ -1420,7 +1628,7 @@ def scan_pessimistic_batches_for_oom(
 
 def main():
     parser = get_parser()
-    LibriSpeechAsrDataModule.add_arguments(parser)
+    LibriSpeechKDDataModule.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
