@@ -163,6 +163,34 @@ def get_parser():
         default=True,
     )
 
+    parser.add_argument(
+        "--use-encoder-projection",
+        type=str2bool,
+        default=False,
+        help="If add a final projection layer at the end of the encoder"
+    )
+
+    parser.add_argument(
+        "--encoder-projection-dim",
+        type=int,
+        default=-1,
+        help="The output dimension of the projection"
+    )
+
+    parser.add_argument(
+        "--freezing-encoder-layer-index",
+        type=str,
+        default="-1",
+        help="Comma separated. start from 0, 0,1,2 means the first three encoder stacks are frozen",
+    )
+
+    parser.add_argument(
+        "--freeze-encoder-steps",
+        type=int,
+        default=-1,
+        help="Freeze the encoder for how many steps. Deactivated if `freeze-encoder` is True",
+    )
+
     add_model_arguments(parser)
 
     return parser
