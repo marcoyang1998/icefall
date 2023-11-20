@@ -1257,13 +1257,12 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
+    valid_cuts = librispeech.dev_clean_cuts()
+    valid_cuts += librispeech.dev_other_cuts()
     if params.use_audioset:
-        valid_cuts = load_manifest_lazy(
-            "data/fbank_audioset/cuts_audioset_eval-with-beats-embeddings.jsonl.gz"
+        valid_cuts += load_manifest_lazy(
+            params.manifest_dir / "cuts_audioset_eval-with-3-embeddings.jsonl.gz"
         )
-    else:
-        valid_cuts = librispeech.dev_clean_cuts()
-        valid_cuts += librispeech.dev_other_cuts()
 
     valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
