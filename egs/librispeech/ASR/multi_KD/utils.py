@@ -43,6 +43,14 @@ def get_spkr_dict(cuts: CutSet):
     spkr_dict = {spkr: i for i, spkr in enumerate(spkrs)}
     return spkr_dict
 
+def compare_model(state_dict1, state_dict2):
+    assert state_dict1.keys() == state_dict2.keys()
+    for key in state_dict1.keys():
+        if torch.all(state_dict1[key] == state_dict2[key]):
+            logging.info(f"Param: {key} is the same as new state dict")
+        else:
+            logging.info(f"Param: {key} is updated from new state dict")
+
 def remove_speed_perturb(c):
     # return True if keeping the cut, otherwise False
     return ("sp1.1" not in c.id and "sp0.9" not in c.id)
@@ -100,7 +108,6 @@ def add_fields_to_manifest(
     new_cuts = []
     field_name = []
     
-    import pdb; pdb.set_trace()
     if beats_manifest is not None and os.path.exists(beats_manifest):
         beats_cuts = load_manifest(beats_manifest)
         assert len(beats_cuts) == len(orig_cuts)
@@ -166,14 +173,15 @@ if __name__=="__main__":
     #         whisper_cb_manifest=f"data/fbank_with_whisper_{teacher_model}/with_cb_librispeech_{key}.jsonl.gz",
     #     )
 
-    keys = ["unbalanced"]
+    keys = ["eval"]
+    teacher = "large-v3"
     for key in keys:
         add_fields_to_manifest(
             orig_manifest=f"data/fbank_audioset/cuts_audioset_{key}.jsonl.gz",
-            output_manifest=f"data/fbank_audioset/cuts_audioset_{key}-with-beats-embeddings.jsonl.gz",
+            output_manifest=f"data/fbank_with_as_with_whisper_{teacher}/cuts_audioset_{key}-with-3-embeddings.jsonl.gz",
             beats_manifest=f"data/fbank_audioset/cuts_audioset_{key}-with-beats-embeddings.jsonl.gz",
-            ecapa_manifest=f"data/fbank/cuts_audioset_{key}-with-ecapa-embeddings.jsonl.gz",
-            whisper_manifest=f"data/fbank_with_as_with_whisper_small.en/whisper-small.en-layer--1-embeddings-audioset-{key}.jsonl.gz",
+            ecapa_manifest=f"data/fbank_audioset/cuts_audioset_{key}-with-ecapa-embeddings.jsonl.gz",
+            whisper_manifest=f"data/fbank_with_as_with_whisper_{teacher}/whisper-{teacher}--1-embeddings-audioset-{key}.jsonl.gz",
         )
     # import pickle
     # import pdb; pdb.set_trace()
