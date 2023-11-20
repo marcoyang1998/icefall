@@ -437,6 +437,7 @@ class AsrModel(nn.Module):
         joiner: Optional[nn.Module] = None,
         encoder_projection: Optional[nn.Module] = None,
         encoder_dim: int = 384,
+        audio_tagging_input_dim: int = 512,
         decoder_dim: int = 512,
         vocab_size: int = 500,
         use_transducer: bool = True,
@@ -530,12 +531,15 @@ class AsrModel(nn.Module):
         if do_audio_tagging:
             self.audio_tagging_decoder = nn.Sequential(
                 nn.Dropout(0.1),
-                nn.Linear(encoder_dim, 527),
+                nn.Linear(audio_tagging_input_dim, 527),
             ) # 527 classes
+            self.beats_decoder = self.audio_tagging_decoder
         
         self.freeze_encoder = freeze_encoder
         self.freezing_encoder_layer_index = freezing_encoder_layer_index
         self.freeze_encoder_steps = freeze_encoder_steps
+
+        self.forward_beats = self.forward_audio_tagging
 
     def forward_encoder(
         self,
@@ -582,9 +586,6 @@ class AsrModel(nn.Module):
         encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
-        if self.encoder_projection is not None:
-            encoder_out = self.encoder_projection(encoder_out)
-
         return encoder_out, encoder_out_lens, middle_out
 
     def forward_ctc(
@@ -625,6 +626,7 @@ class AsrModel(nn.Module):
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
+        reduction: str = "sum",
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute Transducer loss.
         Args:
@@ -671,11 +673,6 @@ class AsrModel(nn.Module):
         lm = self.simple_lm_proj(decoder_out)
         am = self.simple_am_proj(encoder_out)
 
-        # if self.training and random.random() < 0.25:
-        #    lm = penalize_abs_values_gt(lm, 100.0, 1.0e-04)
-        # if self.training and random.random() < 0.25:
-        #    am = penalize_abs_values_gt(am, 30.0, 1.0e-04)
-
         with torch.cuda.amp.autocast(enabled=False):
             simple_loss, (px_grad, py_grad) = k2.rnnt_loss_smoothed(
                 lm=lm.float(),
@@ -685,7 +682,7 @@ class AsrModel(nn.Module):
                 lm_only_scale=lm_scale,
                 am_only_scale=am_scale,
                 boundary=boundary,
-                reduction="sum",
+                reduction=reduction,
                 return_grad=True,
             )
 
@@ -718,7 +715,7 @@ class AsrModel(nn.Module):
                 ranges=ranges,
                 termination_symbol=blank_id,
                 boundary=boundary,
-                reduction="sum",
+                reduction=reduction,
             )
 
         return simple_loss, pruned_loss
@@ -728,7 +725,7 @@ class AsrModel(nn.Module):
         encoder_out,
         encoder_out_lens,
     ):
-        logits = self.audio_tagging_decoder(encoder_out) # (N, T, num_classes)
+        logits = self.beats_decoder(encoder_out) # (N, T, num_classes)
         padding_mask = make_pad_mask(encoder_out_lens) 
         logits[padding_mask] = 0
         logits = logits.sum(dim=1)
@@ -746,7 +743,8 @@ class AsrModel(nn.Module):
         lm_scale: float = 0.0,
         audio_tagging_label: torch.Tensor = None,
         return_middle_out: bool = False,
-        batch_idx: int = 1e10,
+        batch_idx: int = 1e10 + 1,
+        reduction: str = "sum",
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -790,7 +788,7 @@ class AsrModel(nn.Module):
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
 
         _freeze_encoder = self.freeze_encoder or (batch_idx < self.freeze_encoder_steps)
-        if batch_idx % 100 == 0:
+        if batch_idx % 50 == 0 and self.training:
             logging.info(f"Freeze_encoder: {_freeze_encoder}; Current batch idx: {batch_idx}")
 
         # Compute encoder outputs
@@ -798,12 +796,17 @@ class AsrModel(nn.Module):
             if _freeze_encoder: # If freezing the encoder, set them to eval mode
                 self.encoder.eval()
                 self.encoder_embed.eval()
-            encoder_out, encoder_out_lens, middle_out = self.forward_encoder(
+            pre_projection_encoder_out, encoder_out_lens, middle_out = self.forward_encoder(
                 x,
                 x_lens,
                 return_middle_out=return_middle_out,
                 freezing_encoder_layer_index=self.freezing_encoder_layer_index
             )
+
+            if self.encoder_projection is not None:
+                encoder_out = self.encoder_projection(pre_projection_encoder_out)
+            else:
+                encoder_out = pre_projection_encoder_out
 
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1] 
@@ -818,6 +821,7 @@ class AsrModel(nn.Module):
                 prune_range=prune_range,
                 am_scale=am_scale,
                 lm_scale=lm_scale,
+                reduction=reduction,
             )
         else:
             simple_loss = torch.empty(0)
@@ -837,13 +841,13 @@ class AsrModel(nn.Module):
 
         if self.do_audio_tagging:
             audio_tagging_logits = self.forward_audio_tagging(
-                encoder_out=encoder_out,
+                encoder_out=pre_projection_encoder_out,
                 encoder_out_lens=encoder_out_lens,
             )
             audio_tagging_loss = F.binary_cross_entropy_with_logits(
                 audio_tagging_logits,
                 audio_tagging_label,
-                reduction="sum"
+                reduction=reduction
             )
         else:
             audio_tagging_loss = torch.empty(0)
