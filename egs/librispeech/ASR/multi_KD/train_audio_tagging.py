@@ -1052,7 +1052,12 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = audioset.audioset_eval_cuts()
+    if params.eval_subset == "eval":
+        valid_cuts = audioset.audioset_eval_cuts()
+    elif params.eval_subset == "eval_all":
+        valid_cuts = audioset.audioset_eval_all_cuts()
+    else:
+        raise NotImplementedError()
     valid_dl = audioset.valid_dataloaders(valid_cuts)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)

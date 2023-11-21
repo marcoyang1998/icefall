@@ -89,6 +89,12 @@ class AudiosetDataModule:
             default="balanced",
             choices=["balanced", "unbalanced", "eval"]
         )
+        group.add_argument(
+            "--eval-subset",
+            type=str,
+            choices=["eval", "eval-all"],
+            default="eval",
+        )
 
         group.add_argument(
             "--manifest-dir",
@@ -407,6 +413,13 @@ class AudiosetDataModule:
         logging.info(f"About to get cuts from audioset eval")
         return load_manifest_lazy(
             self.args.manifest_dir / f"cuts_audioset_eval.jsonl.gz"
+        )
+
+    @lru_cache()
+    def audioset_eval_all_cuts(self) -> CutSet:
+        logging.info(f"About to get all eval cuts from audioset")
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_audioset_eval_all.jsonl.gz"
         )
 
 

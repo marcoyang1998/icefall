@@ -122,6 +122,12 @@ def get_parser():
         default=527,
     )
 
+    parser.add_argument(
+        "--eval-subset",
+        type=str,
+        default="eval",
+    )
+
     # parser.add_argument(
     #     "--decoder-dim",
     #     type=int,
@@ -396,11 +402,16 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechKDDataModule(args, device=device, evaluation=True)
 
-    audioset_cuts = librispeech.audioset_eval_cuts()
+    if params.eval_subset == "eval":
+        audioset_cuts = librispeech.audioset_eval_cuts()
+    elif params.eval_subset == "eval_all":
+        audioset_cuts = librispeech.audioset_eval_all_cuts()
+    else:
+        raise NotImplementedError()
 
     audioset_dl = librispeech.valid_dataloaders(audioset_cuts)
 
-    test_sets = ["audioset_eval"]
+    test_sets = [f"audioset_{params.eval_subset}"]
 
     logits, labels = decode_dataset(
         dl=audioset_dl,
