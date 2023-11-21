@@ -196,6 +196,7 @@ class MultiKDModel(nn.Module):
         teacher_whisper_codebook_indexes: torch.Tensor = None,
         teacher_whisper_codebook_indexes_lens: torch.Tensor = None,
         return_middle_out: bool = False,
+        reduction: str = "sum"
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -247,7 +248,7 @@ class MultiKDModel(nn.Module):
             # teacher_beats_embeddings = teacher_beats_embeddings / teacher_beats_embeddings.sum(dim=-1).unsqueeze(-1).expand_as(teacher_beats_embeddings)
             teacher_beats_embeddings = teacher_beats_embeddings.squeeze(dim=1) # (N, num_events)
             
-            beats_loss = F.binary_cross_entropy_with_logits(beats_logits, teacher_beats_embeddings, reduction="sum")
+            beats_loss = F.binary_cross_entropy_with_logits(beats_logits, teacher_beats_embeddings, reduction=reduction)
             # beats_loss = F.kl_div(beats_logits, teacher_beats_embeddings, reduction="sum")
         else:
             beats_loss = None
@@ -277,7 +278,8 @@ class MultiKDModel(nn.Module):
             # ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
             # ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
             ecapa_loss = 1 - F.cosine_similarity(ecapa_embeddings, teacher_ecapa_embeddings, dim=-1, eps=1e-6)
-            ecapa_loss = ecapa_loss.sum()
+            if reduction == "sum":
+                ecapa_loss = ecapa_loss.sum()
         else:
             ecapa_loss = None
         
@@ -292,7 +294,10 @@ class MultiKDModel(nn.Module):
             mask = make_pad_mask(encoder_out_lens)
             whisper_loss.masked_fill_(mask.unsqueeze(-1), 0.0)
             # whisper_loss = whisper_loss.sum()/((~mask).sum() * teacher_whisper_embeddings.shape[-1])
-            whisper_loss = whisper_loss.sum() / teacher_whisper_embeddings.shape[-1]
+            if reduction == "sum":
+                whisper_loss = whisper_loss.sum() / teacher_whisper_embeddings.shape[-1]
+            else:
+                whisper_loss = whisper_loss / teacher_whisper_embeddings.shape[-1]
         else:
             whisper_loss = None
 
@@ -392,7 +397,17 @@ class MultiKDModel(nn.Module):
             whisper_embeddings = whisper_embeddings.reshape(N, t_expected, C * 2)
         else:
             whisper_embeddings = whisper_embeddings[:, : t_expected, :]
+
+        # An ugly way to avoid shape mismatch of dummy embedding, this only happens if the whole batch is dummy embedding!
+        if whisper_embeddings.shape[1] != encoder_out.shape[1]:
+            return encoder_out
+
+        # if whisper_embeddings.shape[2] != encoder_out.shape[2]:
+        #     return encoder_out
+
         assert whisper_embeddings.shape[1] == encoder_out.shape[1]
+        assert whisper_embeddings.shape[2] == encoder_out.shape[2]
+
         return whisper_embeddings
 
     @staticmethod
@@ -722,11 +737,11 @@ class AsrModel(nn.Module):
 
     def forward_audio_tagging(
         self,
-        encoder_out,
-        encoder_out_lens,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
     ):
         logits = self.beats_decoder(encoder_out) # (N, T, num_classes)
-        padding_mask = make_pad_mask(encoder_out_lens) 
+        padding_mask = make_pad_mask(encoder_out_lens) # (N,T)
         logits[padding_mask] = 0
         logits = logits.sum(dim=1)
         logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits) # (N, num_events)
