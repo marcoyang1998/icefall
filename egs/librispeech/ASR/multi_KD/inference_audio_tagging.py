@@ -7,6 +7,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 import k2
 import sentencepiece as spm
 import torch
@@ -197,6 +199,12 @@ def get_parser():
         help="Freeze the encoder for how many steps. Deactivated if `freeze-encoder` is True",
     )
 
+    parser.add_argument(
+        "--save-logits",
+        type=str2bool,
+        default=False,
+    )
+
     add_model_arguments(parser)
 
     return parser
@@ -251,6 +259,10 @@ def decode_dataset(
     
     all_logits = []
     all_labels = []
+    saved_results = {
+        "logits": {},
+        "labels": {},
+    }
         
     for batch_idx, batch in enumerate(dl):
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
@@ -261,6 +273,14 @@ def decode_dataset(
             model=model,
             batch=batch,
         )
+
+        if params.save_logits:
+            for id, logits, label in zip(cut_ids, audio_logits, labels):
+                wav_name = id.split('/')[-1].replace(".wav", "")
+                np.save(f"logits/logits_{wav_name}.npy", logits.detach().cpu().numpy())
+                np.save(f"labels/labels_{wav_name}.npy", label.detach().cpu().numpy())
+                saved_results["logits"][id] = f"logits/logits_{wav_name}.npy"
+                saved_results["labels"][id] = f"labels/labels_{wav_name}.npy"
         
         all_logits.append(audio_logits)
         all_labels.append(labels)
@@ -269,7 +289,7 @@ def decode_dataset(
             logging.info(f"Processed {num_cuts} cuts already.")
     logging.info(f"Finish collecting audio logits")
         
-    return all_logits, all_labels
+    return all_logits, all_labels, saved_results
 
 @torch.no_grad()
 def main():
@@ -413,11 +433,14 @@ def main():
 
     test_sets = [f"audioset_{params.eval_subset}"]
 
-    logits, labels = decode_dataset(
+    logits, labels, saved_results = decode_dataset(
         dl=audioset_dl,
         params=params,
         model=model,
     )
+
+    if params.save_logits:
+        torch.save(saved_results, "zipformer_results.pt")
 
     logits = torch.cat(logits, dim=0).squeeze(dim=1).detach().numpy()
     labels = torch.cat(labels, dim=0).long().detach().numpy()
@@ -427,7 +450,7 @@ def main():
         y_score=logits,
     )
 
-    logging.info(f"mAP for audioset eval is: {mAP}")
+    logging.info(f"mAP for audioset {params.eval_subset} is: {mAP}")
 
     logging.info("Done")
 
