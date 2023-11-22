@@ -151,7 +151,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 beats_embeddings = collate_custom_field(
                     cuts_pre_mixed, "beats_embedding", pad_value=-100
                 ) # (N,C)
-                beats_embeddings = beats_embeddings.unsqueeze(1)
+                beats_embeddings = beats_embeddings.unsqueeze(1) # (N,1,C)
             else:
                 beats_embeddings = torch.tensor(0.)
             
@@ -194,7 +194,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
             "supervisions": default_collate(
                 [
                     {
-                        "text": supervision.text if supervision.text is not None else "Random text",
+                        "text": supervision.text if supervision.text is not None else "Dummy Random text",
                         "audio_event": supervision.audio_event if hasattr(supervision, "audio_event") else "0", # 0 is the index for speech in CED
                     }
                     for sequence_idx, cut in enumerate(cuts)
@@ -206,7 +206,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
             "whisper_embedding": whisper_embeddings,
             "whisper_embedding_lens": whisper_embedding_lens,
             "whisper_codebook_indexes": whisper_codebook_indexes,
-            "whisper_codebook_indexes_lens": whisper_codebook_indexes_lens
+            "whisper_codebook_indexes_lens": whisper_codebook_indexes_lens,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)
