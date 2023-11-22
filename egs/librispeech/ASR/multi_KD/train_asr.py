@@ -82,7 +82,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from train_multi_KD import get_encoder_embed, get_encoder_model
-from utils import compare_model, str2multihot
+from utils import compare_model, str2multihot, ced2beats_mapping
 
 from zipformer import Zipformer2
 
@@ -952,7 +952,10 @@ def compute_loss(
 
     # audio tagging label
     events = supervisions["audio_event"] # the label indices are in CED format
-    audio_tagging_label, _ = str2multihot(events)
+    if params.do_finetune:
+        audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
+    else:
+        audio_tagging_label, _ = str2multihot(events)
     audio_tagging_label = audio_tagging_label.to(device)
 
     batch_idx_train = params.batch_idx_train
