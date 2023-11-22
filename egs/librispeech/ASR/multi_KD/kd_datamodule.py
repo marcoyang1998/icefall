@@ -180,7 +180,7 @@ class LibriSpeechKDDataModule:
             "--use-audioset",
             type=str2bool,
             default=False,
-            help="If use audioset as the training set. If",
+            help="If ONLY use audioset as the training set. If",
         )
 
         group.add_argument(
@@ -615,15 +615,9 @@ class LibriSpeechKDDataModule:
     @lru_cache()
     def train_clean_100_cuts(self) -> CutSet:
         if not self.args.on_the_fly_feats:
-            if self.args.use_musan_separately:
-                logging.info("About to get the shuffled train-clean-100 + musan cuts. No speed perturbation will be used.")
-                return load_manifest_lazy(
-                    self.args.manifest_dir / "librispeech_cuts_train_clean_100_no_sp_with_musan_shuf.jsonl.gz"
-                )
-            else:
-                return load_manifest_lazy(
-                    self.args.manifest_dir / "librispeech_cuts_train-clean-100-with-3-embeddings.jsonl.gz"
-                )
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_train-clean-100-with-3-embeddings.jsonl.gz"
+            )
         else:
             logging.info("About to get train-clean-100 cuts")
             return load_manifest_lazy(
@@ -653,16 +647,10 @@ class LibriSpeechKDDataModule:
     @lru_cache()
     def train_all_shuf_cuts(self) -> CutSet:
         if not self.args.on_the_fly_feats:
-            if self.args.use_musan_separately:
-                logging.info("About to get the shuffled train-960 + musan cuts. No speed perturbation will be used.")
-                return load_manifest_lazy(
-                    self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-musan-shuf.jsonl.gz"
-                )
-            else:
-                logging.info("About to get the shuffled train-960 with 3 teacher embeddings.")
-                return load_manifest_lazy(
-                    self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-3-embeddings.jsonl.gz"
-                )
+            logging.info("About to get the shuffled train-960 with 3 teacher embeddings.")
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-3-embeddings.jsonl.gz"
+            )
                 
         else:
             logging.info(
@@ -814,4 +802,11 @@ class LibriSpeechKDDataModule:
         logging.info("About to get the audioset eval cuts.")
         return load_manifest_lazy(
             "data/fbank_audioset/cuts_audioset_eval.jsonl.gz"
+        )
+
+    @lru_cache()
+    def audioset_eval_all_cuts(self) -> CutSet:
+        logging.info(f"About to get all eval cuts from audioset")
+        return load_manifest_lazy(
+            "data/fbank_audioset/cuts_audioset_eval_all.jsonl.gz"
         )

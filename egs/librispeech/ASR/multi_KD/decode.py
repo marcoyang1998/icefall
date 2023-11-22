@@ -445,6 +445,8 @@ def decode_one_batch(
         )
 
     encoder_out, encoder_out_lens, _ = model.forward_encoder(feature, feature_lens)
+    if model.encoder_projection is not None and params.use_encoder_projection:
+        encoder_out = model.encoder_projection(encoder_out)
 
     hyps = []
 
