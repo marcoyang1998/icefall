@@ -354,6 +354,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=1.0,
     )
 
+    parser.add_argument(
+        "--beats-label",
+        type=str2bool,
+        default=True,
+        help="If convert the label to beats index"
+    )
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -569,6 +576,13 @@ def get_parser():
         type=str2bool,
         default=False,
         help="Whether to use half precision training.",
+    )
+
+    parser.add_argument(
+        "--stop-early",
+        type=str2bool,
+        default=False,
+        help="If stop early if using mux"
     )
 
     add_finetune_arguments(parser)
@@ -952,7 +966,7 @@ def compute_loss(
 
     # audio tagging label
     events = supervisions["audio_event"] # the label indices are in CED format
-    if params.do_finetune:
+    if params.beats_label:
         audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
     else:
         audio_tagging_label, _ = str2multihot(events)
@@ -1330,6 +1344,8 @@ def run(rank, world_size, args):
         model_avg = copy.deepcopy(model).to(torch.float64)
 
     if params.do_finetune:
+        assert params.beats_label, "The pre-trained model use BEATs index for label, but you are using CED label!"
+            
         assert params.start_epoch == 1, "Finetune need to start from epoch 0"
         if params.init_modules is None:
             logging.info(f"Init modules is not specified! Trying to load the whole model!")
@@ -1343,6 +1359,8 @@ def run(rank, world_size, args):
             model_avg = copy.deepcopy(model).to(torch.float64)
 
     else:
+        logging.info(f"Using BEATs labels {params.beats_label}")
+
         assert params.start_epoch > 0, params.start_epoch
         checkpoints = load_checkpoint_if_available(
             params=params, model=model, model_avg=model_avg
@@ -1424,7 +1442,8 @@ def run(rank, world_size, args):
             weights=[
                 librispeech_cuts_len,
                 audioset_cuts_lens[params.audioset_subset]
-            ]
+            ],
+            stop_early=params.stop_early,
         )
 
     logging.info(train_cuts)
