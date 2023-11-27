@@ -783,6 +783,7 @@ def compute_loss(
 
     supervisions = batch["supervisions"]
     cuts = batch["supervisions"]["cut"]
+    cut_ids = [c.id for c in cuts]
     beats_embeddings = batch["beats_embedding"].to(device) # (N,1,527)
     ecapa_embeddings = batch["ecapa_embedding"].to(device)
     whisper_embeddings = batch["whisper_embedding"]
@@ -795,8 +796,12 @@ def compute_loss(
             task_id = torch.tensor([c.task_id for c in cuts]).to(device)
         except:
             task_id = torch.tensor([0 for _ in cuts]).to(device)
+        if random.random() < 0.05:
+            logging.info(cut_ids)
+            logging.info(task_id)
     else:
         task_id = None
+
 
     feature_lens = supervisions["num_frames"].to(device)
 
@@ -973,10 +978,6 @@ def train_one_epoch(
             torch.cuda.empty_cache()
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
-        
-        if random.random() < 0.03:
-            cut_ids = [c.id for c in batch["supervisions"]["cut"]]
-            logging.info(f"Cut IDs: {cut_ids}")
 
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):

@@ -156,10 +156,18 @@ class LibriSpeechKDDataModule:
         )
 
         group.add_argument(
-            "--use-vox2",
+            "--use-voxceleb",
             type=str2bool,
             default=False,
-            help="Only use vox2 as training set.",
+            help="If use voxceleb as training set.",
+        )
+
+        group.add_argument(
+            "--voxceleb-subset",
+            type=str,
+            default="vox1",
+            choices=["vox1", "vox2"],
+            help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
         )
 
         group.add_argument(
@@ -396,10 +404,6 @@ class LibriSpeechKDDataModule:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest(self.args.manifest_dir / "musan_cuts.jsonl.gz")
-            if self.args.enable_audioset:
-                logging.info("Enable audioset")
-                logging.info("About to get audioset cuts")
-                cuts_musan += load_manifest("data/fbank/cuts_audioset_balanced.jsonl.gz")
             if self.args.drop_features and self.args.on_the_fly_feats:
                 cuts_musan = cuts_musan.drop_features()
             transforms.append(
@@ -645,6 +649,13 @@ class LibriSpeechKDDataModule:
         )
 
     @lru_cache()
+    def train_960_cuts(self) -> CutSet:
+        logging.info("About to get train 960 cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_train-960-with-3-embeddings.jsonl.gz"
+        )
+
+    @lru_cache()
     def train_all_shuf_cuts(self) -> CutSet:
         if not self.args.on_the_fly_feats:
             logging.info("About to get the shuffled train-960 with 3 teacher embeddings.")
@@ -780,6 +791,19 @@ class LibriSpeechKDDataModule:
         )
 
     @lru_cache()
+    def voxceleb_cuts(self) -> CutSet:
+        # this should be used in KD
+        logging.info("About to get the voxceleb cuts.")
+        cuts = load_manifest_lazy(
+            self.args.manifest_dir / "cuts_vox1_train-with-3-embeddings.jsonl.gz"
+        )
+        if self.args.audioset_subset == "vox2":
+            cuts += load_manifest_lazy(
+                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+            )
+        return cuts
+
+    @lru_cache()
     def audioset_cuts(self) -> CutSet:
         logging.info("About to get the audioset cuts.")
         cuts = load_manifest_lazy(
@@ -788,6 +812,18 @@ class LibriSpeechKDDataModule:
         if self.args.audioset_subset == "unbalanced":
             cuts += load_manifest_lazy(
                 f"data/fbank_audioset/cuts_audioset_unbalanced-with-beats-embeddings.jsonl.gz"
+            )
+        return cuts
+
+    @lru_cache()
+    def audioset_cuts_KD(self) -> CutSet:
+        logging.info("About to get the audioset cuts for KD.")
+        cuts = load_manifest_lazy(
+            self.args.manifest_dir / "cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
+        )
+        if self.args.audioset_subset == "unbalanced":
+            cuts += load_manifest_lazy(
+                self.args.manifest_dir / "cuts_audioset_unbalanced-with-3-embeddings.jsonl.gz"
             )
         return cuts
 
