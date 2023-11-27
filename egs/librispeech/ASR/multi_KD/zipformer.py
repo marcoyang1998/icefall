@@ -293,6 +293,7 @@ class Zipformer2(EncoderInterface):
         src_key_padding_mask: Optional[Tensor] = None,
         return_middle_out: bool = False,
         freezing_layer_idx: List[int] = [],
+        forward_first_n: int = None,
     ) -> Tuple[Tensor, Tensor]:
         """
         Args:
@@ -351,6 +352,9 @@ class Zipformer2(EncoderInterface):
                 )
             outputs.append(x)
             layerwise_outputs.append(layer_results)
+
+            if forward_first_n is not None and i == forward_first_n:
+                return x, x_lens, layerwise_outputs
 
         # if the last output has the largest dimension, x will be unchanged,
         # it will be the same as outputs[-1].  Otherwise it will be concatenated
