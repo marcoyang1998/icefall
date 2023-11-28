@@ -462,7 +462,7 @@ def get_parser():
         "--stop-early",
         type=str2bool,
         default=False,
-        help="If stop early when  using mux"
+        help="If stop early when using mux"
     )
 
     parser.add_argument(
@@ -795,7 +795,6 @@ def compute_loss(
     assert feature.ndim == 3
     feature = feature.to(device)
 
-    import pdb; pdb.set_trace()
     supervisions = batch["supervisions"]
     cuts = batch["supervisions"]["cut"]
     cut_ids = [c.id for c in cuts]
@@ -813,7 +812,7 @@ def compute_loss(
             task_id = torch.tensor([0 for _ in cuts]).to(device)
         if random.random() < 0.05:
             logging.info(cut_ids)
-            logging.info(task_id)
+            logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS, {sum(task_id==1)} from Vox, {sum(task_id==2)} fro AS")
     else:
         task_id = None
 
@@ -841,7 +840,6 @@ def compute_loss(
             reduction="none"
         )
 
-        # import pdb; pdb.set_trace()
         loss = 0.0
         if params.use_beats:
             if task_id is not None:
@@ -851,7 +849,7 @@ def compute_loss(
             loss += beats_loss * params.beats_loss_scale
         if params.use_ecapa:
             if task_id is not None:
-                sv_mask = task_id != 2
+                sv_mask = task_id == 2 # not AT
                 ecapa_loss *= sv_mask.unsqueeze(-1)
             ecapa_loss = ecapa_loss.sum()
             loss +=  ecapa_loss * params.ecapa_loss_scale
@@ -1224,7 +1222,6 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    import pdb; pdb.set_trace()
     librispeech = LibriSpeechKDDataModule(args, device=device)
 
     if not params.full_libri: 
@@ -1263,7 +1260,6 @@ def run(rank, world_size, args):
         "vox2": 1039062 + 148642,
     }
     
-    import pdb; pdb.set_trace()
     logging.info(f"Using mux to combine Librispeech, audioset and voxceleb")
     train_cuts = CutSet.mux(
         train_cuts,
@@ -1329,7 +1325,7 @@ def run(rank, world_size, args):
 
     # audio tagging validation
     at_valid_cuts = load_manifest_lazy(
-        "data/fbank_with_as_with_whisper_large-v3_with_taskID/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
+        "data/fbank_LSVoxAs_with_whisper_large-v3_with_taskID/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
     )
 
     at_valid_cuts = at_valid_cuts.filter(remove_short_and_long_utt)
