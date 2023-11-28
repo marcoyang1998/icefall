@@ -849,7 +849,7 @@ def compute_loss(
             loss += beats_loss * params.beats_loss_scale
         if params.use_ecapa:
             if task_id is not None:
-                sv_mask = task_id == 2 # not AT
+                sv_mask = task_id == 1 # not AT
                 ecapa_loss *= sv_mask.unsqueeze(-1)
             ecapa_loss = ecapa_loss.sum()
             loss +=  ecapa_loss * params.ecapa_loss_scale
