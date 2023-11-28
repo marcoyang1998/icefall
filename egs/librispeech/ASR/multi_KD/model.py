@@ -458,6 +458,9 @@ class AsrModel(nn.Module):
         use_transducer: bool = True,
         use_ctc: bool = False,
         do_audio_tagging: bool = False,
+        do_speaker_verification: bool = False,
+        num_spkrs: int = -1,
+        speaker_input_idx: int = -1,
         freeze_encoder: bool = False,
         freezing_encoder_layer_index: List[int] = [],
         freeze_encoder_steps: int = -1,
@@ -510,6 +513,11 @@ class AsrModel(nn.Module):
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
+        self.encoder_dim = encoder_dim
+        self.encoder_dims = self.encoder.encoder_dim # tuple
+        self.num_layers = self.encoder.num_encoder_layers
+        
+        
         self.whisper_projection = encoder_projection # can be None
         self.encoder_projection = self.whisper_projection
 
@@ -549,6 +557,23 @@ class AsrModel(nn.Module):
                 nn.Linear(audio_tagging_input_dim, 527),
             ) # 527 classes
             self.beats_decoder = self.audio_tagging_decoder
+        
+        self.do_speaker_verification = do_speaker_verification
+        self.speaker_input_idx = speaker_input_idx
+        if do_speaker_verification:
+            if speaker_input_idx == -1: # use the last layer
+                self.ecapa_asp = AttentiveStatisticsPooling(channels=encoder_dim)
+                self.ecapa_linear = nn.Linear(2 * encoder_dim, 192 ) # fixed 192-D vector
+            else:
+                speaker_input_dim = self.encoder_dims[speaker_input_idx]
+                self.ecapa_asp = AttentiveStatisticsPooling(channels=speaker_input_dim)
+                self.ecapa_linear = nn.Linear(2 * speaker_input_dim, 192 ) # fixed 192-D vector
+                
+            self.speaker_classifier = nn.Linear(192, num_spkrs)
+        else:
+            self.ecapa_asp = None
+            self.ecapa_linear = None
+            self.speaker_classifier = None
         
         self.freeze_encoder = freeze_encoder
         self.freezing_encoder_layer_index = freezing_encoder_layer_index
@@ -747,6 +772,20 @@ class AsrModel(nn.Module):
         logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits) # (N, num_events)
 
         return logits
+    
+    def forward_speaker(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+    ):
+        encoder_out = encoder_out.permute(0,2,1)
+        encoder_out_lens = encoder_out_lens / torch.max(encoder_out_lens)
+        ecapa_embeddings = self.ecapa_asp(encoder_out, encoder_out_lens) # (N,C,T)
+        ecapa_embeddings = ecapa_embeddings.permute(0,2,1)
+        ecapa_embeddings = self.ecapa_linear(ecapa_embeddings) # (N, 1, 192)
+        
+        return ecapa_embeddings
+        
 
     def forward(
         self,
@@ -757,6 +796,7 @@ class AsrModel(nn.Module):
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
         audio_tagging_label: torch.Tensor = None,
+        speaker_label: torch.Tensor = None,
         return_middle_out: bool = False,
         batch_idx: int = 1e10 + 1,
         reduction: str = "sum",
@@ -814,7 +854,7 @@ class AsrModel(nn.Module):
             pre_projection_encoder_out, encoder_out_lens, middle_out = self.forward_encoder(
                 x,
                 x_lens,
-                return_middle_out=return_middle_out,
+                return_middle_out=True,
                 freezing_encoder_layer_index=self.freezing_encoder_layer_index
             )
 
@@ -842,17 +882,7 @@ class AsrModel(nn.Module):
             simple_loss = torch.empty(0)
             pruned_loss = torch.empty(0)
 
-        if self.use_ctc:
-            # Compute CTC loss
-            targets = y.values
-            ctc_loss = self.forward_ctc(
-                encoder_out=encoder_out,
-                encoder_out_lens=encoder_out_lens,
-                targets=targets,
-                target_lengths=y_lens,
-            )
-        else:
-            ctc_loss = torch.empty(0)
+        ctc_loss = torch.empty(0)
 
         if self.do_audio_tagging:
             audio_tagging_logits = self.forward_audio_tagging(
@@ -866,9 +896,33 @@ class AsrModel(nn.Module):
             )
         else:
             audio_tagging_loss = torch.empty(0)
+            
+        # ecapa loss
+        if self.do_speaker_verification:
+            if self.speaker_input_idx == -1:
+                ecapa_embeddings = self.forward_speaker(
+                    encoder_out, # (N,T,C)
+                    encoder_out_lens,
+                )
+            else:
+                assert middle_out is not None
+                ecapa_input_embeddings = middle_out[self.speaker_input_idx] # a list of (T,N,C)
+                ecapa_input_embeddings = sum(ecapa_input_embeddings) / len(ecapa_input_embeddings)
+                ecapa_input_embeddings = ecapa_input_embeddings.permute(1,0,2)
 
-        return simple_loss, pruned_loss, ctc_loss, audio_tagging_loss
+                ecapa_embeddings = self.forward_speaker(
+                    ecapa_input_embeddings,
+                    encoder_out_lens,
+                ) # (N,1,192)
+                
+            ecapa_embeddings = ecapa_embeddings.squeeze(1) # (N, 192)
+                
+            logits = self.speaker_classifier(ecapa_embeddings) # (N, num_spkrs)
+            sv_loss = F.cross_entropy(logits, speaker_label, reduction=reduction)
+        else:
+            sv_loss = torch.empty(0)
 
+        return simple_loss, pruned_loss, ctc_loss, audio_tagging_loss, sv_loss
 
 
 class SpeakerModel(nn.Module):
