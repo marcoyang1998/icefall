@@ -1491,8 +1491,23 @@ def get_parameter_groups_with_lrs(
             if module_name in freeze_modules:
                 logging.info(f"Remove {name} from parameters")
                 continue
+            check = False
+            for m in freeze_modules:
+                if name.startswith(f"module.{m}"):
+                    check = True
+            if check:
+                logging.info(f"Remove {name} from parameters")
+                continue
         else:
             if prefix in freeze_modules:
+                logging.info(f"Remove {name} from parameters")
+                continue
+            check = False
+            for m in freeze_modules:
+                if name.startswith(m):
+                    check = True
+                    break
+            if check:
                 logging.info(f"Remove {name} from parameters")
                 continue
         cur_lr = lr * flat_lr_scale[prefix]
