@@ -21,6 +21,7 @@ import inspect
 import logging
 from functools import lru_cache
 from pathlib import Path
+import pickle
 from typing import Any, Dict, Optional
 
 import whisper
@@ -166,7 +167,7 @@ class LibriSpeechKDDataModule:
             "--voxceleb-subset",
             type=str,
             default="vox1",
-            choices=["vox1", "vox2"],
+            choices=["vox1", "vox2", "only_vox2"],
             help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
         )
 
@@ -794,10 +795,17 @@ class LibriSpeechKDDataModule:
     def voxceleb_cuts(self) -> CutSet:
         # this should be used in KD
         logging.info("About to get the voxceleb cuts.")
+        if self.args.voxceleb_subset == "only_vox2":
+            logging.info("Only get the voxceleb2 cuts.")
+            cuts = load_manifest_lazy(
+                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+            )
+            return cuts
         cuts = load_manifest_lazy(
             self.args.manifest_dir / "cuts_vox1_train-with-3-embeddings.jsonl.gz"
         )
-        if self.args.audioset_subset == "vox2":
+        if self.args.voxceleb_subset == "vox2":
+            logging.info("Adding voxceleb2 cuts.")
             cuts += load_manifest_lazy(
                 self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
             )
@@ -846,3 +854,21 @@ class LibriSpeechKDDataModule:
         return load_manifest_lazy(
             "data/fbank_audioset/cuts_audioset_eval_all.jsonl.gz"
         )
+        
+    @lru_cache()
+    def voxceleb2_train_spkr_dict(self) -> Dict:
+        with open("data/speaker/voxceleb2_spkr.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
+    
+    @lru_cache()
+    def voxceleb1_train_spkr_dict(self) -> Dict:
+        with open("data/speaker/voxceleb1_spkr.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
+    
+    @lru_cache()
+    def librispeech_train_all_shuf_spkr_dict(self) -> Dict:
+        with open("data/speaker/librispeech_cuts_train-all-shuf.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
