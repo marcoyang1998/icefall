@@ -983,7 +983,7 @@ def compute_loss(
     task_id = torch.tensor([1 if t[:5] == "Dummy" else 0 for t in texts]).to(device)
 
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss, audio_tagging_loss = model(
+        simple_loss, pruned_loss, ctc_loss, audio_tagging_loss, sv_loss = model(
             x=feature,
             x_lens=feature_lens,
             audio_tagging_label=audio_tagging_label,
@@ -1379,7 +1379,8 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    if params.freeze_encoder and params.do_finetune:
+    #import pdb; pdb.set_trace()
+    if params.freeze_modules is not None:
         freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
         freeze_modules = [m.strip() for m in freeze_modules]
         logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")

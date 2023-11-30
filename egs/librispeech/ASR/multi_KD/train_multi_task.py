@@ -370,9 +370,16 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--ecapa-lr-scale",
+        type=float,
+        default=1.0,
+    )
+
+    parser.add_argument(
         "--beats-label",
         type=str2bool,
         default=True,
+        required=True,
         help="If convert the label to beats index"
     )
 
@@ -1454,6 +1461,13 @@ def run(rank, world_size, args):
     logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
     model.encoder.lr_scale = params.encoder_lr_scale
     model.encoder_embed.lr_scale = params.encoder_lr_scale
+
+    # Setting the ecapa lr scale
+    if params.do_sv:
+        logging.info(f"Setting the lr scale of parameters in ecapa_asp and ecapa_linear to {params.encoder_lr_scale}")
+        model.ecapa_asp.lr_scale = params.ecapa_lr_scale
+        model.ecapa_linear.lr_scale = params.ecapa_lr_scale
+
     if params.use_encoder_projection:
         logging.info(f"Also setting the lr scale of the projection layer to {params.encoder_lr_scale}")
         model.encoder_projection.lr_scale = params.encoder_lr_scale
@@ -1463,7 +1477,7 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    if params.freeze_encoder and params.do_finetune:
+    if params.freeze_modules is not None:
         freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
         freeze_modules = [m.strip() for m in freeze_modules]
         logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
@@ -1505,60 +1519,60 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechKDDataModule(args)
 
+    train_cuts = []
+    sampling_weights = []
     if not params.full_libri: 
-        train_cuts = librispeech.train_clean_100_cuts().repeat(
+        librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
             times=params.repeat_librispeech,
             preserve_id=False,
         )
         librispeech_cuts_len = 28539 * params.repeat_librispeech  # no speed purturb
     else:
-        train_cuts = librispeech.train_960_cuts().repeat(
+        librispeech_cuts = librispeech.train_960_cuts().repeat(
             times=params.repeat_librispeech,
             preserve_id=False,
         )
         librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
-
-    if params.do_audio_tagging:
-        logging.info(f"Getting audioset cuts")
-        audioset_cuts = librispeech.audioset_cuts_KD()
-    else:
-        audioset_cuts = None
-    logging.info(f"AudioSet cuts: {audioset_cuts}")
+    train_cuts.append(librispeech_cuts)
+    sampling_weights.append(librispeech_cuts_len)
 
     audioset_cuts_lens = {
         "balanced": 21155,
         "unbalanced": 1883591 + 21155
     }
-
-    if params.do_sv:
-        vox_cuts = librispeech.voxceleb_cuts()
-        if params.voxceleb_subset == "only_vox2":
-            params.spkr_dict = librispeech.voxceleb2_train_spkr_dict()
-        elif params.voxceleb_subset == "vox1":
-            params.spkr_dict = librispeech.voxceleb1_train_spkr_dict()
+    if params.do_audio_tagging:
+        logging.info(f"Getting audioset cuts")
+        audioset_cuts = librispeech.audioset_cuts_KD()
+        train_cuts.append(audioset_cuts)
+        sampling_weights.append(audioset_cuts_lens[params.audioset_subset])
     else:
-        vox_cuts = None
-    logging.info(f"VoxCeleb cuts: {vox_cuts}")
+        audioset_cuts = None
+    logging.info(f"AudioSet cuts: {audioset_cuts}")
 
     voxceleb_cuts_lens = {
         "vox1": 148642,
         "vox2": 1039062 + 148642,
         "only_vox2": 1039062,
     }
+    if params.do_sv and params.use_voxceleb:
+        vox_cuts = librispeech.voxceleb_cuts()
+        if params.voxceleb_subset == "only_vox2":
+            params.spkr_dict = librispeech.voxceleb2_train_spkr_dict()
+        elif params.voxceleb_subset == "vox1":
+            params.spkr_dict = librispeech.voxceleb1_train_spkr_dict()
+        train_cuts.append(vox_cuts)
+        sampling_weights.append(voxceleb_cuts_lens[params.voxceleb_subset])
+    else:
+        vox_cuts = None
+        params.spkr_dict = {}
+    logging.info(f"VoxCeleb cuts: {vox_cuts}")
     
-    weights = [
-        librispeech_cuts_len,
-        audioset_cuts_lens[params.audioset_subset] if params.do_audio_tagging else 0,
-        voxceleb_cuts_lens[params.voxceleb_subset] if params.do_sv else 0,
-    ]
     
-    logging.info(f"Using mux to combine Librispeech, audioset and voxceleb.")
-    logging.info(f"Using weights: {weights}")
+    logging.info(f"Using mux to combine {train_cuts}")
+    logging.info(f"Using weights: {sampling_weights}")
     train_cuts = CutSet.mux(
-        train_cuts,
-        audioset_cuts,
-        vox_cuts,
-        weights=weights,
+        *train_cuts,
+        weights=sampling_weights,
         stop_early=params.stop_early,
     )
 
