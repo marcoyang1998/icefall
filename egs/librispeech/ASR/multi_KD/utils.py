@@ -15,7 +15,7 @@ beats_id2str = {0: '/m/078jl', 1: '/m/07rjwbb', 2: '/m/04rlf', 3: '/m/07qb_dv', 
 beats_str2id = {v: k for (k,v) in beats_id2str.items()}
 
 ced2beats_mapping = {}
-with open("/star-data/xiaoyu/icefall_multi_KD/egs/librispeech/ASR/downloads/audioset/class_labels_indices.csv", "r") as f:
+with open("downloads/audioset/class_labels_indices.csv", "r") as f:
     reader = csv.reader(f, delimiter=",")
     for i, row in enumerate(reader):
         if i == 0:
@@ -37,7 +37,7 @@ def str2multihot(events: List[str], n_classes=527, id_mapping=None):
 
 def get_class_dict():
     # Generate a dict {event_label: event_id}
-    class_labels = "/star-xy/softwares/icefall_development/icefall_multi_KD/egs/librispeech/ASR/data/models/BEATs/class_labels_indices.csv"
+    class_labels = "data/models/BEATs/class_labels_indices.csv"
 
     class_dict = {}
     with open(class_labels, 'r') as f:
