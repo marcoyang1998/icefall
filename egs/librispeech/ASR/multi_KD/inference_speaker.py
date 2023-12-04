@@ -226,7 +226,7 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         logging.info("Threshold: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(thres, FAR, FRR))
     sorted_results =  sorted(results, key=lambda x: abs(x[1] - x[2]))
     op_thres, FAR, FRR = sorted_results[0]
-    logging.info("Operating threshold for {}: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(test_set, op_thres, FAR, FRR))
+    logging.info("Operating threshold for {}: {:.4f}, FAR: {:.4f}, FRR: {:.4f}, ERR: {:.4f}".format(test_set, op_thres, FAR, FRR, (FAR + FRR)/2))
     logging.info(f"Finished testing for {test_set}")  
         
 @torch.no_grad()
