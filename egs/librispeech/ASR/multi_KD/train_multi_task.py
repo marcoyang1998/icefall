@@ -1062,19 +1062,22 @@ def compute_loss(
 
         loss = 0.0
 
-        if params.use_task_id:
+        if params.use_task_id and is_training:
             asr_mask = task_id == 0 # ASR id is 0
             simple_loss = (simple_loss * asr_mask).sum()
             pruned_loss = (pruned_loss * asr_mask).sum()
+        else:
+            simple_loss = simple_loss.sum()
+            pruned_loss = pruned_loss.sum()
         
         if params.do_sv:
-            if params.use_task_id:
+            if params.use_task_id and is_training:
                 sv_mask = task_id == 1 # SV id is 1
                 sv_loss *= sv_mask
             sv_loss = sv_loss.sum()
         
         if params.do_audio_tagging:
-            if params.use_task_id:
+            if params.use_task_id and is_training:
                 at_mask = task_id == 2
                 audio_tagging_loss = (audio_tagging_loss.sum(dim=-1) * at_mask).sum()
             audio_tagging_loss = audio_tagging_loss.sum()
@@ -1480,7 +1483,7 @@ def run(rank, world_size, args):
     if params.freeze_modules is not None:
         freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
         freeze_modules = [m.strip() for m in freeze_modules]
-        logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
+        # logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
     else:
         freeze_modules = []
 
@@ -1567,14 +1570,16 @@ def run(rank, world_size, args):
         params.spkr_dict = {}
     logging.info(f"VoxCeleb cuts: {vox_cuts}")
     
-    
-    logging.info(f"Using mux to combine {train_cuts}")
-    logging.info(f"Using weights: {sampling_weights}")
-    train_cuts = CutSet.mux(
-        *train_cuts,
-        weights=sampling_weights,
-        stop_early=params.stop_early,
-    )
+    if len(train_cuts) > 1:
+        logging.info(f"Using mux to combine {train_cuts}")
+        logging.info(f"Using weights: {sampling_weights}")
+        train_cuts = CutSet.mux(
+            *train_cuts,
+            weights=sampling_weights,
+            stop_early=params.stop_early,
+        )
+    else:
+        train_cuts = train_cuts[0]
 
     logging.info(train_cuts)
 
