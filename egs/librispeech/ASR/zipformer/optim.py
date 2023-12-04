@@ -488,7 +488,7 @@ class ScaledAdam(BatchedOptimizer):
                     "Warning: model_norm_threshold not in state: possibly "
                     "you changed config when restarting, adding clipping_scale option?"
                 )
-                return 1.0
+                return 20.0
             ans = min(1.0, (model_norm_threshold / (tot_norm + 1.0e-20)).item())
             if ans < 1.0:
                 first_state["num_clipped"] += 1
