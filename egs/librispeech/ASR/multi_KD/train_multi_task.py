@@ -66,11 +66,12 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule import LibriSpeechKDDataModule
+from asr_datamodule import LibriSpeechAsrDataModule
 from decoder import Decoder
 from joiner import Joiner
 from lhotse import CutSet
-from lhotse.cut import Cut
+from lhotse.cut import Cut, MonoCut
+from lhotse.dataset.collation import collate_custom_field
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import AsrModel
@@ -311,7 +312,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "--do-sv",
         type=str2bool,
         default=True,
-        help="If do SV"
+        help="If do SV, this will add the speaker module to the model"
     )
     
     parser.add_argument(
@@ -364,7 +365,25 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--sync-other-tasks",
+        type=str2bool,
+        default=False,
+    )
+
+    parser.add_argument(
         "--encoder-lr-scale",
+        type=float,
+        default=1.0,
+    )
+
+    parser.add_argument(
+        "--beats-lr-scale",
+        type=float,
+        default=1.0,
+    )
+
+    parser.add_argument(
+        "--ecapa-lr-scale",
         type=float,
         default=1.0,
     )
@@ -373,6 +392,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "--beats-label",
         type=str2bool,
         default=True,
+        required=True,
         help="If convert the label to beats index"
     )
 
@@ -805,6 +825,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         freeze_encoder=params.freeze_encoder,
         freezing_encoder_layer_index=params.freezing_encoder_layer_index,
         freeze_encoder_steps=params.freeze_encoder_steps,
+        sync_other_tasks=params.sync_other_tasks,
     )
     return model
 
@@ -1012,12 +1033,14 @@ def compute_loss(
     feature_lens = supervisions["num_frames"].to(device)
 
     # audio tagging label
-    events = supervisions["audio_event"] # the label indices are in CED format
-    if params.beats_label:
-        audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
-    else:
-        audio_tagging_label, _ = str2multihot(events)
-    audio_tagging_label = audio_tagging_label.to(device)
+    # events = supervisions["audio_event"] # the label indices are in CED format
+    # if params.beats_label:
+    #     audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
+    # else:
+    #     audio_tagging_label, _ = str2multihot(events)
+    # audio_tagging_label = audio_tagging_label.to(device)
+
+    audio_tagging_label = extract_beats_embeddings(cuts).squeeze(1).to(device)
 
     # ASR labels
     texts = batch["supervisions"]["text"]
@@ -1121,6 +1144,13 @@ def compute_loss(
 
     return loss, info
 
+def extract_beats_embeddings(cuts):
+    cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+    beats_embeddings = collate_custom_field(
+        cuts_pre_mixed, "beats_embedding", pad_value=-100
+    ) # (N,C)
+    beats_embeddings = beats_embeddings.unsqueeze(1) # (N,1,C)
+    return beats_embeddings
 
 def compute_validation_loss(
     params: AttributeDict,
@@ -1163,7 +1193,8 @@ def train_one_epoch(
     scheduler: LRSchedulerType,
     sp: spm.SentencePieceProcessor,
     train_dl: torch.utils.data.DataLoader,
-    valid_dl: torch.utils.data.DataLoader,
+    valid_dls: List[torch.utils.data.DataLoader],
+    valid_sets: List[str],
     scaler: GradScaler,
     model_avg: Optional[nn.Module] = None,
     tb_writer: Optional[SummaryWriter] = None,
@@ -1335,22 +1366,23 @@ def train_one_epoch(
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
-            valid_info = compute_validation_loss(
-                params=params,
-                model=model,
-                sp=sp,
-                valid_dl=valid_dl,
-                world_size=world_size,
-            )
-            model.train()
-            logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
-            logging.info(
-                f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-            )
-            if tb_writer is not None:
-                valid_info.write_summary(
-                    tb_writer, "train/valid_", params.batch_idx_train
+            for valid_set, valid_dl in zip(valid_sets, valid_dls):
+                valid_info = compute_validation_loss(
+                    params=params,
+                    model=model,
+                    sp=sp,
+                    valid_dl=valid_dl,
+                    world_size=world_size,
                 )
+                model.train()
+                logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
+                logging.info(
+                    f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+                )
+                if tb_writer is not None:
+                    valid_info.write_summary(
+                        tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
+                    )
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -1457,6 +1489,19 @@ def run(rank, world_size, args):
     logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
     model.encoder.lr_scale = params.encoder_lr_scale
     model.encoder_embed.lr_scale = params.encoder_lr_scale
+
+    # Setting the beats decoder lr scale
+    if params.do_audio_tagging:
+        logging.info(f"Setting the lr scale of parameters in beats decoder to {params.beats_lr_scale}")
+        model.audio_tagging_decoder.lr_scale = params.beats_lr_scale
+        model.beats_decoder.lr_scale = params.beats_lr_scale
+
+    # Setting the ecapa lr scale
+    if params.do_sv:
+        logging.info(f"Setting the lr scale of parameters in ecapa_asp and ecapa_linear to {params.ecapa_lr_scale}")
+        model.ecapa_asp.lr_scale = params.ecapa_lr_scale
+        model.ecapa_linear.lr_scale = params.ecapa_lr_scale
+
     if params.use_encoder_projection:
         logging.info(f"Also setting the lr scale of the projection layer to {params.encoder_lr_scale}")
         model.encoder_projection.lr_scale = params.encoder_lr_scale
@@ -1466,7 +1511,7 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    if params.freeze_encoder and params.do_finetune:
+    if params.freeze_modules is not None:
         freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
         freeze_modules = [m.strip() for m in freeze_modules]
         # logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
@@ -1506,48 +1551,55 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    librispeech = LibriSpeechKDDataModule(args)
+    librispeech = LibriSpeechAsrDataModule(args)
 
+    train_cuts = []
+    sampling_weights = []
     if not params.full_libri: 
-        train_cuts = librispeech.train_clean_100_cuts().repeat(
+        librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
             times=params.repeat_librispeech,
             preserve_id=False,
         )
         librispeech_cuts_len = 28539 * params.repeat_librispeech  # no speed purturb
     else:
-        train_cuts = librispeech.train_960_cuts().repeat(
+        librispeech_cuts = librispeech.train_all_shuf_cuts().repeat(
             times=params.repeat_librispeech,
             preserve_id=False,
         )
         librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
-
-    if params.do_audio_tagging:
-        logging.info(f"Getting audioset cuts")
-        audioset_cuts = librispeech.audioset_cuts_KD()
-    else:
-        audioset_cuts = None
-    logging.info(f"AudioSet cuts: {audioset_cuts}")
+    train_cuts.append(librispeech_cuts)
+    sampling_weights.append(librispeech_cuts_len)
 
     audioset_cuts_lens = {
         "balanced": 21155,
         "unbalanced": 1883591 + 21155
     }
-
-    if params.do_sv:
-        vox_cuts = librispeech.voxceleb_cuts()
-        if params.voxceleb_subset == "only_vox2":
-            params.spkr_dict = librispeech.voxceleb2_train_spkr_dict()
-        elif params.voxceleb_subset == "vox1":
-            params.spkr_dict = librispeech.voxceleb1_train_spkr_dict()
+    if params.do_audio_tagging:
+        logging.info(f"Getting audioset cuts")
+        audioset_cuts = librispeech.audioset_cuts_KD()
+        train_cuts.append(audioset_cuts)
+        sampling_weights.append(audioset_cuts_lens[params.audioset_subset])
     else:
-        vox_cuts = None
-    logging.info(f"VoxCeleb cuts: {vox_cuts}")
+        audioset_cuts = None
+    logging.info(f"AudioSet cuts: {audioset_cuts}")
 
     voxceleb_cuts_lens = {
         "vox1": 148642,
         "vox2": 1039062 + 148642,
         "only_vox2": 1039062,
     }
+    if params.do_sv and params.use_voxceleb:
+        vox_cuts = librispeech.voxceleb_cuts()
+        if params.voxceleb_subset == "only_vox2":
+            params.spkr_dict = librispeech.voxceleb2_train_spkr_dict()
+        elif params.voxceleb_subset == "vox1":
+            params.spkr_dict = librispeech.voxceleb1_train_spkr_dict()
+        train_cuts.append(vox_cuts)
+        sampling_weights.append(voxceleb_cuts_lens[params.voxceleb_subset])
+    else:
+        vox_cuts = None
+        params.spkr_dict = {}
+    logging.info(f"VoxCeleb cuts: {vox_cuts}")
     
     if len(train_cuts) > 1:
         logging.info(f"Using mux to combine {train_cuts}")
@@ -1618,15 +1670,22 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.dev_clean_cuts_no_KD()
-    valid_cuts += librispeech.dev_other_cuts_no_KD()
-    if params.do_audio_tagging:
-        valid_cuts += librispeech.audioset_eval_cuts_no_KD()
+    valid_cuts = librispeech.dev_clean_cuts_KD()
+    valid_cuts += librispeech.dev_other_cuts_KD()
     valid_cuts = valid_cuts.map(add_dummy_text)
-
-    logging.info(valid_cuts)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
-
+    valid_dls = [valid_dl]
+    valid_sets = ["ASR"]
+    logging.info(valid_cuts)
+    
+    if params.do_audio_tagging:
+        at_valid_cuts = librispeech.audioset_eval_cuts_KD()
+        at_valid_cuts = at_valid_cuts.map(add_dummy_text)
+        at_valid_dl = librispeech.valid_dataloaders(at_valid_cuts)
+        valid_dls.append(at_valid_dl)
+        logging.info(at_valid_cuts)
+        valid_sets += ["Audio"]
+    
     # if not params.print_diagnostics:
     #     scan_pessimistic_batches_for_oom(
     #         model=model,
@@ -1659,7 +1718,8 @@ def run(rank, world_size, args):
             scheduler=scheduler,
             sp=sp,
             train_dl=train_dl,
-            valid_dl=valid_dl,
+            valid_dls=valid_dls,
+            valid_sets=valid_sets,
             scaler=scaler,
             tb_writer=tb_writer,
             world_size=world_size,
@@ -1764,7 +1824,7 @@ def scan_pessimistic_batches_for_oom(
 
 def main():
     parser = get_parser()
-    LibriSpeechKDDataModule.add_arguments(parser)
+    LibriSpeechAsrDataModule.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
