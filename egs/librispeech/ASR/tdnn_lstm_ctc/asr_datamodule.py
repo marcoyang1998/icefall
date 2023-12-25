@@ -21,6 +21,7 @@ import inspect
 import logging
 from functools import lru_cache
 from pathlib import Path
+import pickle
 from typing import Any, Dict, Optional
 
 import torch
@@ -215,6 +216,76 @@ class LibriSpeechAsrDataModule:
             help="AudioSamples or PrecomputedFeatures",
         )
 
+        group.add_argument(
+            "--drop-features",
+            type=str2bool,
+            default=False,
+            help="If drop the pre-computed features"
+        )
+        
+        group.add_argument(
+            "--return-audio",
+            type=str2bool,
+            default=False,
+            help="Return audio while collating batch"
+        )
+        
+        group.add_argument(
+            "--use-beats",
+            type=str2bool,
+            help="If use BEATs teacher model",
+            default=True,
+        )
+        
+        group.add_argument(
+            "--use-ecapa",
+            type=str2bool,
+            help="If use ECAPA teacher model",
+            default=True,
+        )
+        
+        group.add_argument(
+            "--use-whisper",
+            type=str2bool,
+            help="If use whisper teacher model when collecting batch;",
+            default=True,
+        )
+
+        group.add_argument(
+            "--use-voxceleb",
+            type=str2bool,
+            default=False,
+            help="If use voxceleb as training set. This will not affet the model params.",
+        )
+
+        group.add_argument(
+            "--voxceleb-subset",
+            type=str,
+            default="vox1",
+            choices=["vox1", "vox2", "only_vox2"],
+            help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
+        )
+        
+        group.add_argument(
+            "--use-audioset",
+            type=str2bool,
+            default=True,
+        )
+
+        group.add_argument(
+            "--audioset-subset",
+            type=str,
+            default="balanced",
+            choices=["balanced", "unbalanced"]
+        )
+
+        group.add_argument(
+            "--whisper-version",
+            type=str,
+            default="small.en",
+            help="The version of whisper to be used"
+        )
+
     def train_dataloaders(
         self,
         cuts_train: CutSet,
@@ -319,6 +390,7 @@ class LibriSpeechAsrDataModule:
                 cuts_train,
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
+                drop_last=self.args.drop_last,
             )
         logging.info("About to create train dataloader")
 
@@ -454,10 +526,24 @@ class LibriSpeechAsrDataModule:
         )
 
     @lru_cache()
+    def dev_clean_cuts_KD(self) -> CutSet:
+        logging.info("About to get dev-clean cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_dev-clean-with-3-embeddings.jsonl.gz"
+        )
+
+    @lru_cache()
     def dev_other_cuts(self) -> CutSet:
         logging.info("About to get dev-other cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
+        )
+
+    @lru_cache()
+    def dev_other_cuts_KD(self) -> CutSet:
+        logging.info("About to get dev-other cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_dev-other-with-3-embeddings.jsonl.gz"
         )
 
     @lru_cache()
@@ -473,3 +559,60 @@ class LibriSpeechAsrDataModule:
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_test-other.jsonl.gz"
         )
+
+    @lru_cache()
+    def audioset_cuts_KD(self) -> CutSet:
+        logging.info("About to get the audioset cuts for KD.")
+        cuts = load_manifest_lazy(
+            self.args.manifest_dir / "cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
+        )
+        if self.args.audioset_subset == "unbalanced":
+            cuts += load_manifest_lazy(
+                self.args.manifest_dir / "cuts_audioset_unbalanced-with-3-embeddings.jsonl.gz"
+            )
+        return cuts
+
+    @lru_cache()
+    def audioset_eval_cuts_KD(self) -> CutSet:
+        logging.info("About to get test-other cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_audioset_eval-with-3-embeddings.jsonl.gz"
+        )
+
+    @lru_cache()
+    def voxceleb_cuts(self) -> CutSet:
+        # this should be used in KD
+        logging.info("About to get the voxceleb cuts.")
+        if self.args.voxceleb_subset == "only_vox2":
+            logging.info("Only get the voxceleb2 cuts.")
+            cuts = load_manifest_lazy(
+                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+            )
+            return cuts
+        cuts = load_manifest_lazy(
+            self.args.manifest_dir / "cuts_vox1_train-with-3-embeddings.jsonl.gz"
+        )
+        if self.args.voxceleb_subset == "vox2":
+            logging.info("Adding voxceleb2 cuts.")
+            cuts += load_manifest_lazy(
+                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+            )
+        return cuts
+
+    @lru_cache()
+    def voxceleb2_train_spkr_dict(self) -> Dict:
+        with open("data/speaker/voxceleb2_spkr.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
+    
+    @lru_cache()
+    def voxceleb1_train_spkr_dict(self) -> Dict:
+        with open("data/speaker/voxceleb1_spkr.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
+    
+    @lru_cache()
+    def librispeech_train_all_shuf_spkr_dict(self) -> Dict:
+        with open("data/speaker/librispeech_cuts_train-all-shuf.pkl", "rb") as f:
+            spkr_dict = pickle.load(f)
+        return spkr_dict
