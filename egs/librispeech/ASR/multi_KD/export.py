@@ -421,8 +421,6 @@ def main():
     logging.info("About to create model")
     model = get_model(params)
 
-    import pdb; pdb.set_trace()
-
     if not params.use_averaged_model:
         if params.iter > 0:
             filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
@@ -501,14 +499,17 @@ def main():
                 strict=False,
             )
 
-    import pdb; pdb.set_trace()
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
-    torch.save({"model": model.state_dict()}, params.exp_dir / f"epoch-{params.epoch}-avg-{params.avg}.pt")
+    if params.iter > 0:
+        torch.save({"model": model.state_dict()}, params.exp_dir / f"iter-{params.iter}-avg-{params.avg}.pt")
+    else:
+        torch.save({"model": model.state_dict()}, params.exp_dir / f"epoch-{params.epoch}-avg-{params.avg}.pt")
 
     logging.info("Done!")
 
 
 if __name__ == "__main__":
+    formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     logging.basicConfig(format=formatter, level=logging.INFO)
     main()
