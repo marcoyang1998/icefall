@@ -116,5 +116,5 @@ def get_env_info() -> Dict[str, Any]:
         "k2-path": str(Path(k2.__file__).resolve()),
         "lhotse-path": str(Path(lhotse.__file__).resolve()),
         "hostname": socket.gethostname(),
-        "IP address": socket.gethostbyname(socket.gethostname()),
+        # "IP address": socket.gethostbyname(socket.gethostname()),
     }
