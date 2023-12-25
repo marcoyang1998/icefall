@@ -30,6 +30,7 @@ from lhotse.supervision import SupervisionSegment
 from lhotse.utils import compute_num_frames, ifnone
 
 from torch.utils.data.dataloader import DataLoader, default_collate
+from lhotse.workarounds import Hdf5MemoryIssueFix
 
 
 class MultiKDDataset(torch.utils.data.Dataset):
@@ -82,6 +83,11 @@ class MultiKDDataset(torch.utils.data.Dataset):
         self.whisper = whisper
         
         self.beats_class_dict = get_class_dict()
+        
+        # This attribute is a workaround to constantly growing HDF5 memory
+        # throughout the epoch. It regularly closes open file handles to
+        # reset the internal HDF5 caches.
+        self.hdf5_fix = Hdf5MemoryIssueFix(reset_interval=100)
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
