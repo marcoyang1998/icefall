@@ -473,6 +473,13 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--share-asr",
+        help="If share asr data for SV training",
+        default=False,
+        type=str2bool,
+    )
+    
+    parser.add_argument(
         "--beats-loss-scale",
         type=float,
         default=1.0,
@@ -640,10 +647,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_whisper=params.use_whisper,
         whisper_dim=params.whisper_dim,
         speaker_input_idx=params.speaker_input_idx,
-        mvq_KD=params.whisper_mvq,
-        num_codebooks=params.num_codebooks if params.whisper_mvq else -1,
-        mvq_kd_layer=params.mvq_kd_layer_idx,
-        cb_input_dim=max(_to_int_tuple(params.encoder_dim)) if params.mvq_kd_layer_idx == -1 else _to_int_tuple(params.encoder_dim)[params.mvq_kd_layer_idx],
+        mvq_KD=False,
         use_subsampled_output=params.use_subsampled_output,
     )
     return model
@@ -802,8 +806,8 @@ def compute_loss(
     ecapa_embeddings = batch["ecapa_embedding"].to(device)
     whisper_embeddings = batch["whisper_embedding"]
     whisper_embedding_lens = batch["whisper_embedding_lens"]
-    whisper_codebook_indexes = batch["whisper_codebook_indexes"].to(device)
-    whisper_codebook_indexes_lens = batch["whisper_codebook_indexes_lens"].to(device)
+    whisper_codebook_indexes = None
+    whisper_codebook_indexes_lens = None
     
     if params.use_task_id and is_training:
         try:
@@ -821,21 +825,21 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    texts = batch["supervisions"]["text"]
-    y = sp.encode(texts, out_type=int)
-    y = k2.RaggedTensor(y)
+    # texts = batch["supervisions"]["text"]
+    # y = sp.encode(texts, out_type=int)
+    # y = k2.RaggedTensor(y)
 
     with torch.set_grad_enabled(is_training):
         beats_loss, ecapa_loss, whisper_loss, whisper_cb_loss = model(
             x=feature,
             x_lens=feature_lens,
-            y=y,
+            y=None,
             teacher_beats_embeddings=beats_embeddings if params.use_beats else None,
             teacher_ecapa_embeddings=ecapa_embeddings if params.use_ecapa else None,
             teacher_whisper_embeddings=whisper_embeddings.to(device) if params.use_whisper else None,
             teacher_whisper_embedding_lens=whisper_embedding_lens.to(device) if params.use_whisper else None,
-            teacher_whisper_codebook_indexes=whisper_codebook_indexes if params.whisper_mvq else None,
-            teacher_whisper_codebook_indexes_lens=whisper_codebook_indexes_lens if params.whisper_mvq else None,
+            teacher_whisper_codebook_indexes=None,
+            teacher_whisper_codebook_indexes_lens=None,
             return_middle_out=True,
             reduction="none"
         )
@@ -859,8 +863,6 @@ def compute_loss(
                 whisper_loss *= asr_mask.unsqueeze(-1).unsqueeze(-1)
             whisper_loss = whisper_loss.sum()
             loss += whisper_loss * params.whisper_loss_scale
-        if params.whisper_mvq and is_training:
-            loss += whisper_cb_loss * params.whisper_cb_loss_scale
 
     assert loss.requires_grad == is_training
 
@@ -1099,7 +1101,6 @@ def train_one_epoch(
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
-            # import pdb; pdb.set_trace()
             for valid_set, valid_dl in zip(valid_sets, valid_dls):
                 valid_info = compute_validation_loss(
                     params=params,
@@ -1223,55 +1224,60 @@ def run(rank, world_size, args):
         register_inf_check_hooks(model)
 
     librispeech = LibriSpeechKDDataModule(args, device=device)
-
+    train_cuts = []
+    sampling_weights = [] 
     if not params.full_libri: 
-        train_cuts = librispeech.train_clean_100_cuts().repeat(
+        librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
             times=params.repeat_librispeech,
             preserve_id=False,
         )
         librispeech_cuts_len = 28539 * params.repeat_librispeech  # no speed purturb
     else:
-        train_cuts = librispeech.train_960_cuts().repeat(
+        librispeech_cuts = librispeech.train_960_cuts().repeat(
             times=params.repeat_librispeech,
             preserve_id=False,
         )
         librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
-
-    if params.use_audioset:
-        logging.info(f"Getting audioset cuts")
-        audioset_cuts = librispeech.audioset_cuts_KD()
-    else:
-        audioset_cuts = None
-    logging.info(f"AudioSet cuts: {audioset_cuts}")
+    train_cuts.append(librispeech_cuts)
+    sampling_weights.append(librispeech_cuts_len)
 
     audioset_cuts_lens = {
         "balanced": 21155,
         "unbalanced": 1883591 + 21155
     }
-
-    if params.use_voxceleb: 
-        vox_cuts = librispeech.voxceleb_cuts()
+    if params.use_audioset:
+        logging.info(f"Getting audioset cuts")
+        audioset_cuts = librispeech.audioset_cuts_KD()
+        train_cuts.append(audioset_cuts)
+        sampling_weights.append(audioset_cuts_lens[params.audioset_subset])
     else:
-        vox_cuts = None
-    logging.info(f"VoxCeleb cuts: {vox_cuts}")
+        audioset_cuts = None
+    logging.info(f"AudioSet cuts: {audioset_cuts}")
 
     voxceleb_cuts_lens = {
         "vox1": 148642,
         "vox2": 1039062 + 148642,
     }
+
+    if params.use_voxceleb: 
+        vox_cuts = librispeech.voxceleb_cuts()
+        train_cuts.append(vox_cuts)
+        sampling_weights.append(voxceleb_cuts_lens[params.voxceleb_subset])
+    else:
+        vox_cuts = None
+    logging.info(f"VoxCeleb cuts: {vox_cuts}")
     
     logging.info(f"Using mux to combine Librispeech, audioset and voxceleb")
-    train_cuts = CutSet.mux(
-        train_cuts,
-        audioset_cuts,
-        vox_cuts,
-        weights=[
-            librispeech_cuts_len,
-            audioset_cuts_lens[params.audioset_subset] if params.use_audioset else 0,
-            voxceleb_cuts_lens[params.voxceleb_subset] if params.use_voxceleb else 0,
-        ],
-        stop_early=params.stop_early,
-    )
+    if len(train_cuts) > 1:
+        logging.info(f"Using mux to combine {train_cuts}")
+        logging.info(f"Using weights: {sampling_weights}")
+        train_cuts = CutSet.mux(
+            *train_cuts,
+            weights=sampling_weights,
+            stop_early=params.stop_early,
+        )
+    else:
+        train_cuts = train_cuts[0]
     
     logging.info(train_cuts)
 
