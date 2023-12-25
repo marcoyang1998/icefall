@@ -11,10 +11,12 @@ import sentencepiece as spm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from lhotse import load_manifest
 from kd_datamodule import LibriSpeechKDDataModule
 
 from train_multi_KD import add_model_arguments, get_model, get_params
+from sklearn import metrics
 from utils import get_class_dict
 
 from icefall import ContextGraph, LmScorer, NgramLm
@@ -208,25 +210,16 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         scores.append(sim.item())
         labels.append(int(label))
     
-    thresholds = [0.1 + i*0.005 for i in range(180)]
-    scores = torch.Tensor(scores)
-    label = torch.Tensor(labels)
-    logging.info("Tuning the thresholds")
-    results = []
-    for thres in thresholds:
-        prediction = scores > thres
-        tp = prediction[label == 1].sum()
-        fp = prediction[label == 0].sum()    
-        tn = (prediction[label == 0] == 0).sum()
-        fn = (prediction[label == 1] == 0).sum()
-        FAR = fp / (fp + tp)
-        FRR = fn / len(testing_pairs)
-        results.append([thres, FAR, FRR])
-        
-        logging.info("Threshold: {:.4f}, FAR: {:.4f}, FRR: {:.4f}".format(thres, FAR, FRR))
-    sorted_results =  sorted(results, key=lambda x: abs(x[1] - x[2]))
-    op_thres, FAR, FRR = sorted_results[0]
-    logging.info("Operating threshold for {}: {:.4f}, FAR: {:.4f}, FRR: {:.4f}, ERR: {:.4f}".format(test_set, op_thres, FAR, FRR, (FAR + FRR)/2))
+    # EER is where fpr == fnr
+    fpr, tpr, thresholds = metrics.roc_curve(labels, scores)
+    fnr = 1 - tpr
+    index = np.nanargmin(np.absolute((fnr - fpr)))
+    EER = 0.5 * (fnr[index] + fpr[index])
+    
+    op_thres = thresholds[index]
+    FAR = fpr[index]
+    FRR = fnr[index]
+    logging.info("Operating threshold for {}: {:.4f}, FAR: {:.4f}, FRR: {:.4f}, EER: {:.4f}".format(test_set, op_thres, FAR, FRR, EER))
     logging.info(f"Finished testing for {test_set}")  
         
 @torch.no_grad()
@@ -268,7 +261,7 @@ def main():
             "voxceleb1": 1211,
             "train-all-shuf": 2338,
         }
-        from finetune_speaker import get_model
+        from train_multi_task import get_model
     else:
         from train_multi_KD import get_model
         
@@ -296,7 +289,7 @@ def main():
                 )
             logging.info(f"averaging {filenames}")
             model.to(device)
-            model.load_state_dict(average_checkpoints(filenames, device=device))
+            model.load_state_dict(average_checkpoints(filenames, device=device), strict=False)
         elif params.avg == 1:
             load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
         else:
