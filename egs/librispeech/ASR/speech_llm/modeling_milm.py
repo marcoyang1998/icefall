@@ -19,7 +19,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.versions import require_version
 
-from .configuration_milm import MiConfig
+from configuration_milm import MiConfig
 
 warnings.filterwarnings("ignore")
 
@@ -658,7 +658,9 @@ class MiDecoder(nn.Module):
                 past_key_values_length=past_key_values_length,
             )
 
+        # This one is like scr_key_padding_mask, where padding tokens shall be ignored
         if attention_mask is not None:
+            # attention_mask should have True on causal postions
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
             expanded_attn_mask = _expand_mask(
                 attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]

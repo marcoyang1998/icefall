@@ -594,7 +594,7 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
     
     config = MiConfig.from_json_file(params.mimodel_config)
     decoder = MiLMForCausalLM(config)
-    state_dict = torch.load(params.mimodel_path)
+    state_dict = torch.load(params.mimodel_path, map_location="cpu")
     if "model" in state_dict:
         state_dict = state_dict["model"]
     decoder.load_state_dict(state_dict)
@@ -1138,11 +1138,11 @@ def run(rank, world_size, args):
         tb_writer = None
 
     device = torch.device("cpu")
-    if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+    # if torch.cuda.is_available():
+    #     device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-#    import pdb; pdb.set_trace()
+    import pdb; pdb.set_trace()
     sp = MiTokenizer(params.tokenizer_path, fix_zh=False)
     params.vocab_size = sp.vocab_size
 
