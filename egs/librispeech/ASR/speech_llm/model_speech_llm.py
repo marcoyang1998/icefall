@@ -26,7 +26,7 @@ from encoder_interface import EncoderInterface
 from model import MultiKDModel
 
 from icefall.utils import add_sos, make_pad_mask, AttributeDict
-from scaling import ScaledLinear
+from scaling import ScaledLinear, SwooshR
 
 class SpeechLLMModel(nn.Module):
     def __init__(
@@ -57,7 +57,7 @@ class SpeechLLMModel(nn.Module):
         self.embed_projection = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(speech_encoder_dim, llm_embed_dim),
-            nn.Tanh(),
+            SwooshR(), # use the swooshR non-lin
         )
         
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
@@ -101,7 +101,8 @@ class SpeechLLMModel(nn.Module):
         ) # (N,T,C)
         if hasattr(self.speech_encoder, 'whisper_projection'):
             encoder_out = self.speech_encoder.whisper_projection(encoder_out)
-            
+        
+        import pdb; pdb.set_trace()            
         if self.pooling_layer is not None:
             encoder_out = encoder_out.permute(0,2,1) # (N,C,T), required by pooling
             encoder_out = self.pooling_layer(encoder_out) 
