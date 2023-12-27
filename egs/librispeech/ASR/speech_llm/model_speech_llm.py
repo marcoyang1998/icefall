@@ -60,7 +60,7 @@ class SpeechLLMModel(nn.Module):
             SwooshR(), # use the swooshR non-lin
         )
         
-        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
+        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
         
     def forward_LLM(
         self,
@@ -74,7 +74,6 @@ class SpeechLLMModel(nn.Module):
             (B,T,C)
             y_lens (torch.Tensor): The length of the augmented input_embeddings
         """
-        import pdb; pdb.set_trace()
         src_key_padding_mask = ~ make_pad_mask(y_lens, max_len=y.shape[1])
         
         output = self.llm(
@@ -102,7 +101,6 @@ class SpeechLLMModel(nn.Module):
         if hasattr(self.speech_encoder, 'whisper_projection'):
             encoder_out = self.speech_encoder.whisper_projection(encoder_out)
         
-        import pdb; pdb.set_trace()            
         if self.pooling_layer is not None:
             encoder_out = encoder_out.permute(0,2,1) # (N,C,T), required by pooling
             encoder_out = self.pooling_layer(encoder_out) 
@@ -118,32 +116,29 @@ class SpeechLLMModel(nn.Module):
         y: torch.Tensor,
         y_lens: torch.Tensor,
     ):
-        import pdb; pdb.set_trace()
+        device = x.device
         x, x_lens = self.forward_speech_encoder(x, x_lens) # (N,T,C)
         x = self.embed_projection(x) # (N,T,C)
         
-        import pdb; pdb.set_trace()
         y_embed = self.llm.get_input_embeddings()(y) # (N,U,C)
         concatenated_tokens, total_lens = self.concat_token_embedings(x, x_lens, y_embed, y_lens) # (N,U,C))
         
-        import pdb; pdb.set_trace()
         logits = self.forward_LLM(concatenated_tokens, total_lens)
         
         bs = logits.shape[0]
-        shift_logits = logits[...,:-1,:].contiguous() # We don't compute loss after EOS
         
-        # Construct the mask of textual tokens, True on those positions
-        # +2 because we don't want to compute loss on the tag token
-        mask = torch.arange(logits.shape[1]).expand(bs, -1)
-        mask = mask > (x_lens + 2).unsqueeze(-1) # the positions of text token is True
-        padding_mask = ~ make_pad_mask(total_lens -1) # the positions on the padding token is False
+        # Construct the mask of tokens for loss computations, True on those positions
+        # since the x_lens-th token is |<sos>|, we select mask >= x_lens
+        mask = torch.arange(logits.shape[1]).expand(bs, -1).to(device)
+        mask = mask >= x_lens.unsqueeze(-1) # the positions of text token is True
+        padding_mask = ~ make_pad_mask(total_lens - 1, max_len=total_lens.max()) # the positions on the padding token & eos token is False
         mask = torch.logical_and(mask, padding_mask)
         
         # The actual logits for loss computation
-        kept_logits = shift_logits[mask == True] # (N, C)
+        kept_logits = logits[mask == True] # (N, C)
         
         # The actual labels for loss computation
-        shift_labels = y[:, 2:].contiguous() # throw away <bos> token
+        shift_labels = y[:, 1:].contiguous() # throw away <bos> token
         kept_labels = shift_labels[shift_labels > 0] # throw away padding token
         
         loss = self.criterion(kept_logits, kept_labels)
@@ -154,14 +149,12 @@ class SpeechLLMModel(nn.Module):
     def concat_token_embedings(x, x_lens, y, y_lens):
         bs = x.shape[0]
         new_tensors = [] # List[Tensor], each (B,T+U,C)
-        import pdb; pdb.set_trace()
         for i in range(bs):
             new_tensor = torch.cat((x[i, :x_lens[i]], y[i]), dim=0)
             new_tensors.append(new_tensor)
         new_tensors = nn.utils.rnn.pad_sequence(new_tensors, batch_first=True)
         total_lens = x_lens + y_lens
         
-        import pdb; pdb.set_trace()
         new_tensors = new_tensors[:, :total_lens.max(), :] # truncate to the maximal length
         
         return new_tensors, total_lens
