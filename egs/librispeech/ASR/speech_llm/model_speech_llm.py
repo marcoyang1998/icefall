@@ -36,6 +36,7 @@ class SpeechLLMModel(nn.Module):
         vocab_size: int,
         llm_embed_dim: int = 1536,
         speech_encoder_dim: int = 2560,
+        do_avg_pooling: bool = False,
     ):
         super().__init__()
         self.speech_encoder = speech_encoder # a pre-trained speech encoder
@@ -47,6 +48,11 @@ class SpeechLLMModel(nn.Module):
         # set requires_grad=False for all the parameters in llm
         for param in self.llm.parameters():
             param.requires_grad = False
+        
+        if do_avg_pooling:
+            self.pooling_layer = nn.AvgPool1d(2, stride=2)
+        else:
+            self.pooling_layer = None
         
         self.embed_projection = nn.Sequential(
             nn.Dropout(0.1),
@@ -95,6 +101,13 @@ class SpeechLLMModel(nn.Module):
         ) # (N,T,C)
         if hasattr(self.speech_encoder, 'whisper_projection'):
             encoder_out = self.speech_encoder.whisper_projection(encoder_out)
+            
+        if self.pooling_layer is not None:
+            encoder_out = encoder_out.permute(0,2,1) # (N,C,T), required by pooling
+            encoder_out = self.pooling_layer(encoder_out) 
+            encoder_out = encoder_out.permute(0,2,1) # (N,T,C)
+            encoder_out_lens = encoder_out_lens // 2
+        
         return encoder_out, encoder_out_lens
     
     def forward(

@@ -258,6 +258,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=1536 ,
         help="Dimension of the embedding for the language model",
     )
+    
+    parser.add_argument(
+        "--do-avg-pooling",
+        type=str2bool,
+        default=False,
+        help="If perform average pooling after the audio encoder to reduce frame rate"
+    )
 
     parser.add_argument(
         "--do-sv",
@@ -668,6 +675,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         speech_encoder=speech_encoder,
         speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
+        do_avg_pooling=params.do_avg_pooling,
     )
     
     return model
