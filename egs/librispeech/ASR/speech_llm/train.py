@@ -31,14 +31,13 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 from asr_datamodule import LibriSpeechAsrDataModule
-from decoder import Decoder
-from joiner import Joiner
 from lhotse import load_manifest_lazy, CutSet
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.collation import collate_custom_field
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model2 import MultiKDASRModel
+from model import MultiKDModel
+from model_speech_llm import SpeechLLMModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -48,7 +47,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from zipformer import Zipformer2
 
-from utils import compare_model, str2multihot, ced2beats_mapping
+from modeling_milm import MiConfig, MiLMForCausalLM
+from tokenization_milm import MiTokenizer
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -253,17 +253,10 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--use-transducer",
-        type=str2bool,
-        default=True,
-        help="If True, use Transducer head.",
-    )
-
-    parser.add_argument(
-        "--use-ctc",
-        type=str2bool,
-        default=False,
-        help="If True, use CTC head.",
+        "--llm-embed-dim",
+        type=int,
+        default=1536 ,
+        help="Dimension of the embedding for the language model",
     )
 
     parser.add_argument(
@@ -383,10 +376,28 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--bpe-model",
+        "--tokenizer-path",
         type=str,
-        default="data/lang_bpe_500/bpe.model",
-        help="Path to the BPE model",
+        required=True,
+        help="Path to the tokenizer model",
+    )
+    
+    parser.add_argument(
+        "--mimodel-config",
+        type=str,
+        required=True,
+    )
+    
+    parser.add_argument(
+        "--mimodel-path",
+        type=str,
+        required=True,
+    )
+    
+    parser.add_argument(
+        "--speech-encoder-path",
+        type=str,
+        required=True,
     )
 
     parser.add_argument(
@@ -483,13 +494,19 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--use-full-fp16",
+        type=str2bool,
+        default=False,
+        help="Whether to run everything on fp16, including the speech encoder",
+    )
+    
+    parser.add_argument(
         "--repeat-librispeech",
         type=int,
         default=1,
         help="How many times to repeat LS",
     )
 
-    add_finetune_arguments(parser)
     add_model_arguments(parser)
 
     return parser
@@ -563,6 +580,22 @@ def get_params() -> AttributeDict:
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(",")))
 
+def get_llm_decoder(params: AttributeDict) -> nn.Module:
+    # Load a pre-trained LLM decoder
+    import sys
+    sys.path.append("/xy/mnt/yangxiaoyu/softwares/projects")
+    
+    config = MiConfig.from_json_file(params.mimodel_config)
+    decoder = MiLMForCausalLM(config)
+    state_dict = torch.load(params.mimodel_path)
+    if "model" in state_dict:
+        state_dict = state_dict["model"]
+    decoder.load_state_dict(state_dict)
+    if not params.use_full_fp16:
+        decoder.to(torch.float32)
+        logging.info("Convering the LLM parameter to fp32 format")
+    return decoder
+    
 
 def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # encoder_embed converts the input of shape (N, T, num_features)
@@ -603,41 +636,41 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     )
     return encoder
 
-
-
-def get_model(params: AttributeDict) -> nn.Module:
-    assert params.use_transducer or params.use_ctc, (
-        f"At least one of them should be True, "
-        f"but got params.use_transducer={params.use_transducer}, "
-        f"params.use_ctc={params.use_ctc}"
-    )
+def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
-    
-    decoder = get_decoder_model(params)
-    joiner = get_joiner_model(params)
 
-    model = MultiKDASRModel(
+    model = MultiKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
-        decoder=decoder,
-        joiner=joiner,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
-        decoder_dim=params.decoder_dim,
-        use_beats=params.use_beats,
-        use_ecapa=params.use_ecapa,
+        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        use_beats=False,
+        use_ecapa=False,
         use_whisper=params.use_whisper,
-        whisper_dim=params.whisper_dim,
+        whisper_dim=1280,
         speaker_input_idx=params.speaker_input_idx,
-        freeze_encoder=params.freeze_encoder,
-        freezing_encoder_layer_index=params.freezing_encoder_layer_index,
-        freeze_encoder_steps=params.freeze_encoder_steps,
-        sync_other_tasks=params.sync_other_tasks,
-        use_subsampled_output=params.use_subsampled_output,
+        use_subsampled_output=True,
     )
+    
+    state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
+    model.load_state_dict(state_dict, strict=False)
+    
     return model
 
+def get_model(params: AttributeDict) -> nn.Module:
+    speech_encoder = get_speech_encoder_model(params)
+    llm_decoder = get_llm_decoder(params)
+    
+    model = SpeechLLMModel(
+        llm=llm_decoder,
+        llm_embed_dim=params.llm_embed_dim,
+        vocab_size=params.vocab_size,
+        speech_encoder=speech_encoder,
+        speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
+    )
+    
+    return model
 
 def load_checkpoint_if_available(
     params: AttributeDict,
@@ -789,87 +822,28 @@ def compute_loss(
     supervisions = batch["supervisions"]
     cuts = batch["supervisions"]["cut"]
     cut_ids = [c.id for c in cuts]
-    beats_embeddings = extract_beats_embeddings(cuts).to(device) # (N,1,527)
-    ecapa_embeddings = extract_ecapa_embeddings(cuts).to(device)
-    
-    if params.use_task_id and is_training:
-        try:
-            task_id = torch.tensor([c.task_id for c in cuts]).to(device)
-        except:
-            task_id = torch.tensor([0 for _ in cuts]).to(device)
-        if random.random() < 0.05:
-            logging.info(cut_ids)
-            logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS, {sum(task_id==1)} from Vox, {sum(task_id==2)} fro AS")
-    else:
-        task_id = None
 
     feature_lens = supervisions["num_frames"].to(device)
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
+    import pdb; pdb.set_trace()
     texts = batch["supervisions"]["text"]
-    y = sp.encode(texts, out_type=int)
-    y = k2.RaggedTensor(y)
+    texts = ["<|startoftext|>" + s for s in texts] # pre-pend a token to each string
+    encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
+    y = encoded_texts["input_ids"]
+    y_lens = encoded_texts["length"]
 
     with torch.set_grad_enabled(is_training):
-        beats_loss, ecapa_loss, whisper_loss, whisper_cb_loss, simple_loss, pruned_loss = model(
+        nll_loss = model(
             x=feature,
             x_lens=feature_lens,
             y=y,
-            teacher_beats_embeddings=beats_embeddings if params.use_beats else None,
-            teacher_ecapa_embeddings=ecapa_embeddings if params.use_ecapa else None,
-            teacher_whisper_embeddings=whisper_embeddings.to(device) if params.use_whisper else None,
-            teacher_whisper_embedding_lens=whisper_embedding_lens.to(device) if params.use_whisper else None,
-            return_middle_out=True,
-            reduction="none",
-            batch_idx=batch_idx_train,
+            y_lens=y_lens,
         )
 
         loss = 0.0
-        
-        if params.use_task_id and is_training:
-            asr_mask = task_id == 0 # ASR id is 0
-            simple_loss = (simple_loss * asr_mask).sum()
-            pruned_loss = (pruned_loss * asr_mask).sum()
-        else:
-            simple_loss = simple_loss.sum()
-            pruned_loss = pruned_loss.sum()
-        
-        if params.use_transducer:
-            s = params.simple_loss_scale
-            # take down the scale on the simple loss from 1.0 at the start
-            # to params.simple_loss scale by warm_step.
-            simple_loss_scale = (
-                s
-                if batch_idx_train >= warm_step
-                else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
-            )
-            pruned_loss_scale = (
-                1.0
-                if batch_idx_train >= warm_step
-                else 0.1 + 0.9 * (batch_idx_train / warm_step)
-            )
-            loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
-        
-        if params.use_beats:
-            if task_id is not None:
-                audio_tagging_mask = task_id == 2
-                beats_loss *= audio_tagging_mask.unsqueeze(dim=-1)
-            beats_loss = beats_loss.sum()
-            loss += beats_loss * params.beats_loss_scale
-        if params.use_ecapa:
-            if task_id is not None:
-                sv_mask = task_id == 1 # not AT
-                ecapa_loss *= sv_mask.unsqueeze(-1)
-            ecapa_loss = ecapa_loss.sum()
-            loss +=  ecapa_loss * params.ecapa_loss_scale
-        if params.use_whisper:
-            if task_id is not None:
-                asr_mask = task_id == 0
-                whisper_loss *= asr_mask.unsqueeze(-1).unsqueeze(-1)
-            whisper_loss = whisper_loss.sum()
-            loss += whisper_loss * params.whisper_loss_scale
 
     assert loss.requires_grad == is_training
 
@@ -1160,30 +1134,19 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
-
-    if not params.use_transducer:
-        params.ctc_loss_scale = 1.0
+#    import pdb; pdb.set_trace()
+    sp = MiTokenizer(params.tokenizer_path, fix_zh=False)
+    params.vocab_size = sp.vocab_size
 
     logging.info(params)
-
-    if params.freezing_encoder_layer_index == "-1":
-        params.freezing_encoder_layer_index = []
-    else:
-        params.freezing_encoder_layer_index = list(map(int, params.freezing_encoder_layer_index.split(',')))
-        if not params.freeze_encoder:
-            logging.info(f"The following encoder layers will be frozen: {params.freezing_encoder_layer_index}")
 
     logging.info("About to create model")
     model = get_model(params)
 
     num_param = sum([p.numel() for p in model.parameters()])
+    num_trainable_param = sum([p.numel() * p.requires_grad for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
+    logging.info("Number of trainable model parameters: {} (percentage: {:.2f}%)".format(num_trainable_param, num_trainable_param/num_param * 100))
 
     assert params.save_every_n >= params.average_period
     model_avg: Optional[nn.Module] = None
@@ -1191,46 +1154,6 @@ def run(rank, world_size, args):
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
         
-    if params.do_finetune:
-            
-        assert params.start_epoch == 1, "Finetune need to start from epoch 0"
-        if params.init_modules is None:
-            logging.info(f"Init modules is not specified! Trying to load the whole model!")
-        modules = params.init_modules.split(",") if params.init_modules else None
-        checkpoints = load_model_params(
-            ckpt=params.finetune_ckpt, model=model, init_modules=modules, strict=False,
-        )
-        if rank == 0:
-            # model_avg is only used with rank 0
-            compare_model(model.state_dict(), model_avg.state_dict())
-            model_avg = copy.deepcopy(model).to(torch.float64)
-
-    else:
-
-        assert params.start_epoch > 0, params.start_epoch
-        checkpoints = load_checkpoint_if_available(
-            params=params, model=model, model_avg=model_avg
-        )
-
-    # Setting the encoder lr scale
-    logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
-    model.encoder.lr_scale = params.encoder_lr_scale
-    model.encoder_embed.lr_scale = params.encoder_lr_scale
-    if params.use_encoder_projection:
-        logging.info(f"Also setting the lr scale of the projection layer to {params.encoder_lr_scale}")
-        model.whisper_projection.lr_scale = params.encoder_lr_scale
-        
-    # Setting the beats decoder lr scale
-    if params.do_audio_tagging:
-        logging.info(f"Setting the lr scale of parameters in beats decoder to {params.beats_lr_scale}")
-        model.beats_decoder.lr_scale = params.beats_lr_scale
-
-    # Setting the ecapa lr scale
-    if params.do_sv:
-        logging.info(f"Setting the lr scale of parameters in ecapa_asp and ecapa_linear to {params.ecapa_lr_scale}")
-        model.ecapa_asp.lr_scale = params.ecapa_lr_scale
-        model.ecapa_linear.lr_scale = params.ecapa_lr_scale
-
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
         params=params, model=model, model_avg=model_avg
@@ -1241,15 +1164,10 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    if params.freeze_modules is not None:
-        freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
-        freeze_modules = [m.strip() for m in freeze_modules]
-        # logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
-    else:
-        freeze_modules = []
-
+    # import pdb; pdb.set_trace()
+    # only feed the parameters in the speech encoder to the optimizer
     parameters = get_parameter_groups_with_lrs(
-        model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules
+        model, lr=params.base_lr, include_names=True, freeze_modules=["llm"]
     )        
 
     optimizer = ScaledAdam(
@@ -1369,9 +1287,8 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.dev_clean_cuts_KD()
-    valid_cuts += librispeech.dev_other_cuts_KD()
-    valid_cuts = valid_cuts.map(add_dummy_text)
+    valid_cuts = librispeech.dev_clean_cuts()
+    valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
     valid_dls = [valid_dl]
     valid_sets = ["ASR"]
@@ -1456,7 +1373,7 @@ def display_and_save_batch(
 
     logging.info(f"features shape: {features.shape}")
 
-    y = sp.encode(supervisions["text"], out_type=int)
+    y = sp.batch_encode_plus(supervisions["text"])
     num_tokens = sum(len(i) for i in y)
     logging.info(f"num tokens: {num_tokens}")
 
