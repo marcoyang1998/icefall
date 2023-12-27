@@ -836,7 +836,6 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    import pdb; pdb.set_trace()
     texts = batch["supervisions"]["text"]
     texts = ["<|startoftext|>" + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
@@ -852,6 +851,7 @@ def compute_loss(
         )
 
         loss = 0.0
+        loss += nll_loss
 
     assert loss.requires_grad == is_training
 
@@ -859,10 +859,11 @@ def compute_loss(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
+        info["tokens"] = (y_lens - 1).sum().item()
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    info["nll_loss"] = loss.detach().cpu().item
+    info["nll_loss"] = nll_loss.detach().cpu().item()
 
     return loss, info
 
@@ -996,7 +997,7 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad()
         except:  # noqa
-            save_bad_model()
+            # save_bad_model()
             display_and_save_batch(batch, params=params, sp=sp)
             raise
 
@@ -1138,11 +1139,10 @@ def run(rank, world_size, args):
         tb_writer = None
 
     device = torch.device("cpu")
-    # if torch.cuda.is_available():
-    #     device = torch.device("cuda", rank)
+    if torch.cuda.is_available():
+        device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    import pdb; pdb.set_trace()
     sp = MiTokenizer(params.tokenizer_path, fix_zh=False)
     params.vocab_size = sp.vocab_size
 
@@ -1172,7 +1172,6 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    # import pdb; pdb.set_trace()
     # only feed the parameters in the speech encoder to the optimizer
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True, freeze_modules=["llm"]
