@@ -77,7 +77,8 @@ def register_inf_check_hooks(model: nn.Module) -> None:
             if not torch.isfinite(grad.to(torch.float32).sum()):
                 logging.warning(f"The sum of {_name}.param_grad is not finite")
 
-        parameter.register_hook(param_backward_hook)
+        if parameter.requires_grad:
+            parameter.register_hook(param_backward_hook)
 
 
 def _test_inf_check_hooks():
