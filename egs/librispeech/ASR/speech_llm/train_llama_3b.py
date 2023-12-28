@@ -251,6 +251,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=3200,
         help="Dimension of the embedding for the language model",
     )
+    
+    parser.add_argument(
+        "--speech-encoder-path",
+        type=str,
+        required=False,
+    )
 
     parser.add_argument(
         "--do-avg-pooling",
@@ -373,12 +379,6 @@ def get_parser():
         It specifies the directory where all training related
         files, e.g., checkpoints, log, etc, are saved
         """,
-    )
-    
-    parser.add_argument(
-        "--speech-encoder-path",
-        type=str,
-        required=True,
     )
 
     parser.add_argument(
@@ -626,8 +626,10 @@ def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
         use_subsampled_output=True,
     )
     
-    state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
-    model.load_state_dict(state_dict, strict=False)
+    if params.speech_encoder_path is not None:
+        logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
+        state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
+        model.load_state_dict(state_dict, strict=False)
     
     return model
 
