@@ -37,11 +37,13 @@ class SpeechLLMModel(nn.Module):
         llm_embed_dim: int = 1536,
         speech_encoder_dim: int = 2560,
         do_avg_pooling: bool = False,
+        pad_token: int = 0,
     ):
         super().__init__()
         self.speech_encoder = speech_encoder # a pre-trained speech encoder
         self.speech_encoder_dim = speech_encoder_dim
         self.vocab_size = vocab_size
+        self.pad_token = pad_token
         
         self.llm = llm # a pre-trained LLM
 
@@ -139,7 +141,7 @@ class SpeechLLMModel(nn.Module):
         
         # The actual labels for loss computation
         shift_labels = y[:, 1:].contiguous() # throw away <bos> token
-        kept_labels = shift_labels[shift_labels > 0] # throw away padding token
+        kept_labels = shift_labels[shift_labels != self.pad_token] # throw away padding token
         
         loss = self.criterion(kept_logits, kept_labels)
         
