@@ -386,6 +386,19 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.5,
+        help="The initial learning rate during warmup."
+    )
+
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
+    )
+
+    parser.add_argument(
         "--lr-batches",
         type=float,
         default=7500,
@@ -486,6 +499,13 @@ def get_parser():
         type=int,
         default=1,
         help="How many times to repeat LS",
+    )
+
+    parser.add_argument(
+        "--use-lowercase",
+        type=str2bool,
+        default=False,
+        help="Whether to lowercase the input",
     )
 
     add_model_arguments(parser)
@@ -805,7 +825,10 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    texts = batch["supervisions"]["text"]
+    
+    texts = batch["supervisions"]["text"] # Pure upper-cased text is not well-supported for the LLM
+    if params.use_lowercase:
+        texts = [s[0].upper() + s[1:].lower() for s in texts]
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
@@ -1154,7 +1177,13 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
+    scheduler = Eden(
+        optimizer, 
+        params.lr_batches, 
+        params.lr_epochs, 
+        warmup_start=params.warmup_start,
+        warmup_batches=params.warmup_batches,
+    )
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
