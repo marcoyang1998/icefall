@@ -62,7 +62,7 @@ class SpeechLLMModel(nn.Module):
             SwooshR(), # use the swooshR non-lin
         )
         
-        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
+        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
         
     def forward_LLM(
         self,
