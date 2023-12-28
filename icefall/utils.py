@@ -1180,13 +1180,17 @@ class MetricsTracker(collections.defaultdict):
         """
         num_frames = self["frames"] if "frames" in self else 1
         num_utterances = self["utterances"] if "utterances" in self else 1
+        num_tokens = self["tokens"] if "utterances" in self else 1
         ans = []
         for k, v in self.items():
-            if k == "frames" or k == "utterances":
+            if k in ["frames", "utterances", "tokens"]:
                 continue
-            norm_value = (
-                float(v) / num_frames if "utt_" not in k else float(v) / num_utterances
-            )
+            if "nll" in k: # nll loss for lm training
+                norm_value = float(v) / num_tokens
+            else:
+                norm_value = (
+                    float(v) / num_frames if "utt_" not in k else float(v) / num_utterances
+                )
             ans.append((k, norm_value))
         return ans
 
