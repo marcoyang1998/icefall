@@ -187,12 +187,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         """,
     )
     
-    parser.add_argument(
-        "--context-size",
-        type=int,
-        default=2,
-    )
-    
     
     parser.add_argument(
         "--prune-range",
@@ -256,6 +250,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=int,
         default=3200,
         help="Dimension of the embedding for the language model",
+    )
+
+    parser.add_argument(
+        "--do-avg-pooling",
+        type=str2bool,
+        default=False,
+        help="If perform average pooling after the audio encoder to reduce frame rate"
     )
 
     parser.add_argument(
@@ -640,6 +641,8 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         speech_encoder=speech_encoder,
         speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
+        do_avg_pooling=params.do_avg_pooling,
+        pad_token=params.pad_token_id,
     )
     
     return model
@@ -800,9 +803,7 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    import pdb; pdb.set_trace()
     texts = batch["supervisions"]["text"]
-    # texts = [s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
@@ -816,6 +817,7 @@ def compute_loss(
         )
 
         loss = 0.0
+        loss += nll_loss
 
     assert loss.requires_grad == is_training
 
@@ -823,10 +825,11 @@ def compute_loss(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
+        info["tokens"] = (y_lens - 1).sum().item()
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    info["nll_loss"] = loss.detach().cpu().item
+    info["nll_loss"] = loss.detach().cpu().item()
 
     return loss, info
 
@@ -960,7 +963,7 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad()
         except:  # noqa
-            save_bad_model()
+            # save_bad_model()
             display_and_save_batch(batch, params=params, sp=sp)
             raise
 
@@ -1106,11 +1109,11 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-#    import pdb; pdb.set_trace()
     params.model_path = 'openlm-research/open_llama_3b_v2'
     sp = LlamaTokenizer.from_pretrained(params.model_path)
     sp.pad_token = sp.eos_token
     params.vocab_size = sp.vocab_size
+    params.pad_token_id = sp.pad_token_id
 
     logging.info(params)
 
@@ -1138,7 +1141,6 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    # import pdb; pdb.set_trace()
     # only feed the parameters in the speech encoder to the optimizer
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True, freeze_modules=["llm"]
