@@ -841,6 +841,13 @@ def compute_loss(
             y_lens=y_lens,
         )
 
+        nan_mask = nll_loss.isnan()
+        if torch.any(nan_mask):
+            logging.info("Masking nan in loss values")
+        
+        nll_loss[nan_mask] = 0.0
+        nll_loss = nll_loss.sum()
+
         loss = 0.0
         loss += nll_loss
 
