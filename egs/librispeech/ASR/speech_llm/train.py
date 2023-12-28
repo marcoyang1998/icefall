@@ -194,7 +194,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=2,
     )
     
-    
     parser.add_argument(
         "--prune-range",
         type=int,
@@ -250,6 +249,26 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="Maximum left-contexts for causal training, measured in frames which will "
         "be converted to a number of chunks.  If splitting into chunks, "
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
+    )
+
+    parser.add_argument(
+        "--mimodel-config",
+        type=str,
+        required=True,
+    )
+    
+    parser.add_argument(
+        "--mimodel-path",
+        type=str,
+        default=None,
+        help="The initialization of the llm decoder. Won't be used if not specified"
+    )
+    
+    parser.add_argument(
+        "--speech-encoder-path",
+        type=str,
+        default=None,
+        help="The initialization of the speech encoder. Won't be used if not specified"
     )
 
     parser.add_argument(
@@ -387,24 +406,6 @@ def get_parser():
         type=str,
         required=True,
         help="Path to the tokenizer model",
-    )
-    
-    parser.add_argument(
-        "--mimodel-config",
-        type=str,
-        required=True,
-    )
-    
-    parser.add_argument(
-        "--mimodel-path",
-        type=str,
-        required=True,
-    )
-    
-    parser.add_argument(
-        "--speech-encoder-path",
-        type=str,
-        required=True,
     )
 
     parser.add_argument(
@@ -594,10 +595,13 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
     
     config = MiConfig.from_json_file(params.mimodel_config)
     decoder = MiLMForCausalLM(config)
-    state_dict = torch.load(params.mimodel_path, map_location="cpu")
-    if "model" in state_dict:
-        state_dict = state_dict["model"]
-    decoder.load_state_dict(state_dict)
+
+    if params.mimodel_path is not None:
+        logging.info(f"Loading the state dict for MiModel from {params.mimodel_path}")
+        state_dict = torch.load(params.mimodel_path, map_location="cpu")
+        if "model" in state_dict:
+            state_dict = state_dict["model"]
+        decoder.load_state_dict(state_dict)
     if not params.use_full_fp16:
         decoder.to(torch.float32)
         logging.info("Convering the LLM parameter to fp32 format")
@@ -660,8 +664,10 @@ def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
         use_subsampled_output=True,
     )
     
-    state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
-    model.load_state_dict(state_dict, strict=False)
+    if params.speech_encoder_path is not None:
+        logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
+        state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
+        model.load_state_dict(state_dict, strict=False)
     
     return model
 
@@ -837,7 +843,7 @@ def compute_loss(
     warm_step = params.warm_step
 
     texts = batch["supervisions"]["text"]
-    texts = ["<|startoftext|>" + s for s in texts] # pre-pend a token to each string
+    texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
@@ -1145,6 +1151,7 @@ def run(rank, world_size, args):
 
     sp = MiTokenizer(params.tokenizer_path, fix_zh=False)
     params.vocab_size = sp.vocab_size
+    params.pad_token_id = sp.pad_token_id
 
     logging.info(params)
 
