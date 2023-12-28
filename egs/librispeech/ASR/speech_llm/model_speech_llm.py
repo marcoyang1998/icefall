@@ -160,4 +160,16 @@ class SpeechLLMModel(nn.Module):
         new_tensors = new_tensors[:, :total_lens.max(), :] # truncate to the maximal length
         
         return new_tensors, total_lens
+
+    def embed_tokens(self, y):
+        return self.llm.get_input_embeddings()(y)
+
+    def encode_audio(self, x, x_lens):
+        x, x_lens = self.forward_speech_encoder(x, x_lens) # (N,T,C)
+        x = self.embed_projection(x) # (N,T,C)
+
+        return x, x_lens
+
+    def generate(self, x, x_lens):
+        x, x_lens = self.encode_audio(x, x_lens)
         
