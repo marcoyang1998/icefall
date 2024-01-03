@@ -44,6 +44,9 @@ from scaling import (
     limit_param_value,
     penalize_abs_values_gt,
     softmax,
+    SwooshL,
+    SwooshR,
+    _no_op,
 )
 from torch import Tensor, nn
 
@@ -626,13 +629,17 @@ class Zipformer2EncoderLayer(nn.Module):
 
         self.self_attn2 = SelfAttention(embed_dim, num_heads, value_head_dim)
 
-        self.feed_forward1 = FeedforwardModule(
+        if use_dropout_with_probe:
+            ffw = SimpleFeedforwardModule
+        else:
+            ffw = FeedforwardModule
+        self.feed_forward1 = ffw(
             embed_dim, (feedforward_dim * 3) // 4, dropout
         )
 
-        self.feed_forward2 = FeedforwardModule(embed_dim, feedforward_dim, dropout)
+        self.feed_forward2 = ffw(embed_dim, feedforward_dim, dropout)
 
-        self.feed_forward3 = FeedforwardModule(
+        self.feed_forward3 = ffw(
             embed_dim, (feedforward_dim * 5) // 4, dropout
         )
 
@@ -779,6 +786,7 @@ class Zipformer2EncoderLayer(nn.Module):
             key_padding_mask=src_key_padding_mask,
         )
 
+        import pdb; pdb.set_trace()
         src = src + self.feed_forward1(src)
 
         self_attn_dropout_mask = self.get_sequence_dropout_mask(
@@ -2029,6 +2037,49 @@ class FeedforwardModule(nn.Module):
         x = self.out_whiten(x)
         return x
 
+class SimpleFeedforwardModule(nn.Module):
+    def __init__(self, embed_dim: int, feedforward_dim: int, dropout: FloatLike):
+        self.in_proj = nn.Linear(embed_dim, feedforward_dim)
+
+        self.hidden_balancer = Balancer(
+            feedforward_dim,
+            channel_dim=-1,
+            min_positive=0.3,
+            max_positive=1.0,
+            min_abs=0.75,
+            max_abs=5.0,
+        )
+
+        self.dropout = DropoutAndProbe(
+            p=0.2,
+            embed_dim=feedforward_dim,
+            shared_dim=0,
+        )
+
+        self.out_proj = ScaledLinear(
+            feedforward_dim,
+            embed_dim,
+            activation="SwooshL",
+            bias=True,
+            initial_scale=0.1,
+        )
+
+        self.out_whiten = Whiten(
+            num_groups=1,
+            whitening_limit=_whitening_schedule(7.5),
+            prob=(0.025, 0.25),
+            grad_scale=0.01,
+        )
+
+    def forward(self, x: Tensor):
+        x = self.in_proj(x)
+        x = self.hidden_balancer(x)
+        # out_proj contains SwooshL activation, then dropout, then linear.
+        x = self.dropout(SwooshL(x))
+        x = self.out_proj(x)
+        x = self.out_whiten(x)
+        return x
+
 
 class NonlinAttention(nn.Module):
     """This is like the ConvolutionModule, but refactored so that we use multiplication by attention weights (borrowed
@@ -2400,6 +2451,26 @@ class ScalarMultiply(nn.Module):
         return x * self.scale
 
 
+class DropoutAndProbe(nn.Module):
+    def __init__(self, embed_dim: int, p: float = 0.1, shared_dim: int = None):
+        # A dropout module with an extra nn.Parameter for probing
+        super().__init__()
+        self.channel_weights = nn.Parameter(torch.full((embed_dim,), 0.5))
+        self.p = p
+        self.shared_dim = shared_dim
+
+    def forward(self, x):
+        p = float(self.p)
+        if not self.training or p == 0:
+            return _no_op(x)
+        dropout_shape = list(x.shape)
+        if self.shared_dim is not None:
+            dropout_shape[self.shared_dim] = 1
+        channel_weights = 0.5 * self.channel_weights / self.channel_weights.abs().mean()
+        mask = torch.rand(*dropout_shape, device=x.device, dtype=x.dtype) > p
+        return x * (mask + ~mask * channel_weights)
+
+
 def _test_zipformer_main(causal: bool = False):
     batch_size = 5
     seq_len = 20
@@ -2428,10 +2499,19 @@ def _test_zipformer_main(causal: bool = False):
     )
     f  # to remove flake8 warnings
 
+def _test_dropout():
+    shared_dim = 0
+    dropout = DropoutAndProbe(embed_dim=32, p=0.1, shared_dim=shared_dim)
+    x = torch.randn(4,5,10)
+    dropout.eval()
+    xx = dropout(x)
+    assert torch.all(xx == x)
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
-    _test_zipformer_main(False)
-    _test_zipformer_main(True)
+    # _test_zipformer_main(False)
+    # _test_zipformer_main(True)
+    _test_dropout()
+
