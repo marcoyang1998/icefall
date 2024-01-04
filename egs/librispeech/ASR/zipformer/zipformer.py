@@ -33,10 +33,12 @@ from scaling import (
 )
 from scaling import (
     ActivationDropoutAndLinear,
+    SimpleActivationDropoutAndLinear,
     Balancer,
     BiasNorm,
     ChunkCausalDepthwiseConv1d,
     Dropout2,
+    DropoutAndProbe,
     FloatLike,
     ScheduledFloat,
     Whiten,
@@ -115,6 +117,7 @@ class Zipformer2(EncoderInterface):
         cnn_module_kernel: Union[int, Tuple[int]] = 31,
         pos_dim: int = 192,
         dropout: FloatLike = None,  # see code below for default
+        dropout_with_probe: bool = False,
         warmup_batches: float = 4000.0,
         causal: bool = False,
         chunk_size: Tuple[int] = [-1],
@@ -172,6 +175,7 @@ class Zipformer2(EncoderInterface):
                 value_head_dim=value_head_dim[i],
                 feedforward_dim=feedforward_dim[i],
                 dropout=dropout,
+                dropout_with_probe=dropout_with_probe,
                 cnn_module_kernel=cnn_module_kernel[i],
                 causal=causal,
             )
@@ -572,6 +576,7 @@ class Zipformer2EncoderLayer(nn.Module):
         value_head_dim: int,
         feedforward_dim: int,
         dropout: FloatLike = 0.1,
+        dropout_with_probe: bool = False,
         cnn_module_kernel: int = 31,
         causal: bool = False,
         attention_skip_rate: FloatLike = ScheduledFloat(
@@ -629,7 +634,8 @@ class Zipformer2EncoderLayer(nn.Module):
 
         self.self_attn2 = SelfAttention(embed_dim, num_heads, value_head_dim)
 
-        if use_dropout_with_probe:
+        self.dropout_with_probe = dropout_with_probe
+        if dropout_with_probe:
             ffw = SimpleFeedforwardModule
         else:
             ffw = FeedforwardModule
@@ -786,7 +792,6 @@ class Zipformer2EncoderLayer(nn.Module):
             key_padding_mask=src_key_padding_mask,
         )
 
-        import pdb; pdb.set_trace()
         src = src + self.feed_forward1(src)
 
         self_attn_dropout_mask = self.get_sequence_dropout_mask(
@@ -879,6 +884,11 @@ class Zipformer2EncoderLayer(nn.Module):
 
         src = self.balancer2(src)
         src = self.whiten(src)
+
+        if self.dropout_with_probe and random.random() < 0.01:
+            logging.info(f"Module ffw1, channel_weights mean: {self.feed_forward1.dropout.channel_weights.mean()}, std: {self.feed_forward1.dropout.channel_weights.std()}; ")
+            logging.info(f"Module ffw2, channel_weights mean: {self.feed_forward2.dropout.channel_weights.mean()}, std: {self.feed_forward2.dropout.channel_weights.std()}; ")
+            logging.info(f"Module ffw3, channel_weights mean: {self.feed_forward3.dropout.channel_weights.mean()}, std: {self.feed_forward3.dropout.channel_weights.std()}; ")
 
         return src
 
@@ -2039,6 +2049,7 @@ class FeedforwardModule(nn.Module):
 
 class SimpleFeedforwardModule(nn.Module):
     def __init__(self, embed_dim: int, feedforward_dim: int, dropout: FloatLike):
+        super().__init__()
         self.in_proj = nn.Linear(embed_dim, feedforward_dim)
 
         self.hidden_balancer = Balancer(
@@ -2059,7 +2070,6 @@ class SimpleFeedforwardModule(nn.Module):
         self.out_proj = ScaledLinear(
             feedforward_dim,
             embed_dim,
-            activation="SwooshL",
             bias=True,
             initial_scale=0.1,
         )
@@ -2071,11 +2081,13 @@ class SimpleFeedforwardModule(nn.Module):
             grad_scale=0.01,
         )
 
+        self.activation = SwooshL()
+
     def forward(self, x: Tensor):
         x = self.in_proj(x)
         x = self.hidden_balancer(x)
         # out_proj contains SwooshL activation, then dropout, then linear.
-        x = self.dropout(SwooshL(x))
+        x = self.dropout(self.activation(x))
         x = self.out_proj(x)
         x = self.out_whiten(x)
         return x
@@ -2114,6 +2126,7 @@ class NonlinAttention(nn.Module):
             max_abs=5.0,
         )
         self.tanh = nn.Tanh()
+        self.dropout = DropoutAndProbe(embed_dim=hidden_channels, p=0.1)
 
         self.identity1 = Identity()  # for diagnostics.
         self.identity2 = Identity()  # for diagnostics.
@@ -2160,6 +2173,7 @@ class NonlinAttention(nn.Module):
 
         s = self.balancer(s)
         s = self.tanh(s)
+        s = self.dropout(s)
 
         s = s.unsqueeze(-1).reshape(seq_len, batch_size, hidden_channels)
         x = self.whiten1(x)
@@ -2451,26 +2465,6 @@ class ScalarMultiply(nn.Module):
         return x * self.scale
 
 
-class DropoutAndProbe(nn.Module):
-    def __init__(self, embed_dim: int, p: float = 0.1, shared_dim: int = None):
-        # A dropout module with an extra nn.Parameter for probing
-        super().__init__()
-        self.channel_weights = nn.Parameter(torch.full((embed_dim,), 0.5))
-        self.p = p
-        self.shared_dim = shared_dim
-
-    def forward(self, x):
-        p = float(self.p)
-        if not self.training or p == 0:
-            return _no_op(x)
-        dropout_shape = list(x.shape)
-        if self.shared_dim is not None:
-            dropout_shape[self.shared_dim] = 1
-        channel_weights = 0.5 * self.channel_weights / self.channel_weights.abs().mean()
-        mask = torch.rand(*dropout_shape, device=x.device, dtype=x.dtype) > p
-        return x * (mask + ~mask * channel_weights)
-
-
 def _test_zipformer_main(causal: bool = False):
     batch_size = 5
     seq_len = 20
@@ -2499,19 +2493,10 @@ def _test_zipformer_main(causal: bool = False):
     )
     f  # to remove flake8 warnings
 
-def _test_dropout():
-    shared_dim = 0
-    dropout = DropoutAndProbe(embed_dim=32, p=0.1, shared_dim=shared_dim)
-    x = torch.randn(4,5,10)
-    dropout.eval()
-    xx = dropout(x)
-    assert torch.all(xx == x)
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
-    # _test_zipformer_main(False)
-    # _test_zipformer_main(True)
-    _test_dropout()
-
+    _test_zipformer_main(False)
+    _test_zipformer_main(True)

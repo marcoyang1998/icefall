@@ -245,6 +245,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--dropout-with-probe",
+        type=str2bool,
+        default=False,
+    )
+
+    parser.add_argument(
         "--use-transducer",
         type=str2bool,
         default=True,
@@ -556,6 +562,7 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
         in_channels=params.feature_dim,
         out_channels=_to_int_tuple(params.encoder_dim)[0],
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
+        dropout_with_probe=params.dropout_with_probe,
     )
     return encoder_embed
 
@@ -575,6 +582,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         feedforward_dim=_to_int_tuple(params.feedforward_dim),
         cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
+        dropout_with_probe=params.dropout_with_probe,
         warmup_batches=4000.0,
         causal=params.causal,
         chunk_size=_to_int_tuple(params.chunk_size),
@@ -1233,14 +1241,14 @@ def run(rank, world_size, args):
     valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
