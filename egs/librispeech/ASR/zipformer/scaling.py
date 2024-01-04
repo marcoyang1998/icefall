@@ -1336,6 +1336,25 @@ class Dropout3(nn.Module):
         return ans
 
 
+class DropoutAndProbe(nn.Module):
+    def __init__(self, embed_dim: int, p: float = 0.1, shared_dim: int = None):
+        # A dropout module with an extra nn.Parameter for probing
+        super().__init__()
+        self.channel_weights = nn.Parameter(torch.full((embed_dim,), 0.5))
+        self.p = p
+        self.shared_dim = shared_dim
+
+    def forward(self, x):
+        p = float(self.p)
+        if not self.training or p == 0:
+            return _no_op(x)
+        dropout_shape = list(x.shape)
+        if self.shared_dim is not None:
+            dropout_shape[self.shared_dim] = 1
+        channel_weights = 0.5 * self.channel_weights / self.channel_weights.abs().mean()
+        mask = torch.rand(*dropout_shape, device=x.device, dtype=x.dtype) > p
+        return x * (mask + ~mask * channel_weights)
+
 class SwooshLFunction(torch.autograd.Function):
     """
     swoosh_l(x) =  log(1 + exp(x-4)) - 0.08*x - 0.035
@@ -1652,6 +1671,35 @@ class ActivationDropoutAndLinear(torch.nn.Module):
         )
 
 
+class SimpleActivationDropoutAndLinear(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        bias: bool = True,
+        activation: str = "SwooshL",
+        dropout_p: FloatLike = 0.0,
+        dropout_shared_dim: Optional[int] = -1,
+        initial_scale: float = 1.0,
+    ):
+        super().__init__()
+        self.linear = ScaledLinear(
+            in_channels, out_channels, bias=bias, initial_scale=initial_scale
+        )
+        if activation == "SwooshL":
+            self.activation = SwooshL()
+        elif activation == "SwooshR":
+            self.activation = SwooshR()
+        else:
+            raise ValueError("Invalid activation")
+        self.dropout = DropoutAndProbe(embed_dim=in_channels, p=dropout_p, shared_dim=dropout_shared_dim)
+
+    def forward(self, x):
+        x = self.dropout(self.activation(x))
+        return self.linear(x)
+
+
+
 def convert_num_channels(x: Tensor, num_channels: int) -> Tensor:
     if num_channels <= x.shape[-1]:
         return x[..., :num_channels]
@@ -1891,6 +1939,12 @@ def _test_activation_dropout_and_linear():
                 # storage of it.
                 assert isclose(x1.grad, x2.grad)
 
+def _test_dropout():
+    shared_dim = None
+    embed_dim=10
+    dropout = DropoutAndProbe(embed_dim=embed_dim, p=0.1, shared_dim=shared_dim)
+    x = torch.randn(4,5,embed_dim)
+    xx = dropout(x)
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
@@ -1905,3 +1959,4 @@ if __name__ == "__main__":
     _test_swooshr_deriv()
     _test_swooshl_deriv()
     _test_activation_dropout_and_linear()
+    _test_dropout()
