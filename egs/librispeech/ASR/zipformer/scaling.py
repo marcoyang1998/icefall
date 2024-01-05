@@ -1346,8 +1346,11 @@ class DropoutAndProbe(nn.Module):
 
     def forward(self, x):
         p = float(self.p)
-        if not self.training or p == 0:
+        if p == 0:
             return _no_op(x)
+        if not self.training:
+            channel_weights = 0.5 * self.channel_weights / self.channel_weights.abs().mean()
+            return x * (1 - p * channel_weights)
         dropout_shape = list(x.shape)
         if self.shared_dim is not None:
             dropout_shape[self.shared_dim] = 1
