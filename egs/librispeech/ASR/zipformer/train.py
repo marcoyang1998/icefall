@@ -558,16 +558,24 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # In the normal configuration, we will downsample once more at the end
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
+    if not params.dropout_with_probe:
+        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1))
+    else:
+        dropout=ScheduledFloat((0.0, 0.6), (20000.0, 0.2))
     encoder_embed = Conv2dSubsampling(
         in_channels=params.feature_dim,
         out_channels=_to_int_tuple(params.encoder_dim)[0],
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
+        dropout=dropout,
         dropout_with_probe=params.dropout_with_probe,
     )
     return encoder_embed
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
+    dropout = ScheduledFloat((0.0, 0.3), (20000.0, 0.1))
+    # Use a larger dropout value for new dropout
+    if params.dropout_with_probe:
+        dropout = ScheduledFloat((0.0, 0.6), (20000.0, 0.2), default=0.2)
     encoder = Zipformer2(
         output_downsampling_factor=2,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
@@ -581,7 +589,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         num_heads=_to_int_tuple(params.num_heads),
         feedforward_dim=_to_int_tuple(params.feedforward_dim),
         cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
+        dropout=dropout,
         dropout_with_probe=params.dropout_with_probe,
         warmup_batches=4000.0,
         causal=params.causal,

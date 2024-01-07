@@ -2062,7 +2062,7 @@ class SimpleFeedforwardModule(nn.Module):
         )
 
         self.dropout = DropoutAndProbe(
-            p=0.2,
+            p=dropout,
             embed_dim=feedforward_dim,
             shared_dim=0,
         )
