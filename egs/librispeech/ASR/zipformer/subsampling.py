@@ -25,6 +25,7 @@ from scaling import (
     Balancer,
     BiasNorm,
     Dropout3,
+    DropoutAndProbe,
     FloatLike,
     Optional,
     ScaledConv2d,
@@ -77,6 +78,7 @@ class ConvNeXt(nn.Module):
         )
 
         self.activation = SwooshL()
+        self.activation_dropout = DropoutAndProbe(embed_dim=hidden_channels, p=0.1, shared_dim=None)
         self.pointwise_conv2 = ScaledConv2d(
             in_channels=hidden_channels,
             out_channels=channels,
@@ -128,6 +130,7 @@ class ConvNeXt(nn.Module):
         x = self.depthwise_conv(x)
         x = self.pointwise_conv1(x)
         x = self.hidden_balancer(x)
+        #x = self.activation_dropout()
         x = self.activation(x)
         x = self.pointwise_conv2(x)
 
@@ -184,7 +187,7 @@ class ConvNeXt(nn.Module):
         )
         x = self.pointwise_conv1(x)
         x = self.hidden_balancer(x)
-        x = self.activation(x)
+        x = self.activation_dropout(self.activation(x))
         x = self.pointwise_conv2(x)
 
         x = bypass + x
@@ -210,6 +213,7 @@ class Conv2dSubsampling(nn.Module):
         layer2_channels: int = 32,
         layer3_channels: int = 128,
         dropout: FloatLike = 0.1,
+        dropout_with_probe: bool = False,
     ) -> None:
         """
         Args:
@@ -244,6 +248,7 @@ class Conv2dSubsampling(nn.Module):
             ScaleGrad(0.2),
             Balancer(layer1_channels, channel_dim=1, max_abs=1.0),
             SwooshR(),
+            # DropoutAndProbe(embed_dim=layer1_channels, p=0.1, shared_dim=None), # dropout and probe
             nn.Conv2d(
                 in_channels=layer1_channels,
                 out_channels=layer2_channels,
@@ -253,6 +258,7 @@ class Conv2dSubsampling(nn.Module):
             ),
             Balancer(layer2_channels, channel_dim=1, max_abs=4.0),
             SwooshR(),
+            # DropoutAndProbe(embed_dim=layer2_channels, p=0.1, shared_dim=None), # dropout and probe
             nn.Conv2d(
                 in_channels=layer2_channels,
                 out_channels=layer3_channels,
@@ -261,6 +267,7 @@ class Conv2dSubsampling(nn.Module):
             ),
             Balancer(layer3_channels, channel_dim=1, max_abs=4.0),
             SwooshR(),
+            # DropoutAndProbe(embed_dim=layer3_channels, p=0.1, shared_dim=None), # dropout and probe
         )
 
         # just one convnext layer
@@ -284,7 +291,10 @@ class Conv2dSubsampling(nn.Module):
         # max_log_eps=0.0 is to prevent both eps and the output of self.out from
         # getting large, there is an unnecessary degree of freedom.
         self.out_norm = BiasNorm(out_channels)
-        self.dropout = Dropout3(dropout, shared_dim=1)
+        if dropout_with_probe:
+            self.dropout = DropoutAndProbe(embed_dim=out_channels, p=dropout, shared_dim=1)
+        else:
+            self.dropout = Dropout3(dropout, shared_dim=1)
 
     def forward(
         self, x: torch.Tensor, x_lens: torch.Tensor
