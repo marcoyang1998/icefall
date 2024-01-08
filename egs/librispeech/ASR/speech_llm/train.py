@@ -864,9 +864,9 @@ def compute_loss(
 
     texts = batch["supervisions"]["text"]
     if params.use_lowercase:
-        texts = [s[0].upper() + s[1:].lower() for s in texts]
+        texts = [s.lower() for s in texts]
 
-    texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
+    # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]

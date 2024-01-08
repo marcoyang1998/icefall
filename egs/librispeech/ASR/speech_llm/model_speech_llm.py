@@ -61,6 +61,8 @@ class SpeechLLMModel(nn.Module):
             nn.Linear(speech_encoder_dim, llm_embed_dim),
             SwooshR(), # use the swooshR non-lin
         )
+
+        self.audio_sos_eos_embedding = nn.Embedding(2, llm_embed_dim)
         
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
         
@@ -121,6 +123,7 @@ class SpeechLLMModel(nn.Module):
         device = x.device
         x, x_lens = self.forward_speech_encoder(x, x_lens) # (N,T,C)
         x = self.embed_projection(x) # (N,T,C)
+        x_lens += 2 # we will add an <soa> and an <eoa> embedding to the audio
         
         y_embed = self.llm.get_input_embeddings()(y) # (N,U,C)
         concatenated_tokens, total_lens = self.concat_token_embedings(x, x_lens, y_embed, y_lens) # (N,U,C))
@@ -132,7 +135,7 @@ class SpeechLLMModel(nn.Module):
         # Construct the mask of tokens for loss computations, True on those positions
         # since the x_lens-th token is |<sos>|, we select mask >= x_lens
         mask = torch.arange(logits.shape[1]).expand(bs, -1).to(device)
-        mask = mask >= x_lens.unsqueeze(-1) # the positions of text token is True
+        mask = mask >= (x_lens - 1).unsqueeze(-1) # the positions of all text token is True
         padding_mask = ~ make_pad_mask(total_lens - 1, max_len=total_lens.max()) # the positions on the padding token & eos token is False
         mask = torch.logical_and(mask, padding_mask)
         
@@ -140,19 +143,20 @@ class SpeechLLMModel(nn.Module):
         kept_logits = logits[mask == True] # (N, C)
         
         # The actual labels for loss computation
-        shift_labels = y[:, 1:].contiguous() # throw away <bos> token
+        shift_labels = y.contiguous() # throw away <bos> token
         kept_labels = shift_labels[shift_labels != self.pad_token] # throw away padding token
         
         loss = self.criterion(kept_logits, kept_labels)
         
         return loss
     
-    @staticmethod
-    def concat_token_embedings(x, x_lens, y, y_lens):
+    def concat_token_embedings(self, x, x_lens, y, y_lens):
         bs = x.shape[0]
         new_tensors = [] # List[Tensor], each (B,T+U,C)
+        soa_embedding = self.audio_sos_eos_embedding.weight[0, None]
+        eoa_embedding = self.audio_sos_eos_embedding.weight[1, None]
         for i in range(bs):
-            new_tensor = torch.cat((x[i, :x_lens[i]], y[i]), dim=0)
+            new_tensor = torch.cat((soa_embedding, x[i, :x_lens[i]], eoa_embedding, y[i]), dim=0) # <soa> audio <eoa> text prompt
             new_tensors.append(new_tensor)
         new_tensors = nn.utils.rnn.pad_sequence(new_tensors, batch_first=True)
         total_lens = x_lens + y_lens
