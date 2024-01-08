@@ -707,8 +707,7 @@ def main():
                     f" --iter {params.iter}, --avg {params.avg}"
                 )
             logging.info(f"averaging {filenames}")
-            model.to(device)
-            model.load_state_dict(average_checkpoints(filenames, device=device))
+            model.load_state_dict(average_checkpoints(filenames, device="cpu"))
         elif params.avg == 1:
             load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
         else:
@@ -718,8 +717,7 @@ def main():
                 if i >= 1:
                     filenames.append(f"{params.exp_dir}/epoch-{i}.pt")
             logging.info(f"averaging {filenames}")
-            model.to(device)
-            model.load_state_dict(average_checkpoints(filenames, device=device))
+            model.load_state_dict(average_checkpoints(filenames, device="cpu"))
     else:
         if params.iter > 0:
             filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
@@ -741,12 +739,11 @@ def main():
                 "Calculating the averaged model over iteration checkpoints"
                 f" from {filename_start} (excluded) to {filename_end}"
             )
-            model.to(device)
             model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
-                    device=device,
+                    device="cpu",
                 )
             )
         else:
@@ -759,12 +756,11 @@ def main():
                 f"Calculating the averaged model over epoch range from "
                 f"{start} (excluded) to {params.epoch}"
             )
-            model.to(device)
             model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
-                    device=device,
+                    device="cpu",
                 )
             )
 
