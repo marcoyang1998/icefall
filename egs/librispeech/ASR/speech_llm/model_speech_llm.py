@@ -71,7 +71,8 @@ class SpeechLLMModel(nn.Module):
         y: torch.Tensor,
         y_lens: torch.Tensor,
     ):
-        """Forward the LLM with the augmented input sequence
+        """Forward the LLM with the augmented input sequence.
+        This function only takes the embeddings as input
 
         Args:
             y (torch.Tensor): The input embeddings, which is prepended with speech embedding
@@ -121,8 +122,7 @@ class SpeechLLMModel(nn.Module):
         y_lens: torch.Tensor,
     ):
         device = x.device
-        x, x_lens = self.forward_speech_encoder(x, x_lens) # (N,T,C)
-        x = self.embed_projection(x) # (N,T,C)
+        x, x_lens = self.encode_audio(x, x_lens) # (N,T,C)
         x_lens += 2 # we will add an <soa> and an <eoa> embedding to the audio
         
         y_embed = self.llm.get_input_embeddings()(y) # (N,U,C)
@@ -151,12 +151,15 @@ class SpeechLLMModel(nn.Module):
         return loss
     
     def concat_token_embedings(self, x, x_lens, y, y_lens):
+        # Concat the audio token embeddings with the text token embeddings
+        # This also works with empty sequence of text tokens
+        # The audio embeddings is pre-pended with soa_embedding and appended with eoa_embedding
         bs = x.shape[0]
         new_tensors = [] # List[Tensor], each (B,T+U,C)
         soa_embedding = self.audio_sos_eos_embedding.weight[0, None]
         eoa_embedding = self.audio_sos_eos_embedding.weight[1, None]
         for i in range(bs):
-            new_tensor = torch.cat((soa_embedding, x[i, :x_lens[i]], eoa_embedding, y[i]), dim=0) # <soa> audio <eoa> text prompt
+            new_tensor = torch.cat((soa_embedding, x[i, :x_lens[i]-2], eoa_embedding, y[i]), dim=0) # <soa> audio <eoa> text prompt
             new_tensors.append(new_tensor)
         new_tensors = nn.utils.rnn.pad_sequence(new_tensors, batch_first=True)
         total_lens = x_lens + y_lens
