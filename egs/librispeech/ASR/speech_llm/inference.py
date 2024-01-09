@@ -426,13 +426,14 @@ def decode_one_batch(
     feature_lens = supervisions["num_frames"].to(device)
 
     encoder_out, encoder_out_lens = model.encode_audio(feature, feature_lens)
+    encoder_out_lens += 2
 
     hyps = []
 
-    for i in range(batch_size):    
-        hyp = [1]
-        prompt = torch.full((1, 1), sp.bos_token_id).to(device)
-        prompt_lens = torch.full((1,), 1).int().to(device)
+    for i in range(batch_size):
+        hyp = []
+        prompt = torch.full((1, 0), sp.bos_token_id).to(device)
+        prompt_lens = torch.full((1,), 0).int().to(device)
         
         count = 0
         while True:
@@ -460,8 +461,6 @@ def decode_one_batch(
             if new_token == sp.eos_token_id:
                 hyps.append(hyp)
                 break
-
-    import pdb; pdb.set_trace()
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}
@@ -682,7 +681,6 @@ def main():
 
     logging.info(f"Device: {device}")
 
-    import pdb; pdb.set_trace()
     sp = MiTokenizer(params.tokenizer_path, fix_zh=False)
     params.vocab_size = sp.vocab_size
 
