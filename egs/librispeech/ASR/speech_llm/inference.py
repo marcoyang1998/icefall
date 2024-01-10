@@ -444,7 +444,7 @@ def decode_one_batch(
             "input_ids": input_ids,
             "audio_embeddings": audio_embeddings,
             "audio_lens": audio_lens,
-            "max_length": 1000,
+            "max_new_tokens": 300,
         }
         
         output = model.llm.generate(**generation_kwargs)
