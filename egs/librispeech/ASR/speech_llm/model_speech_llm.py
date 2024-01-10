@@ -38,6 +38,7 @@ class SpeechLLMModel(nn.Module):
         speech_encoder_dim: int = 2560,
         do_avg_pooling: bool = False,
         pad_token: int = 0,
+        llm_requires_bos_id: bool = False,
     ):
         super().__init__()
         self.speech_encoder = speech_encoder # a pre-trained speech encoder
@@ -120,7 +121,17 @@ class SpeechLLMModel(nn.Module):
         x_lens: torch.Tensor,
         y: torch.Tensor,
         y_lens: torch.Tensor,
+        text_prompt_lens: torch.Tensor = 0,
     ):
+        """Forward the SpeechLLM
+
+        Args:
+            x (torch.Tensor): The input filter bank features
+            x_lens (torch.Tensor): The length of the input audio
+            y (torch.Tensor): The text tokens (prompt text + target text)
+            y_lens (torch.Tensor): The length of the text tokens
+            text_prompt_lens (torch.Tensor, optional): The lens of the prompt text. Defaults to 0.
+        """
         device = x.device
         x, x_lens = self.encode_audio(x, x_lens) # (N,T,C)
         x_lens += 2 # we will add an <soa> and an <eoa> embedding to the audio
@@ -133,17 +144,18 @@ class SpeechLLMModel(nn.Module):
         bs = logits.shape[0]
         
         # Construct the mask of tokens for loss computations, True on those positions
-        # since the x_lens-th token is |<sos>|, we select mask >= x_lens
         mask = torch.arange(logits.shape[1]).expand(bs, -1).to(device)
-        mask = mask >= (x_lens - 1).unsqueeze(-1) # the positions of all text token is True
+        # The prediction at (x_lens -1)-th position should be the first non-speech token
+        mask = mask >= (x_lens - 1 + text_prompt_lens).unsqueeze(-1) # the positions of all target text tokens should be True
         padding_mask = ~ make_pad_mask(total_lens - 1, max_len=total_lens.max()) # the positions on the padding token & eos token is False
         mask = torch.logical_and(mask, padding_mask)
         
         # The actual logits for loss computation
         kept_logits = logits[mask == True] # (N, C)
         
-        # The actual labels for loss computation
-        shift_labels = y.contiguous() # throw away <bos> token
+        # The actual target tokens (excluding prompt tokens) for loss computation
+        label_mask = make_pad_mask(text_prompt_lens, max_len=y_lens.max()) 
+        shift_labels = y[label_mask]
         kept_labels = shift_labels[shift_labels != self.pad_token] # throw away padding token
         
         loss = self.criterion(kept_logits, kept_labels)
