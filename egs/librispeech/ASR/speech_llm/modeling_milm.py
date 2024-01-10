@@ -684,6 +684,8 @@ class MiDecoder(nn.Module):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        audio_embeddings: Optional[torch.Tensor] = None,
+        audio_lens: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPastAndLogits]:
         output_attentions = (
             output_attentions
@@ -736,6 +738,9 @@ class MiDecoder(nn.Module):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+            # only support batch size 1, only overwrite the inputs embedding for 1st step inference
+            if audio_embeddings is not None and past_key_values is None:
+                inputs_embeds[0,:audio_lens] = audio_embeddings
             if self.scale_token_embedding:
                 inputs_embeds = inputs_embeds * self.embed_scale
         # embed positions
@@ -882,6 +887,8 @@ class MiLMForCausalLM(MiLMPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        audio_embeddings: Optional[torch.Tensor] = None,
+        audio_lens: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -934,6 +941,8 @@ class MiLMForCausalLM(MiLMPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            audio_embeddings=audio_embeddings,
+            audio_lens=audio_lens,
         )
 
         logits = outputs.logits.float()
@@ -993,6 +1002,8 @@ class MiLMForCausalLM(MiLMPreTrainedModel):
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
+                "audio_embeddings": kwargs.get("audio_embeddings", None),
+                "audio_lens": kwargs.get("audio_lens", None),
             }
         )
         return model_inputs
