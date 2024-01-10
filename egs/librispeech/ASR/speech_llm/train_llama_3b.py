@@ -47,7 +47,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from zipformer import Zipformer2
 
-from transformers import LlamaTokenizer, LlamaForCausalLM
+from transformers import LlamaTokenizer
+from modelling_llama import LlamaForCausalSpeechLLM
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -583,7 +584,7 @@ def _to_int_tuple(s: str):
 
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
     # Load a pre-trained llama-3b decoder
-    model = LlamaForCausalLM.from_pretrained(params.model_path, torch_dtype=torch.float16)
+    model = LlamaForCausalSpeechLLM.from_pretrained(params.model_path, torch_dtype=torch.float16, local_files_only=True)
     if not params.use_full_fp16:
         model.to(torch.float32)
     
@@ -825,13 +826,15 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    
     texts = batch["supervisions"]["text"] # Pure upper-cased text is not well-supported for the LLM
     if params.use_lowercase:
         texts = [s.lower() for s in texts]
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
+    
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
+    # Each text is pre-pended with a BOS token, so text prompt has a length of 1
+    text_prompt_lens = torch.tensor([1] * len(texts), device=device).long()
 
     with torch.set_grad_enabled(is_training):
         nll_loss = model(
@@ -839,6 +842,7 @@ def compute_loss(
             x_lens=feature_lens,
             y=y,
             y_lens=y_lens,
+            text_prompt_lens=text_prompt_lens,
         )
 
         nan_mask = nll_loss.isnan()
@@ -1142,7 +1146,7 @@ def run(rank, world_size, args):
     logging.info(f"Device: {device}")
 
     params.model_path = 'openlm-research/open_llama_3b_v2'
-    sp = LlamaTokenizer.from_pretrained(params.model_path)
+    sp = LlamaTokenizer.from_pretrained(params.model_path, local_files_only=True)
     sp.pad_token = sp.eos_token
     params.vocab_size = sp.vocab_size
     params.pad_token_id = sp.pad_token_id
