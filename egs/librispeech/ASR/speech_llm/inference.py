@@ -202,15 +202,7 @@ def get_parser():
         default="greedy_search",
         help="""Possible values are:
           - greedy_search
-          - beam_search
-          - modified_beam_search
-          - modified_beam_search_LODR
-          - fast_beam_search
-          - fast_beam_search_nbest
-          - fast_beam_search_nbest_oracle
-          - fast_beam_search_nbest_LG
-        If you use fast_beam_search_nbest_LG, you have to specify
-        `--lang-dir`, which should contain `LG.pt`.
+          - sample
         """,
     )
 
@@ -431,39 +423,37 @@ def decode_one_batch(
     hyps = []
 
     for i in range(batch_size):
-        hyp = []
         prompt = torch.full((1, 0), sp.bos_token_id).to(device)
-        prompt_lens = torch.full((1,), 0).int().to(device)
         
-        count = 0
-        while True:
-            prompt_embeddings = model.embed_tokens(prompt)
+        # initial empty prefix
+        prompt_lens = torch.full((1,), 0).int().to(device)
+        prompt_embeddings = model.embed_tokens(prompt)
 
-            total_prefix, total_lens = model.concat_token_embedings(
-                x=encoder_out[i, None],
-                x_lens=encoder_out_lens[i, None],
-                y=prompt_embeddings,
-                y_lens=prompt_lens,
-            )
-            logits = model.forward_LLM(total_prefix, total_lens) # (1,N,V)
-            new_token = logits[0,-1,:].argmax(dim=-1)
-            hyp.append(new_token.item())
+        # the audio with <soa> and <eoa> embedding
+        audio_embeddings, audio_lens = model.concat_token_embedings(
+            x=encoder_out[i, None],
+            x_lens=encoder_out_lens[i, None],
+            y=prompt_embeddings,
+            y_lens=prompt_lens,
+        )
+        
+        input_ids = torch.tensor([[sp.bos_token_id] * audio_lens.item()]).long().to(device)
 
-            prompt = torch.cat((prompt, torch.full((1,1), new_token, device=device)), dim=-1)
-            prompt_lens += 1
+        generation_kwargs = {
+            "do_sample": params.do_sample,
+            "input_ids": input_ids,
+            "audio_embeddings": audio_embeddings,
+            "audio_lens": audio_lens,
+            "max_length": 1000,
+        }
+        
+        output = model.llm.generate(**generation_kwargs)
+        hyp = output[0, audio_lens:]
+        hyps.append(hyp.tolist())
 
-            count += 1
-            if count >= 200:
-                logging.info("Exceed maximum number of tokens")
-                hyps.append(hyp)
-                break
-
-            if new_token == sp.eos_token_id:
-                hyps.append(hyp)
-                break
-
-    if params.decoding_method == "greedy_search":
-        return {"greedy_search": hyps}
+    hyps = [sp.decode(hyp[:-1]).upper().split() for hyp in hyps] # remove the endoftext token
+    
+    return {params.decoding_method: hyps}
 
 
 def decode_dataset(
@@ -607,18 +597,16 @@ def main():
 
     assert params.decoding_method in (
         "greedy_search",
-        "beam_search",
-        "fast_beam_search",
-        "fast_beam_search_nbest",
-        "fast_beam_search_nbest_LG",
-        "fast_beam_search_nbest_oracle",
-        "modified_beam_search",
-        "modified_beam_search_LODR",
-        "modified_beam_search_lm_shallow_fusion",
-        "modified_beam_search_lm_rescore",
-        "modified_beam_search_lm_rescore_LODR",
+        "sample"
     )
     params.res_dir = params.exp_dir / params.decoding_method
+    
+    if params.decoding_method == "greedy_search":
+        params.do_sample = False
+    elif params.decoding_method == "sample":
+        params.do_sample = True
+    else:
+        raise NotImplementedError(f"Unsupported decoding method {params.decoding_method}")
 
     if os.path.exists(params.context_file):
         params.has_contexts = True
@@ -639,27 +627,6 @@ def main():
         ), "left_context_frames should be one value in decoding."
         params.suffix += f"-chunk-{params.chunk_size}"
         params.suffix += f"-left-context-{params.left_context_frames}"
-
-    if "fast_beam_search" in params.decoding_method:
-        params.suffix += f"-beam-{params.beam}"
-        params.suffix += f"-max-contexts-{params.max_contexts}"
-        params.suffix += f"-max-states-{params.max_states}"
-        if "nbest" in params.decoding_method:
-            params.suffix += f"-nbest-scale-{params.nbest_scale}"
-            params.suffix += f"-num-paths-{params.num_paths}"
-            if "LG" in params.decoding_method:
-                params.suffix += f"-ngram-lm-scale-{params.ngram_lm_scale}"
-    elif "beam_search" in params.decoding_method:
-        params.suffix += f"-{params.decoding_method}-beam-size-{params.beam_size}"
-        if params.decoding_method in (
-            "modified_beam_search",
-            "modified_beam_search_LODR",
-        ):
-            if params.has_contexts:
-                params.suffix += f"-context-score-{params.context_score}"
-    else:
-        params.suffix += f"-context-{params.context_size}"
-        params.suffix += f"-max-sym-per-frame-{params.max_sym_per_frame}"
 
     if params.use_shallow_fusion:
         params.suffix += f"-{params.lm_type}-lm-scale-{params.lm_scale}"
@@ -783,65 +750,6 @@ def main():
     else:
         LM = None
 
-    # only load N-gram LM when needed
-    if params.decoding_method == "modified_beam_search_lm_rescore_LODR":
-        try:
-            import kenlm
-        except ImportError:
-            print("Please install kenlm first. You can use")
-            print(" pip install https://github.com/kpu/kenlm/archive/master.zip")
-            print("to install it")
-            import sys
-
-            sys.exit(-1)
-        ngram_file_name = str(params.lang_dir / f"{params.tokens_ngram}gram.arpa")
-        logging.info(f"lm filename: {ngram_file_name}")
-        ngram_lm = kenlm.Model(ngram_file_name)
-        ngram_lm_scale = None  # use a list to search
-
-    elif params.decoding_method == "modified_beam_search_LODR":
-        lm_filename = f"{params.tokens_ngram}gram.fst.txt"
-        logging.info(f"Loading token level lm: {lm_filename}")
-        ngram_lm = NgramLm(
-            str(params.lang_dir / lm_filename),
-            backoff_id=params.backoff_id,
-            is_binary=False,
-        )
-        logging.info(f"num states: {ngram_lm.lm.num_states}")
-        ngram_lm_scale = params.ngram_lm_scale
-    else:
-        ngram_lm = None
-        ngram_lm_scale = None
-
-    if "fast_beam_search" in params.decoding_method:
-        if params.decoding_method == "fast_beam_search_nbest_LG":
-            lexicon = Lexicon(params.lang_dir)
-            word_table = lexicon.word_table
-            lg_filename = params.lang_dir / "LG.pt"
-            logging.info(f"Loading {lg_filename}")
-            decoding_graph = k2.Fsa.from_dict(
-                torch.load(lg_filename, map_location=device)
-            )
-            decoding_graph.scores *= params.ngram_lm_scale
-        else:
-            word_table = None
-            decoding_graph = k2.trivial_graph(params.vocab_size - 1, device=device)
-    else:
-        decoding_graph = None
-        word_table = None
-
-    if "modified_beam_search" in params.decoding_method:
-        if os.path.exists(params.context_file):
-            contexts = []
-            for line in open(params.context_file).readlines():
-                contexts.append(line.strip())
-            context_graph = ContextGraph(params.context_score)
-            context_graph.build(sp.encode(contexts))
-        else:
-            context_graph = None
-    else:
-        context_graph = None
-
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
 
@@ -849,8 +757,8 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    test_clean_cuts = librispeech.test_clean_cuts()
-    test_other_cuts = librispeech.test_other_cuts()
+    test_clean_cuts = librispeech.test_clean_cuts().subset(first=200)
+    test_other_cuts = librispeech.test_other_cuts().subset(first=200)
 
     test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
     test_other_dl = librispeech.test_dataloaders(test_other_cuts)
@@ -864,12 +772,6 @@ def main():
             params=params,
             model=model,
             sp=sp,
-            word_table=word_table,
-            decoding_graph=decoding_graph,
-            context_graph=context_graph,
-            LM=LM,
-            ngram_lm=ngram_lm,
-            ngram_lm_scale=ngram_lm_scale,
         )
 
         save_results(
