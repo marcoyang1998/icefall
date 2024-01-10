@@ -870,6 +870,7 @@ def compute_loss(
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
+    text_prompt_lens = torch.tensor([0] * len(texts), device=device).long()
 
     with torch.set_grad_enabled(is_training):
         nll_loss = model(
@@ -877,6 +878,7 @@ def compute_loss(
             x_lens=feature_lens,
             y=y,
             y_lens=y_lens,
+            text_prompt_lens=text_prompt_lens
         )
 
         nan_mask = nll_loss.isnan()
