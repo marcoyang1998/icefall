@@ -1399,9 +1399,11 @@ class SwooshL(torch.nn.Module):
             zero = torch.tensor(0.0, dtype=x.dtype, device=x.device)
             return logaddexp(zero, x - 4.0) - 0.08 * x - 0.035
         if not x.requires_grad:
-            return k2.swoosh_l_forward(x)
+            dtype=x.dtype
+            return k2.swoosh_l_forward(x).to(dtype)
         else:
-            return k2.swoosh_l(x)
+            dtype=x.dtype
+            return k2.swoosh_l(x).to(dtype)
         # return SwooshLFunction.apply(x)
 
 
@@ -1473,9 +1475,11 @@ class SwooshR(torch.nn.Module):
             zero = torch.tensor(0.0, dtype=x.dtype, device=x.device)
             return logaddexp(zero, x - 1.0) - 0.08 * x - 0.313261687
         if not x.requires_grad:
-            return k2.swoosh_r_forward(x)
+            dtype = x.dtype
+            return k2.swoosh_r_forward(x).to(dtype)
         else:
-            return k2.swoosh_r(x)
+            dtype = x.dtype
+            return k2.swoosh_r(x).to(dtype)
         # return SwooshRFunction.apply(x)
 
 
@@ -1524,6 +1528,7 @@ class ActivationDropoutAndLinearFunction(torch.autograd.Function):
             dropout_mask = (1.0 / (1.0 - dropout_p)) * (
                 torch.rand(*dropout_shape, device=x.device, dtype=x.dtype) > dropout_p
             )
+            dropout_mask = dropout_mask.to(x.dtype)
         else:
             dropout_mask = None
 
@@ -1538,7 +1543,8 @@ class ActivationDropoutAndLinearFunction(torch.autograd.Function):
         # it will raise a KeyError if this fails.  This will be an error.  We let it
         # propagate to the user.
         activation_func = forward_activation_dict[activation]
-        x = activation_func(x)
+        dtype=x.dtype
+        x = activation_func(x).to(dtype)
         if dropout_mask is not None:
             x = x * dropout_mask
         x = torch.nn.functional.linear(x, weight, bias)
@@ -1559,6 +1565,8 @@ class ActivationDropoutAndLinearFunction(torch.autograd.Function):
         func = forward_and_deriv_activation_dict[ctx.activation]
 
         y, func_deriv = func(x)
+        func_deriv = func_deriv.to(x.dtype)
+        y = y.to(x.dtype)
         if dropout_mask is not None:
             y = y * dropout_mask
         # now compute derivative of y w.r.t. weight and bias..

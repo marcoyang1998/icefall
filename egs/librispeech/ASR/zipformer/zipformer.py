@@ -1425,7 +1425,7 @@ class CompactRelPositionalEncoding(torch.nn.Module):
                 return
 
         # if T == 4, x would contain [ -3, -2, 1, 0, 1, 2, 3 ]
-        x = torch.arange(-(T - 1), T, device=x.device).to(torch.float32).unsqueeze(1)
+        x = torch.arange(-(T - 1), T, device=x.device).to(x.dtype).unsqueeze(1)
 
         freqs = 1 + torch.arange(self.embed_dim // 2, device=x.device)
 
