@@ -76,7 +76,6 @@ from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
 from torch import Tensor
-from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from zipformer import Zipformer2
@@ -707,7 +706,6 @@ def save_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[LRSchedulerType] = None,
     sampler: Optional[CutSampler] = None,
-    scaler: Optional[GradScaler] = None,
     rank: int = 0,
 ) -> None:
     """Save model, optimizer, scheduler and training stats to file.
@@ -723,8 +721,6 @@ def save_checkpoint(
         The optimizer used in the training.
       sampler:
        The sampler for the training dataset.
-      scaler:
-        The scaler used for mix precision training.
     """
     if rank != 0:
         return
@@ -737,7 +733,6 @@ def save_checkpoint(
         optimizer=optimizer,
         scheduler=scheduler,
         sampler=sampler,
-        scaler=scaler,
         rank=rank,
     )
 
@@ -779,7 +774,7 @@ def compute_loss(
     feature = batch["inputs"]
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
-    feature = feature.to(device)
+    feature = feature.to(torch.bfloat16).to(device)
 
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
@@ -882,7 +877,6 @@ def train_one_epoch(
     sp: spm.SentencePieceProcessor,
     train_dl: torch.utils.data.DataLoader,
     valid_dl: torch.utils.data.DataLoader,
-    scaler: GradScaler,
     model_avg: Optional[nn.Module] = None,
     tb_writer: Optional[SummaryWriter] = None,
     world_size: int = 1,
@@ -907,8 +901,6 @@ def train_one_epoch(
         Dataloader for the training dataset.
       valid_dl:
         Dataloader for the validation dataset.
-      scaler:
-        The scaler used for mix precision training.
       model_avg:
         The stored model averaged from the start of training.
       tb_writer:
@@ -934,7 +926,6 @@ def train_one_epoch(
             optimizer=optimizer,
             scheduler=scheduler,
             sampler=train_dl.sampler,
-            scaler=scaler,
             rank=0,
         )
 
@@ -946,24 +937,22 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
-                loss, loss_info = compute_loss(
-                    params=params,
-                    model=model,
-                    sp=sp,
-                    batch=batch,
-                    is_training=True,
-                )
+            loss, loss_info = compute_loss(
+                params=params,
+                model=model,
+                sp=sp,
+                batch=batch,
+                is_training=True,
+            )
             # summary stats
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
             # NOTE: We use reduction==sum and loss is computed over utterances
             # in the batch and there is no normalization to it so far.
-            scaler.scale(loss).backward()
+            loss.backward()
             scheduler.step_batch(params.batch_idx_train)
-
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
+            
             optimizer.zero_grad()
         except:  # noqa
             save_bad_model()
@@ -997,7 +986,6 @@ def train_one_epoch(
                 optimizer=optimizer,
                 scheduler=scheduler,
                 sampler=train_dl.sampler,
-                scaler=scaler,
                 rank=rank,
             )
             remove_checkpoints(
@@ -1006,35 +994,14 @@ def train_one_epoch(
                 rank=rank,
             )
 
-        if batch_idx % 100 == 0 and params.use_fp16:
-            # If the grad scale was less than 1, try increasing it.    The _growth_interval
-            # of the grad scaler is configurable, but we can't configure it to have different
-            # behavior depending on the current grad scale.
-            cur_grad_scale = scaler._scale.item()
-
-            if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
-                scaler.update(cur_grad_scale * 2.0)
-            if cur_grad_scale < 0.01:
-                if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
-                    saved_bad_model = True
-                logging.warning(f"Grad scale is small: {cur_grad_scale}")
-            if cur_grad_scale < 1.0e-05:
-                save_bad_model()
-                raise RuntimeError(
-                    f"grad_scale is too small, exiting: {cur_grad_scale}"
-                )
-
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, "
                 f"batch {batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
             )
 
             if tb_writer is not None:
@@ -1046,10 +1013,6 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
-                if params.use_fp16:
-                    tb_writer.add_scalar(
-                        "train/grad_scale", cur_grad_scale, params.batch_idx_train
-                    )
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
@@ -1139,6 +1102,7 @@ def run(rank, world_size, args):
     )
 
     model.to(device)
+    model.to(torch.bfloat16)
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
@@ -1233,19 +1197,14 @@ def run(rank, world_size, args):
     valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
-
-    scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
-    if checkpoints and "grad_scaler" in checkpoints:
-        logging.info("Loading grad scaler state dict")
-        scaler.load_state_dict(checkpoints["grad_scaler"])
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     for epoch in range(params.start_epoch, params.num_epochs + 1):
         scheduler.step_epoch(epoch - 1)
@@ -1266,7 +1225,6 @@ def run(rank, world_size, args):
             sp=sp,
             train_dl=train_dl,
             valid_dl=valid_dl,
-            scaler=scaler,
             tb_writer=tb_writer,
             world_size=world_size,
             rank=rank,
@@ -1283,7 +1241,6 @@ def run(rank, world_size, args):
             optimizer=optimizer,
             scheduler=scheduler,
             sampler=train_dl.sampler,
-            scaler=scaler,
             rank=rank,
         )
 
@@ -1342,14 +1299,14 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
-                loss, _ = compute_loss(
-                    params=params,
-                    model=model,
-                    sp=sp,
-                    batch=batch,
-                    is_training=True,
-                )
+            
+            loss, _ = compute_loss(
+                params=params,
+                model=model,
+                sp=sp,
+                batch=batch,
+                is_training=True,
+            )
             loss.backward()
             optimizer.zero_grad()
         except Exception as e:
