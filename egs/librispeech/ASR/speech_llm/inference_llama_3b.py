@@ -427,11 +427,12 @@ def decode_one_batch(
     feature_lens = supervisions["num_frames"].to(device)
 
     encoder_out, encoder_out_lens = model.encode_audio(feature, feature_lens)
+    encoder_out_lens += 2
 
     hyps = []
 
-    for i in range(batch_size):    
-        hyp = [1]
+    for i in range(batch_size):
+        # open-llama requires a bos token
         prompt = torch.full((1, 1), sp.bos_token_id).to(device)
         prompt_lens = torch.full((1,), 1).int().to(device)
         
@@ -440,30 +441,25 @@ def decode_one_batch(
         while True:
             prompt_embeddings = model.embed_tokens(prompt)
 
-            total_prefix, total_lens = model.concat_token_embedings(
+            audio_embeddings, audio_lens = model.concat_token_embedings(
                 x=encoder_out[i, None],
                 x_lens=encoder_out_lens[i, None],
                 y=prompt_embeddings,
                 y_lens=prompt_lens,
             )
-            logits = model.forward_LLM(total_prefix, total_lens) # (1,N,V)
-            new_token = logits[0,-1,:].argmax(dim=-1)
-            hyp.append(new_token.item())
-
-            prompt = torch.cat((prompt, torch.full((1,1), new_token, device=device)), dim=-1)
-            prompt_lens += 1
-
-            count += 1
-            if count >= 200:
-                logging.info("Exceed maximum number of tokens")
-                hyps.append(hyp)
-                break
-
-            if new_token == sp.eos_token_id:
-                hyps.append(hyp)
-                break
-
-    import pdb; pdb.set_trace()
+            
+            input_ids = torch.tensor([[sp.bos_token_id] * audio_lens.item()]).long().to(device)
+            generation_kwargs = {
+                "do_sample": False,
+                "input_ids": input_ids,
+                "audio_embeddings": audio_embeddings,
+                "audio_lens": audio_lens,
+                "max_new_tokens": 300,
+            }
+            
+            output = model.llm.generate(**generation_kwargs)
+            hyp = output[0, audio_lens:]
+            hyps.append(hyp.tolist())
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}

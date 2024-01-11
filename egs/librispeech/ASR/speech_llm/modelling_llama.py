@@ -288,6 +288,8 @@ class LlamaForCausalSpeechLLM(LlamaPreTrainedModel):
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
+                "audio_embeddings": kwargs.get("audio_embeddings", None),
+                "audio_lens": kwargs.get("audio_lens", None),
             }
         )
         return model_inputs
