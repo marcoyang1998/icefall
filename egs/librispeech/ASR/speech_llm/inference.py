@@ -445,6 +445,8 @@ def decode_one_batch(
             "audio_embeddings": audio_embeddings,
             "audio_lens": audio_lens,
             "max_new_tokens": 300,
+            "pad_token_id": sp.pad_token_id,
+            "eos_token_id": sp.eos_token_id,
         }
         
         output = model.llm.generate(**generation_kwargs)
