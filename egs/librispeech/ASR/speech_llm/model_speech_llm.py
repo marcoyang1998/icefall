@@ -82,6 +82,7 @@ class SpeechLLMModel(nn.Module):
         """
         src_key_padding_mask = ~ make_pad_mask(y_lens, max_len=y.shape[1])
         
+        self.llm.eval() # Set the LLM param to eval mode
         output = self.llm(
             inputs_embeds=y,
             attention_mask=src_key_padding_mask,
