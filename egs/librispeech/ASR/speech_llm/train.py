@@ -625,6 +625,7 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
     if not params.use_full_fp16:
         decoder.to(torch.float32)
         logging.info("Convering the LLM parameter to fp32 format")
+    decoder.eval() # set to evaluation mode
     return decoder
     
 
