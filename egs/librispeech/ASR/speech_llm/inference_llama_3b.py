@@ -436,30 +436,30 @@ def decode_one_batch(
         prompt = torch.full((1, 1), sp.bos_token_id).to(device)
         prompt_lens = torch.full((1,), 1).int().to(device)
         
-        count = 0
         import pdb; pdb.set_trace()
-        while True:
-            prompt_embeddings = model.embed_tokens(prompt)
+        
+        prompt_embeddings = model.embed_tokens(prompt)
 
-            audio_embeddings, audio_lens = model.concat_token_embedings(
-                x=encoder_out[i, None],
-                x_lens=encoder_out_lens[i, None],
-                y=prompt_embeddings,
-                y_lens=prompt_lens,
-            )
-            
-            input_ids = torch.tensor([[sp.bos_token_id] * audio_lens.item()]).long().to(device)
-            generation_kwargs = {
-                "do_sample": False,
-                "input_ids": input_ids,
-                "audio_embeddings": audio_embeddings,
-                "audio_lens": audio_lens,
-                "max_new_tokens": 300,
-            }
-            
-            output = model.llm.generate(**generation_kwargs)
-            hyp = output[0, audio_lens:]
-            hyps.append(hyp.tolist())
+        audio_embeddings, audio_lens = model.concat_token_embedings(
+            x=encoder_out[i, None],
+            x_lens=encoder_out_lens[i, None],
+            y=prompt_embeddings,
+            y_lens=prompt_lens,
+        )
+        
+        input_ids = torch.tensor([[sp.bos_token_id] * audio_lens.item()]).long().to(device)
+        generation_kwargs = {
+            "do_sample": False,
+            "input_ids": input_ids,
+            "audio_embeddings": audio_embeddings,
+            "audio_lens": audio_lens,
+            "max_new_tokens": 300,
+        }
+        
+        import pdb; pdb.set_trace()
+        output = model.llm.generate(**generation_kwargs)
+        hyp = output[0, audio_lens:]
+        hyps.append(hyp.tolist())
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}
