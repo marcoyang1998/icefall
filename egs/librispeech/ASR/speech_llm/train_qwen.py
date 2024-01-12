@@ -47,8 +47,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from zipformer import Zipformer2
 
-from modeling_milm import MiConfig, MiLMForCausalLM
-from tokenization_milm import MiTokenizer
+from modelscope import AutoTokenizer
+from modeling_qwen import QWenSpeechLLM
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -250,19 +250,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "be converted to a number of chunks.  If splitting into chunks, "
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
-
-    parser.add_argument(
-        "--mimodel-config",
-        type=str,
-        required=True,
-    )
-    
-    parser.add_argument(
-        "--mimodel-path",
-        type=str,
-        default=None,
-        help="The initialization of the llm decoder. Won't be used if not specified"
-    )
     
     parser.add_argument(
         "--speech-encoder-path",
@@ -399,13 +386,6 @@ def get_parser():
         It specifies the directory where all training related
         files, e.g., checkpoints, log, etc, are saved
         """,
-    )
-
-    parser.add_argument(
-        "--tokenizer-path",
-        type=str,
-        required=True,
-        help="Path to the tokenizer model",
     )
 
     parser.add_argument(
@@ -610,20 +590,9 @@ def _to_int_tuple(s: str):
 
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
     # Load a pre-trained LLM decoder
-    import sys
-    sys.path.append("/xy/mnt/yangxiaoyu/softwares/projects")
-    
-    config = MiConfig.from_json_file(params.mimodel_config)
-    decoder = MiLMForCausalLM(config)
-
-    if params.mimodel_path is not None:
-        logging.info(f"Loading the state dict for MiModel from {params.mimodel_path}")
-        state_dict = torch.load(params.mimodel_path, map_location="cpu")
-        if "model" in state_dict:
-            state_dict = state_dict["model"]
-        decoder.load_state_dict(state_dict)
+    decoder = QWenSpeechLLM.from_pretrained("qwen/Qwen-1_8B", revision='master', trust_remote_code=True).eval()
     if not params.use_full_fp16:
-        decoder.to(torch.float32)
+        decoder = decoder.to(torch.float32)
         logging.info("Convering the LLM parameter to fp32 format")
     return decoder
     
@@ -702,6 +671,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         speech_encoder=speech_encoder,
         speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
         do_avg_pooling=params.do_avg_pooling,
+        pad_token=params.pad_token_id,
     )
     
     return model
@@ -865,12 +835,13 @@ def compute_loss(
     texts = batch["supervisions"]["text"]
     if params.use_lowercase:
         texts = [s.lower() for s in texts]
+    texts = [t + params.eos_token for t in texts]
 
     # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
-    text_prompt_lens = torch.tensor([0] * len(texts), device=device).long()
+    text_prompt_lens = torch.tensor([0] * len(texts), device=device).long() # no bos token is needed, thus 0
 
     with torch.set_grad_enabled(is_training):
         nll_loss = model(
@@ -1181,7 +1152,17 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = MiTokenizer(params.tokenizer_path, fix_zh=False)
+    sp = AutoTokenizer.from_pretrained("qwen/Qwen-1_8B", revision='master', trust_remote_code=True)
+    # deal with special tokens
+    assert sp.decode(151643) == "<|endoftext|>"
+    sp.eos_token = "<|endoftext|>"
+    sp.eos_token_id = 151643
+    
+    assert sp.decode(151646) == "<|extra_0|>"
+    sp.pad_token = "<|extra_0|>" # needed for batch padding
+    sp.pad_token_id = 151646
+    
+    params.eos_token = sp.eos_token
     params.vocab_size = sp.vocab_size
     params.pad_token_id = sp.pad_token_id
 
@@ -1207,6 +1188,9 @@ def run(rank, world_size, args):
     )
 
     model.to(device)
+    if not params.use_full_fp16:
+        model.to(torch.float32)
+        
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
