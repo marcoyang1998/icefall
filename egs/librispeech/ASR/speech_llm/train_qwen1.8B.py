@@ -47,8 +47,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from zipformer import Zipformer2
 
-from transformers import LlamaTokenizer
-from modeling_llama import LlamaForCausalSpeechLLM
+from modeling_milm import MiConfig, MiLMForCausalLM
+from tokenization_milm import MiTokenizer
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -188,6 +188,11 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         """,
     )
     
+    parser.add_argument(
+        "--context-size",
+        type=int,
+        default=2,
+    )
     
     parser.add_argument(
         "--prune-range",
@@ -247,18 +252,32 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--llm-embed-dim",
-        type=int,
-        default=3200,
-        help="Dimension of the embedding for the language model",
+        "--mimodel-config",
+        type=str,
+        required=True,
+    )
+    
+    parser.add_argument(
+        "--mimodel-path",
+        type=str,
+        default=None,
+        help="The initialization of the llm decoder. Won't be used if not specified"
     )
     
     parser.add_argument(
         "--speech-encoder-path",
         type=str,
-        required=False,
+        default=None,
+        help="The initialization of the speech encoder. Won't be used if not specified"
     )
 
+    parser.add_argument(
+        "--llm-embed-dim",
+        type=int,
+        default=1536 ,
+        help="Dimension of the embedding for the language model",
+    )
+    
     parser.add_argument(
         "--do-avg-pooling",
         type=str2bool,
@@ -380,6 +399,13 @@ def get_parser():
         It specifies the directory where all training related
         files, e.g., checkpoints, log, etc, are saved
         """,
+    )
+
+    parser.add_argument(
+        "--tokenizer-path",
+        type=str,
+        required=True,
+        help="Path to the tokenizer model",
     )
 
     parser.add_argument(
@@ -583,12 +609,23 @@ def _to_int_tuple(s: str):
     return tuple(map(int, s.split(",")))
 
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
-    # Load a pre-trained llama-3b decoder
-    model = LlamaForCausalSpeechLLM.from_pretrained(params.model_path, torch_dtype=torch.float16, local_files_only=True)
-    if not params.use_full_fp16:
-        model.to(torch.float32)
+    # Load a pre-trained LLM decoder
+    import sys
+    sys.path.append("/xy/mnt/yangxiaoyu/softwares/projects")
     
-    return model
+    config = MiConfig.from_json_file(params.mimodel_config)
+    decoder = MiLMForCausalLM(config)
+
+    if params.mimodel_path is not None:
+        logging.info(f"Loading the state dict for MiModel from {params.mimodel_path}")
+        state_dict = torch.load(params.mimodel_path, map_location="cpu")
+        if "model" in state_dict:
+            state_dict = state_dict["model"]
+        decoder.load_state_dict(state_dict)
+    if not params.use_full_fp16:
+        decoder.to(torch.float32)
+        logging.info("Convering the LLM parameter to fp32 format")
+    return decoder
     
 
 def get_encoder_embed(params: AttributeDict) -> nn.Module:
@@ -665,7 +702,6 @@ def get_model(params: AttributeDict) -> nn.Module:
         speech_encoder=speech_encoder,
         speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
         do_avg_pooling=params.do_avg_pooling,
-        pad_token=params.pad_token_id,
     )
     
     return model
@@ -826,15 +862,15 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    texts = batch["supervisions"]["text"] # Pure upper-cased text is not well-supported for the LLM
+    texts = batch["supervisions"]["text"]
     if params.use_lowercase:
         texts = [s.lower() for s in texts]
+
+    # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
-    
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
-    # Each text is pre-pended with a BOS token, so text prompt has a length of 1
-    text_prompt_lens = torch.tensor([1] * len(texts), device=device).long()
+    text_prompt_lens = torch.tensor([0] * len(texts), device=device).long()
 
     with torch.set_grad_enabled(is_training):
         nll_loss = model(
@@ -842,7 +878,7 @@ def compute_loss(
             x_lens=feature_lens,
             y=y,
             y_lens=y_lens,
-            text_prompt_lens=text_prompt_lens,
+            text_prompt_lens=text_prompt_lens
         )
 
         nan_mask = nll_loss.isnan()
@@ -865,7 +901,7 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    info["nll_loss"] = loss.detach().cpu().item()
+    info["nll_loss"] = nll_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1145,9 +1181,7 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    params.model_path = 'openlm-research/open_llama_3b_v2'
-    sp = LlamaTokenizer.from_pretrained(params.model_path, local_files_only=True)
-    sp.pad_token = sp.eos_token
+    sp = MiTokenizer(params.tokenizer_path, fix_zh=False)
     params.vocab_size = sp.vocab_size
     params.pad_token_id = sp.pad_token_id
 
