@@ -580,6 +580,20 @@ class LibriSpeechAsrDataModule:
         )
 
     @lru_cache()
+    def clotho_train_cuts(self) -> CutSet:
+        logging.info("About to get clotho training cuts")
+        return load_manifest_lazy(
+            "data/fbank_clotho/cuts_clotho_development.jsonl.gz"
+        )
+
+    @lru_cache()
+    def clotho_eval_cuts(self) -> CutSet:
+        logging.info("About to get clotho evaluation cuts")
+        return load_manifest_lazy(
+            "data/fbank_clotho/cuts_clotho_evaluation.jsonl.gz"
+        )
+
+    @lru_cache()
     def voxceleb_cuts(self) -> CutSet:
         # this should be used in KD
         logging.info("About to get the voxceleb cuts.")
