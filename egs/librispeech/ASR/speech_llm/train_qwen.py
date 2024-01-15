@@ -466,7 +466,7 @@ def get_parser():
     parser.add_argument(
         "--keep-last-k",
         type=int,
-        default=30,
+        default=10,
         help="""Only keep this number of checkpoints on disk.
         For instance, if it is 3, there are only 3 checkpoints
         in the exp-dir with filenames `checkpoint-xxx.pt`.
@@ -594,6 +594,10 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
     if not params.use_full_fp16:
         decoder = decoder.to(torch.float32)
         logging.info("Convering the LLM parameter to fp32 format")
+        
+    # set requires_grad=False for all the parameters in llm
+    for param in decoder.parameters():
+        param.requires_grad = False
     return decoder
     
 

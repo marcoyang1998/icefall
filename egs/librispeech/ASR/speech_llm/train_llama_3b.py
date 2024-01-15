@@ -587,6 +587,12 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
     model = LlamaForCausalSpeechLLM.from_pretrained(params.model_path, torch_dtype=torch.float16, local_files_only=True)
     if not params.use_full_fp16:
         model.to(torch.float32)
+        
+    # set requires_grad=False for all the parameters in llm
+    for param in model.parameters():
+        param.requires_grad = False
+            
+    model.eval()
     
     return model
     

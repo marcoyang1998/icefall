@@ -47,10 +47,6 @@ class SpeechLLMModel(nn.Module):
         self.pad_token = pad_token
         
         self.llm = llm # a pre-trained LLM
-
-        # set requires_grad=False for all the parameters in llm
-        for param in self.llm.parameters():
-            param.requires_grad = False
         
         if do_avg_pooling:
             self.pooling_layer = nn.AvgPool1d(2, stride=2)
