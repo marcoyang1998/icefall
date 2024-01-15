@@ -64,6 +64,7 @@ from icefall.utils import (
     AttributeDict,
     MetricsTracker,
     get_parameter_groups_with_lrs,
+    get_parameter_groups_with_lrs2,
     setup_logger,
     str2bool,
 )
@@ -506,6 +507,13 @@ def get_parser():
             model_avg * ((batch_idx_train - average_period) / batch_idx_train)`.
         """,
     )
+    
+    parser.add_argument(
+        "--freeze-embeddings",
+        type=str2bool,
+        default=True,
+        help="If freezing the token embeddings in the LLM"
+    )
 
     parser.add_argument(
         "--use-fp16",
@@ -625,10 +633,19 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
     if not params.use_full_fp16:
         decoder.to(torch.float32)
         logging.info("Convering the LLM parameter to fp32 format")
+        
+    if not params.freeze_embeddings:
+        embedding_modules = ["transformer.wte", "lm_head"]
+    else:
+        embedding_modules = []
     
     # set requires_grad=False for all the parameters in llm
-    for param in decoder.parameters():
+    for name, param in decoder.named_parameters():
         param.requires_grad = False
+        for m in embedding_modules:
+            if m in name:
+                param.requires_grad = True
+                logging.info(f"Don't freeze {name}")
         
     decoder.eval() # set to evaluation mode
     return decoder
@@ -1218,8 +1235,8 @@ def run(rank, world_size, args):
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     # only feed the parameters in the speech encoder to the optimizer
-    parameters = get_parameter_groups_with_lrs(
-        model, lr=params.base_lr, include_names=True, freeze_modules=["llm"]
+    parameters = get_parameter_groups_with_lrs2(
+        model, lr=params.base_lr, include_names=True,
     )        
 
     optimizer = ScaledAdam(
