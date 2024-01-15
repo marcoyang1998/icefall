@@ -64,6 +64,7 @@ from icefall.utils import (
     AttributeDict,
     MetricsTracker,
     get_parameter_groups_with_lrs,
+    get_parameter_groups_with_lrs2,
     setup_logger,
     str2bool,
 )
@@ -486,6 +487,13 @@ def get_parser():
             model_avg * ((batch_idx_train - average_period) / batch_idx_train)`.
         """,
     )
+    
+    parser.add_argument(
+        "--freeze-embeddings",
+        type=str2bool,
+        default=True,
+        help="If freezing the token embeddings in the LLM"
+    )
 
     parser.add_argument(
         "--use-fp16",
@@ -590,14 +598,23 @@ def _to_int_tuple(s: str):
 
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
     # Load a pre-trained LLM decoder
-    decoder = QWenSpeechLLM.from_pretrained("qwen/Qwen-1_8B", revision='master', trust_remote_code=True).eval()
+    decoder = QWenSpeechLLM.from_pretrained("qwen/Qwen-1_8B", revision='master', trust_remote_code=True, fp16=True).eval()
     if not params.use_full_fp16:
         decoder = decoder.to(torch.float32)
         logging.info("Convering the LLM parameter to fp32 format")
         
     # set requires_grad=False for all the parameters in llm
-    for param in decoder.parameters():
+    if not params.freeze_embeddings:
+        embedding_modules = ["transformer.wte", "lm_head"]
+    else:
+        embedding_modules = []
+        
+    for name, param in decoder.named_parameters():
         param.requires_grad = False
+        for m in embedding_modules:
+            if m in name:
+                param.requires_grad = True
+                logging.info(f"Don't freeze {name}")
     return decoder
     
 
@@ -1198,10 +1215,10 @@ def run(rank, world_size, args):
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
-
+    
     # only feed the parameters in the speech encoder to the optimizer
-    parameters = get_parameter_groups_with_lrs(
-        model, lr=params.base_lr, include_names=True, freeze_modules=["llm"]
+    parameters = get_parameter_groups_with_lrs2(
+        model, lr=params.base_lr, include_names=True,
     )        
 
     optimizer = ScaledAdam(
