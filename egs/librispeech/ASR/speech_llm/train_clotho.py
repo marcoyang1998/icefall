@@ -252,6 +252,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
+        
+    parser.add_argument(
+        "--freeze-embeddings",
+        type=str2bool,
+        default=True,
+        help="If freezing the token embeddings in the LLM"
+    )
+
     parser.add_argument(
         "--mimodel-config",
         type=str,
@@ -506,13 +514,6 @@ def get_parser():
         we do: `model_avg = model * (average_period / batch_idx_train) +
             model_avg * ((batch_idx_train - average_period) / batch_idx_train)`.
         """,
-    )
-    
-    parser.add_argument(
-        "--freeze-embeddings",
-        type=str2bool,
-        default=True,
-        help="If freezing the token embeddings in the LLM"
     )
 
     parser.add_argument(
