@@ -635,7 +635,7 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
         logging.info("Convering the LLM parameter to fp32 format")
         
     if not params.freeze_embeddings:
-        embedding_modules = ["transformer.wte", "lm_head"]
+        embedding_modules = ["decoder.embed_tokens", "decoder.output_projection"]
     else:
         embedding_modules = []
     
