@@ -1107,12 +1107,12 @@ def train_one_epoch(
             if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
-                if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
-                    saved_bad_model = True
+                # if not saved_bad_model:
+                #     save_bad_model(suffix="-first-warning")
+                #     saved_bad_model = True
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
-                save_bad_model()
+                # save_bad_model()
                 raise RuntimeError(
                     f"grad_scale is too small, exiting: {cur_grad_scale}"
                 )
