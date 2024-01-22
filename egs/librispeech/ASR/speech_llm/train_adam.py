@@ -1236,9 +1236,11 @@ def run(rank, world_size, args):
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         parameters,
         lr=params.base_lr,
+        betas=(0.9, 0.98),
+        weight_decay=0.05,
     )
     
     scheduler = Eden(
