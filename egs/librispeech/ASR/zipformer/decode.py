@@ -225,6 +225,13 @@ def get_parser():
         `--lang-dir`, which should contain `LG.pt`.
         """,
     )
+    
+    parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="If use bf16 format"
+    )
 
     parser.add_argument(
         "--beam-size",
@@ -430,6 +437,8 @@ def decode_one_batch(
 
     feature = feature.to(device)
     # at entry, feature is (N, T, C)
+    if params.use_bf16:
+        feature = feature.to(torch.bfloat16)
 
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
@@ -931,6 +940,8 @@ def main():
 
     model.to(device)
     model.eval()
+    if params.use_bf16:
+        model.to(torch.bfloat16)
 
     # only load the neural network LM if required
     if params.use_shallow_fusion or params.decoding_method in (

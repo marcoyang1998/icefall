@@ -937,13 +937,14 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            loss, loss_info = compute_loss(
-                params=params,
-                model=model,
-                sp=sp,
-                batch=batch,
-                is_training=True,
-            )
+            with torch.cuda.amp.autocast(enabled=False):
+                loss, loss_info = compute_loss(
+                    params=params,
+                    model=model,
+                    sp=sp,
+                    batch=batch,
+                    is_training=True,
+                )
             # summary stats
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
