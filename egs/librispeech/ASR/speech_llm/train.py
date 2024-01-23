@@ -1225,7 +1225,7 @@ def run(rank, world_size, args):
 
     logging.info(params)
 
-    logging.info("About to create model")
+    logging.info("About to create model") 
     model = get_model(params)
     if params.use_bf16:
         model.to(torch.bfloat16)
