@@ -512,6 +512,13 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="Whether to use pure bf16 training.",
+    )
+    
+    parser.add_argument(
         "--repeat-librispeech",
         type=int,
         default=1,
@@ -600,8 +607,14 @@ def _to_int_tuple(s: str):
 
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
     # Load a pre-trained LLM decoder
-    decoder = QWenSpeechLLM.from_pretrained("qwen/Qwen-1_8B", revision='master', trust_remote_code=True, fp16=True).eval()
-    if not params.use_full_fp16:
+    if params.use_bf16:
+        decoder = QWenSpeechLLM.from_pretrained("qwen/Qwen-1_8B", revision='master', trust_remote_code=True, bf16=True).eval()
+        logging.info("Loading LLM params in bf16 format")
+    else:
+        decoder = QWenSpeechLLM.from_pretrained("qwen/Qwen-1_8B", revision='master', trust_remote_code=True, fp16=True).eval()
+        logging.info("Loading LLM params in fp16 format")
+    
+    if not params.use_full_fp16 and not params.use_bf16:
         decoder = decoder.to(torch.float32)
         logging.info("Convering the LLM parameter to fp32 format")
         
@@ -676,10 +689,16 @@ def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
         use_subsampled_output=True,
     )
     
+    if params.use_bf16:
+        model.to(torch.bfloat16)
+    elif params.use_fp16:
+        model.to(torch.float32)
+    
     if params.speech_encoder_path is not None:
         logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
         state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
-        model.load_state_dict(state_dict, strict=False)
+        keys = [k for k in state_dict.keys() if k.startswith("encoder") or k.startswith("encoder_embed")]
+        state_dict = {k: state_dict[k] for k in keys}
     
     return model
 
@@ -692,7 +711,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         llm_embed_dim=params.llm_embed_dim,
         vocab_size=params.vocab_size,
         speech_encoder=speech_encoder,
-        speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
+        speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_whisper else params.encoder_projection_dim,
         do_avg_pooling=params.do_avg_pooling,
         pad_token=params.pad_token_id,
     )
@@ -845,6 +864,8 @@ def compute_loss(
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
+    if params.use_bf16:
+        feature = feature.to(torch.bfloat16)
 
     supervisions = batch["supervisions"]
     cuts = batch["supervisions"]["cut"]
@@ -1009,7 +1030,7 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_fp16 and not params.use_bf16):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1022,11 +1043,16 @@ def train_one_epoch(
 
             # NOTE: We use reduction==sum and loss is computed over utterances
             # in the batch and there is no normalization to it so far.
-            scaler.scale(loss).backward()
-            scheduler.step_batch(params.batch_idx_train)
+            if params.use_bf16:
+                loss.backward()
+                scheduler.step_batch(params.batch_idx_train)
+                optimizer.step()
+            else:
+                scaler.scale(loss).backward()
+                scheduler.step_batch(params.batch_idx_train)
 
-            scaler.step(optimizer)
-            scaler.update()
+                scaler.step(optimizer)
+                scaler.update()
             optimizer.zero_grad()
         except:  # noqa
             # save_bad_model()
@@ -1069,7 +1095,7 @@ def train_one_epoch(
                 rank=rank,
             )
 
-        if batch_idx % 100 == 0 and params.use_fp16:
+        if batch_idx % 100 == 0 and (params.use_fp16 and not params.use_bf16):
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
             # of the grad scaler is configurable, but we can't configure it to have different
             # behavior depending on the current grad scale.
@@ -1090,14 +1116,14 @@ def train_one_epoch(
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
+            cur_grad_scale = scaler._scale.item() if (params.use_fp16 and not params.use_bf16) else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, "
                 f"batch {batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
+                + (f"grad_scale: {scaler._scale.item()}" if (params.use_fp16 and not params.use_bf16) else "")
             )
 
             if tb_writer is not None:
@@ -1211,8 +1237,12 @@ def run(rank, world_size, args):
     )
 
     model.to(device)
-    if not params.use_full_fp16:
+    if not params.use_full_fp16 and not params.use_bf16:
         model.to(torch.float32)
+        logging.info("Converting full model to fp32")
+    else:
+        model.to(torch.bfloat16)
+        logging.info("Converting full model to bf16")
         
     if world_size > 1:
         logging.info("Using DDP")

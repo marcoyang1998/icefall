@@ -101,7 +101,7 @@ class SpeechLLMModel(nn.Module):
         encoder_out, encoder_out_lens, _ = self.speech_encoder.forward_encoder(
             x, x_lens, return_middle_out=False,
         ) # (N,T,C)
-        if hasattr(self.speech_encoder, 'whisper_projection'):
+        if self.speech_encoder.whisper_projection is not None:
             encoder_out = self.speech_encoder.whisper_projection(encoder_out)
         
         if self.pooling_layer is not None:

@@ -530,6 +530,13 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="Whether to use pure bf16 training.",
+    )
+    
+    parser.add_argument(
         "--repeat-librispeech",
         type=int,
         default=1,
@@ -618,11 +625,15 @@ def _to_int_tuple(s: str):
 
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
     # Load a pre-trained LLM decoder
-    import sys
-    sys.path.append("/xy/mnt/yangxiaoyu/softwares/projects")
-    
     config = MiConfig.from_json_file(params.mimodel_config)
     decoder = MiLMForCausalLM(config)
+    
+    if not params.use_full_fp16 and not params.use_bf16:
+        decoder.to(torch.float32)
+        logging.info("Convering the LLM parameter to fp32 format")
+    elif params.use_bf16:
+        decoder.to(torch.bfloat16)
+        logging.info("Convering the LLM parameter to bf16 format")
 
     if params.mimodel_path is not None:
         logging.info(f"Loading the state dict for MiModel from {params.mimodel_path}")
@@ -630,9 +641,6 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
         if "model" in state_dict:
             state_dict = state_dict["model"]
         decoder.load_state_dict(state_dict)
-    if not params.use_full_fp16:
-        decoder.to(torch.float32)
-        logging.info("Convering the LLM parameter to fp32 format")
         
     if not params.freeze_embeddings:
         embedding_modules = ["decoder.embed_tokens", "decoder.output_projection"]
@@ -691,7 +699,6 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
-
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
@@ -707,9 +714,15 @@ def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
         use_subsampled_output=True,
     )
     
+    if params.use_bf16:
+        model.to(torch.bfloat16)
+    
     if params.speech_encoder_path is not None:
         logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
         state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
+        keys = [k for k in state_dict.keys() if k.startswith("encoder") or k.startswith("encoder_embed")]
+        state_dict = {k: state_dict[k] for k in keys}
+        
         model.load_state_dict(state_dict, strict=False)
     
     return model
@@ -723,7 +736,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         llm_embed_dim=params.llm_embed_dim,
         vocab_size=params.vocab_size,
         speech_encoder=speech_encoder,
-        speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
+        speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_whisper else params.encoder_projection_dim,
         do_avg_pooling=params.do_avg_pooling,
     )
     
@@ -875,6 +888,8 @@ def compute_loss(
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
+    if params.use_bf16:
+        feature = feature.to(torch.bfloat16)
 
     supervisions = batch["supervisions"]
     cuts = batch["supervisions"]["cut"]
@@ -1038,7 +1053,7 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_fp16 and not params.use_bf16):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1212,6 +1227,8 @@ def run(rank, world_size, args):
 
     logging.info("About to create model")
     model = get_model(params)
+    if params.use_bf16:
+        model.to(torch.bfloat16)
 
     num_param = sum([p.numel() for p in model.parameters()])
     num_trainable_param = sum([p.numel() * p.requires_grad for p in model.parameters()])
