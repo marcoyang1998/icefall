@@ -229,27 +229,6 @@ class LibriSpeechAsrDataModule:
             default=False,
             help="Return audio while collating batch"
         )
-        
-        group.add_argument(
-            "--use-beats",
-            type=str2bool,
-            help="If use BEATs teacher model",
-            default=True,
-        )
-        
-        group.add_argument(
-            "--use-ecapa",
-            type=str2bool,
-            help="If use ECAPA teacher model",
-            default=True,
-        )
-        
-        group.add_argument(
-            "--use-whisper",
-            type=str2bool,
-            help="If use whisper teacher model when collecting batch;",
-            default=True,
-        )
 
         group.add_argument(
             "--use-voxceleb",

@@ -37,7 +37,7 @@ from lhotse.dataset.collation import collate_custom_field
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import MultiKDModel
-from model_speech_llm import SpeechLLMModel
+from model_speech_llm import SpeechLLMModel, WhisperEncoder
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -313,12 +313,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If do audio tagging multi task training"
     )
+    
+    parser.add_argument(
+        "--use-whisper-encoder",
+        type=str2bool,
+        default=False,
+        help="If use the whisper encoder as the speech encoder"
+    )
 
     parser.add_argument(
         "--use-encoder-projection",
         type=str2bool,
         default=False,
-        help="If add a final projection layer at the end of the encoder"
+        help="""If add a final projection layer at the end of the encoder, 
+        "this is set to true if the audio encoder"""
     )
 
     parser.add_argument(
@@ -699,44 +707,60 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
-    encoder_embed = get_encoder_embed(params)
-    encoder = get_encoder_model(params)
+    import pdb; pdb.set_trace()
+    if params.use_whisper_encoder:
+        model = WhisperEncoder(
+            whisper_version=params.whisper_version,
+        )
+        params.encoder_dim = model.encoder_dim
+    else:
+        encoder_embed = get_encoder_embed(params)
+        encoder = get_encoder_model(params)
 
-    model = MultiKDModel(
-        encoder_embed=encoder_embed,
-        encoder=encoder,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        use_beats=False,
-        use_ecapa=False,
-        use_whisper=params.use_whisper,
-        whisper_dim=1280,
-        speaker_input_idx=params.speaker_input_idx,
-        use_subsampled_output=True,
-    )
+        model = MultiKDModel(
+            encoder_embed=encoder_embed,
+            encoder=encoder,
+            encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+            use_beats=False,
+            use_ecapa=False,
+            use_whisper=params.use_encoder_projection,
+            whisper_dim=1280, # This is fixed as the encoder is pre-trained with whisper-large
+            speaker_input_idx=params.speaker_input_idx,
+            use_subsampled_output=True,
+        )
     
-    if params.use_bf16:
-        model.to(torch.bfloat16)
-    
-    if params.speech_encoder_path is not None:
-        logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
-        state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
-        keys = [k for k in state_dict.keys() if k.startswith("encoder") or k.startswith("encoder_embed")]
-        state_dict = {k: state_dict[k] for k in keys}
-        
-        model.load_state_dict(state_dict, strict=False)
+        if params.speech_encoder_path is not None:
+            logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
+            state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
+            keys = [k for k in state_dict.keys() if k.startswith("encoder") or k.startswith("encoder_embed")]
+            state_dict = {k: state_dict[k] for k in keys}
+            
+            model.load_state_dict(state_dict, strict=False)
     
     return model
 
 def get_model(params: AttributeDict) -> nn.Module:
+    # if use whisper encoder, cannot set use-encoder-projection to True
+    assert not (params.use_encoder_projection and params.use_whisper_encoder)
+    
+    import pdb; pdb.set_trace()
     speech_encoder = get_speech_encoder_model(params)
     llm_decoder = get_llm_decoder(params)
+    
+    if params.use_whisper_encoder:
+        speech_encoder_dim = params.encoder_dim
+    else:
+        if params.use_encoder_projection:
+            speech_encoder_dim = params.encoder_projection_dim
+        else:
+            speech_encoder_dim = max(_to_int_tuple(params.encoder_dim))
     
     model = SpeechLLMModel(
         llm=llm_decoder,
         llm_embed_dim=params.llm_embed_dim,
         vocab_size=params.vocab_size,
         speech_encoder=speech_encoder,
-        speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_whisper else params.encoder_projection_dim,
+        speech_encoder_dim=speech_encoder_dim,
         do_avg_pooling=params.do_avg_pooling,
     )
     
@@ -911,6 +935,7 @@ def compute_loss(
     text_prompt_lens = torch.tensor([0] * len(texts), device=device).long()
 
     with torch.set_grad_enabled(is_training):
+        import pdb; pdb.set_trace()
         nll_loss = model(
             x=feature,
             x_lens=feature_lens,

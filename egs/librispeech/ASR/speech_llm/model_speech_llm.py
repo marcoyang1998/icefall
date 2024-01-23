@@ -18,6 +18,8 @@ from typing import Optional, Tuple, List
 import logging
 import random
 
+import whisper
+
 import k2
 import torch
 import torch.nn as nn
@@ -98,6 +100,7 @@ class SpeechLLMModel(nn.Module):
             x_lens (torch.Tensor): The input length
 
         """
+        import pdb; pdb.set_trace()
         encoder_out, encoder_out_lens, _ = self.speech_encoder.forward_encoder(
             x, x_lens, return_middle_out=False,
         ) # (N,T,C)
@@ -189,3 +192,49 @@ class SpeechLLMModel(nn.Module):
     def generate(self, x, x_lens):
         x, x_lens = self.encode_audio(x, x_lens)
         
+class WhisperEncoder(nn.Module):
+    def __init__(
+        self,
+        whisper_version: str = "base.en",
+    ):
+        super(WhisperEncoder, self).__init__()
+        whisper_model = whisper.load_model(whisper_version)
+        
+        import pdb; pdb.set_trace()
+        self.encoder_dim = whisper_model.dims.n_audio_state
+        self.model = whisper_model.encoder
+        
+        
+    def forward_encoder(
+        self,
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        return_middle_out: bool = False,
+        layer_idx: int = -1,
+    ):
+        """
+        x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
+            the mel spectrogram of the audio
+        x_lens: torch.Tensor, shape = (batch_size)
+        layer_idx: which layer's output to use
+        """
+        x = F.gelu(self.model.conv1(x))
+        x = F.gelu(self.model.conv2(x))
+        x = x.permute(0, 2, 1)
+        x_lens = torch.floor((x_lens + 1)/2).int()
+        
+        # make the model compatible with any input length
+        mask = make_pad_mask(x_lens, max_len=1500).to(x.device)
+        pos_emb = self.model.positional_embedding.masked_fill(mask.unsqueeze(-1), 0.0)
+        x = (x + pos_emb[:,:x_lens.max(),:]).to(x.dtype)
+        
+        results = []
+        for block in self.model.blocks:
+            x = block(x)
+            results.append(x)
+        if layer_idx == -1: # use the last layer
+            x = self.model.ln_post(x) # (N,T,C)
+        else:
+            x = results[layer_idx] # zero-based index
+
+        return x, x_lens
