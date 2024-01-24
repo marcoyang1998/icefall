@@ -707,7 +707,6 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
-    import pdb; pdb.set_trace()
     if params.use_whisper_encoder:
         model = WhisperEncoder(
             whisper_version=params.whisper_version,
@@ -743,10 +742,9 @@ def get_model(params: AttributeDict) -> nn.Module:
     # if use whisper encoder, cannot set use-encoder-projection to True
     assert not (params.use_encoder_projection and params.use_whisper_encoder)
     
-    import pdb; pdb.set_trace()
     speech_encoder = get_speech_encoder_model(params)
     llm_decoder = get_llm_decoder(params)
-    
+        
     if params.use_whisper_encoder:
         speech_encoder_dim = params.encoder_dim
     else:
@@ -935,7 +933,6 @@ def compute_loss(
     text_prompt_lens = torch.tensor([0] * len(texts), device=device).long()
 
     with torch.set_grad_enabled(is_training):
-        import pdb; pdb.set_trace()
         nll_loss = model(
             x=feature,
             x_lens=feature_lens,
