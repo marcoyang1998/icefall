@@ -100,11 +100,10 @@ class SpeechLLMModel(nn.Module):
             x_lens (torch.Tensor): The input length
 
         """
-        import pdb; pdb.set_trace()
         encoder_out, encoder_out_lens, _ = self.speech_encoder.forward_encoder(
             x, x_lens, return_middle_out=False,
         ) # (N,T,C)
-        if self.speech_encoder.whisper_projection is not None:
+        if getattr(self.speech_encoder, "whisper_projection", None) is not None:
             encoder_out = self.speech_encoder.whisper_projection(encoder_out)
         
         if self.pooling_layer is not None:
@@ -200,7 +199,6 @@ class WhisperEncoder(nn.Module):
         super(WhisperEncoder, self).__init__()
         whisper_model = whisper.load_model(whisper_version)
         
-        import pdb; pdb.set_trace()
         self.encoder_dim = whisper_model.dims.n_audio_state
         self.model = whisper_model.encoder
         
@@ -213,11 +211,12 @@ class WhisperEncoder(nn.Module):
         layer_idx: int = -1,
     ):
         """
-        x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
+        x : torch.Tensor, shape = (batch_size, n_ctx, n_mels)
             the mel spectrogram of the audio
         x_lens: torch.Tensor, shape = (batch_size)
         layer_idx: which layer's output to use
         """
+        x = x.permute(0,2,1) # (N,C,T)
         x = F.gelu(self.model.conv1(x))
         x = F.gelu(self.model.conv2(x))
         x = x.permute(0, 2, 1)
@@ -237,4 +236,4 @@ class WhisperEncoder(nn.Module):
         else:
             x = results[layer_idx] # zero-based index
 
-        return x, x_lens
+        return x, x_lens, results
