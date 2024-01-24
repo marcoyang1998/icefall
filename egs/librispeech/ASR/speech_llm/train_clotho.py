@@ -37,7 +37,7 @@ from lhotse.dataset.collation import collate_custom_field
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import MultiKDModel
-from model_speech_llm import SpeechLLMModel
+from model_speech_llm import SpeechLLMModel, WhisperEncoder
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -78,7 +78,7 @@ def get_adjusted_batch_count(params: AttributeDict) -> float:
         params.batch_idx_train
         * (params.max_duration * params.world_size)
         / params.ref_duration
-    )
+    ) + 100000
 
 
 def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
@@ -314,12 +314,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If do audio tagging multi task training"
     )
+    
+    parser.add_argument(
+        "--use-whisper-encoder",
+        type=str2bool,
+        default=False,
+        help="If use the whisper encoder as the speech encoder"
+    )
 
     parser.add_argument(
         "--use-encoder-projection",
         type=str2bool,
         default=False,
-        help="If add a final projection layer at the end of the encoder"
+        help="""If add a final projection layer at the end of the encoder, 
+        "this is set to true if the audio encoder"""
     )
 
     parser.add_argument(
@@ -531,6 +539,13 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="Whether to use pure bf16 training.",
+    )
+    
+    parser.add_argument(
         "--repeat-librispeech",
         type=int,
         default=1,
@@ -619,9 +634,15 @@ def _to_int_tuple(s: str):
 
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
     # Load a pre-trained LLM decoder
-    
     config = MiConfig.from_json_file(params.mimodel_config)
     decoder = MiLMForCausalLM(config)
+    
+    if not params.use_full_fp16 and not params.use_bf16:
+        decoder.to(torch.float32)
+        logging.info("Convering the LLM parameter to fp32 format")
+    elif params.use_bf16:
+        decoder.to(torch.bfloat16)
+        logging.info("Convering the LLM parameter to bf16 format")
 
     if params.mimodel_path is not None:
         logging.info(f"Loading the state dict for MiModel from {params.mimodel_path}")
@@ -629,9 +650,6 @@ def get_llm_decoder(params: AttributeDict) -> nn.Module:
         if "model" in state_dict:
             state_dict = state_dict["model"]
         decoder.load_state_dict(state_dict)
-    if not params.use_full_fp16:
-        decoder.to(torch.float32)
-        logging.info("Convering the LLM parameter to fp32 format")
         
     if not params.freeze_embeddings:
         embedding_modules = ["decoder.embed_tokens", "decoder.output_projection"]
@@ -690,41 +708,59 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 def get_speech_encoder_model(params: AttributeDict) -> nn.Module:
+    if params.use_whisper_encoder:
+        model = WhisperEncoder(
+            whisper_version=params.whisper_version,
+        )
+        params.encoder_dim = model.encoder_dim
+    else:
+        encoder_embed = get_encoder_embed(params)
+        encoder = get_encoder_model(params)
 
-    encoder_embed = get_encoder_embed(params)
-    encoder = get_encoder_model(params)
-
-    model = MultiKDModel(
-        encoder_embed=encoder_embed,
-        encoder=encoder,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        use_beats=False,
-        use_ecapa=False,
-        use_whisper=params.use_whisper,
-        whisper_dim=1280,
-        speaker_input_idx=params.speaker_input_idx,
-        use_subsampled_output=True,
-    )
+        model = MultiKDModel(
+            encoder_embed=encoder_embed,
+            encoder=encoder,
+            encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+            use_beats=False,
+            use_ecapa=False,
+            use_whisper=params.use_encoder_projection,
+            whisper_dim=1280, # This is fixed as the encoder is pre-trained with whisper-large
+            speaker_input_idx=params.speaker_input_idx,
+            use_subsampled_output=True,
+        )
     
-    if params.speech_encoder_path is not None:
-        logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
-        state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
-        model.load_state_dict(state_dict, strict=False)
+        if params.speech_encoder_path is not None:
+            logging.info(f"Initialising the speech encoder from {params.speech_encoder_path}")
+            state_dict = torch.load(params.speech_encoder_path, map_location="cpu")["model"]
+            keys = [k for k in state_dict.keys() if k.startswith("encoder") or k.startswith("encoder_embed")]
+            state_dict = {k: state_dict[k] for k in keys}
+            
+            model.load_state_dict(state_dict, strict=False)
     
     return model
 
 def get_model(params: AttributeDict) -> nn.Module:
+    # if use whisper encoder, cannot set use-encoder-projection to True
+    assert not (params.use_encoder_projection and params.use_whisper_encoder)
+    
     speech_encoder = get_speech_encoder_model(params)
     llm_decoder = get_llm_decoder(params)
+        
+    if params.use_whisper_encoder:
+        speech_encoder_dim = params.encoder_dim
+    else:
+        if params.use_encoder_projection:
+            speech_encoder_dim = params.encoder_projection_dim
+        else:
+            speech_encoder_dim = max(_to_int_tuple(params.encoder_dim))
     
     model = SpeechLLMModel(
         llm=llm_decoder,
         llm_embed_dim=params.llm_embed_dim,
         vocab_size=params.vocab_size,
         speech_encoder=speech_encoder,
-        speech_encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
+        speech_encoder_dim=speech_encoder_dim,
         do_avg_pooling=params.do_avg_pooling,
-        pad_token=params.pad_token_id,
     )
     
     return model
@@ -875,6 +911,8 @@ def compute_loss(
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
+    if params.use_bf16:
+        feature = feature.to(torch.bfloat16)
 
     supervisions = batch["supervisions"]
     cuts = batch["supervisions"]["cut"]
@@ -885,11 +923,12 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    # texts = batch["supervisions"]["text"]
     all_caps = [c.supervisions[0].audio_captions.split(";;") for c in cuts]
     texts = [random.sample(caps, 1)[0] for caps in all_caps]
 
-    # texts = [t + params.eos_token for t in texts]
+    texts = batch["supervisions"]["text"]
+    if params.use_lowercase:
+        texts = [s.lower() for s in texts]
 
     # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
@@ -1040,7 +1079,7 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_fp16 and not params.use_bf16):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1109,12 +1148,12 @@ def train_one_epoch(
             if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
-                if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
-                    saved_bad_model = True
+                # if not saved_bad_model:
+                #     save_bad_model(suffix="-first-warning")
+                #     saved_bad_model = True
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
-                save_bad_model()
+                # save_bad_model()
                 raise RuntimeError(
                     f"grad_scale is too small, exiting: {cur_grad_scale}"
                 )
@@ -1212,8 +1251,10 @@ def run(rank, world_size, args):
 
     logging.info(params)
 
-    logging.info("About to create model")
+    logging.info("About to create model") 
     model = get_model(params)
+    if params.use_bf16:
+        model.to(torch.bfloat16)
 
     num_param = sum([p.numel() for p in model.parameters()])
     num_trainable_param = sum([p.numel() * p.requires_grad for p in model.parameters()])
@@ -1232,9 +1273,6 @@ def run(rank, world_size, args):
     )
 
     model.to(device)
-    if not params.use_full_fp16:
-        model.to(torch.float32)
-        
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
