@@ -287,6 +287,12 @@ def get_parser():
         type=str2bool,
         default=False,
     )
+    
+    parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+    )
 
     parser.add_argument(
         "--use-shallow-fusion",
