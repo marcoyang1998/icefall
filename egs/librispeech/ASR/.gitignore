@@ -2,6 +2,7 @@ log-*
 .DS_Store
 run*.sh
 multi_KD/pretrained_models
+zipformer/*.sh
 downloads
 run
 *.h5

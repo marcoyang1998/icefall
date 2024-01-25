@@ -926,9 +926,9 @@ def compute_loss(
     all_caps = [c.supervisions[0].audio_captions.split(";;") for c in cuts]
     texts = [random.sample(caps, 1)[0] for caps in all_caps]
 
-    texts = batch["supervisions"]["text"]
-    if params.use_lowercase:
-        texts = [s.lower() for s in texts]
+    # There is no need to lower case the words here because they are already lowercased
+    # if params.use_lowercase:
+    #     texts = [s.lower() for s in texts]
 
     # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
@@ -1321,7 +1321,7 @@ def run(rank, world_size, args):
 
     train_cuts = []
     train_cuts = librispeech.clotho_train_cuts().repeat(
-        10,
+        5,
         preserve_id=False,
     )
     
