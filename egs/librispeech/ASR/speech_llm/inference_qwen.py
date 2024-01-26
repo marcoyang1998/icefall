@@ -450,6 +450,8 @@ def decode_one_batch(
             "input_ids": input_ids,
             "audio_embeddings": audio_embeddings,
             "audio_lens": audio_lens,
+            "top_p": 1.0,
+            "top_k": 50,
             "max_new_tokens": 300,
         }
         
