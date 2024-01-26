@@ -292,6 +292,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If perform average pooling after the audio encoder to reduce frame rate"
     )
+    
+    parser.add_argument(
+        "--pooling-stride",
+        type=int,
+        default=2,
+    )
 
     parser.add_argument(
         "--do-sv",
@@ -634,7 +640,7 @@ def _to_int_tuple(s: str):
 def get_llm_decoder(params: AttributeDict) -> nn.Module:
     # Load a pre-trained LLM decoder
     config = MiConfig.from_json_file(params.mimodel_config)
-    decoder = MiLMForCausalLM(config)
+    decoder = MiLMForCausalLM(config).to(torch.device("cpu"))
     
     if not params.use_full_fp16 and not params.use_bf16:
         decoder.to(torch.float32)
@@ -760,6 +766,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         speech_encoder=speech_encoder,
         speech_encoder_dim=speech_encoder_dim,
         do_avg_pooling=params.do_avg_pooling,
+        pooling_stride=params.pooling_stride,
     )
     
     return model
@@ -1403,6 +1410,8 @@ def run(rank, world_size, args):
 
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
+    if params.use_whisper_encoder:
+        valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
     valid_dls = [valid_dl]
     valid_sets = ["ASR"]

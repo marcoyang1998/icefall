@@ -39,6 +39,7 @@ class SpeechLLMModel(nn.Module):
         llm_embed_dim: int = 1536,
         speech_encoder_dim: int = 2560,
         do_avg_pooling: bool = False,
+        pooling_stride: int = 2,
         pad_token: int = 0,
         llm_requires_bos_id: bool = False,
     ):
@@ -51,7 +52,7 @@ class SpeechLLMModel(nn.Module):
         self.llm = llm # a pre-trained LLM
         
         if do_avg_pooling:
-            self.pooling_layer = nn.AvgPool1d(2, stride=2)
+            self.pooling_layer = nn.AvgPool1d(pooling_stride, stride=pooling_stride)
         else:
             self.pooling_layer = None
         
@@ -197,7 +198,7 @@ class WhisperEncoder(nn.Module):
         whisper_version: str = "base.en",
     ):
         super(WhisperEncoder, self).__init__()
-        whisper_model = whisper.load_model(whisper_version)
+        whisper_model = whisper.load_model(whisper_version, torch.device("cpu"))
         
         self.encoder_dim = whisper_model.dims.n_audio_state
         self.model = whisper_model.encoder

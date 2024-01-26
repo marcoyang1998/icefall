@@ -37,7 +37,7 @@ from lhotse.dataset.collation import collate_custom_field
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import MultiKDModel
-from model_speech_llm import SpeechLLMModel
+from model_speech_llm import SpeechLLMModel, WhisperEncoder
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -280,6 +280,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If perform average pooling after the audio encoder to reduce frame rate"
+    )
+    
+    parser.add_argument(
+        "--pooling-stride",
+        type=int,
+        default=2,
     )
 
     parser.add_argument(
@@ -733,6 +739,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         speech_encoder=speech_encoder,
         speech_encoder_dim=speech_encoder_dim,
         do_avg_pooling=params.do_avg_pooling,
+        pooling_stride=params.pooling_stride,
         pad_token=params.pad_token_id,
     )
     
@@ -1398,6 +1405,7 @@ def run(rank, world_size, args):
 
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
+    valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
     valid_dls = [valid_dl]
     valid_sets = ["ASR"]
