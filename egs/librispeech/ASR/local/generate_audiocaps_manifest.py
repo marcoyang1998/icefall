@@ -90,7 +90,7 @@ def main():
             logging.info(f"Processed {i} cuts until now. {len(new_cuts)} clips are found for audiocaps.")
                 
     new_cuts = CutSet.from_cuts(new_cuts)
-    manifest_output_dir = f"data/fbank_audiocaps/cuts_audiocapts_{split}.jsonl.gz"
+    manifest_output_dir = f"data/fbank_audiocaps/cuts_audiocaps_{split}.jsonl.gz"
     
     logging.info(f"Saving the processed manifest to {manifest_output_dir}")
     new_cuts.to_jsonl(manifest_output_dir)
