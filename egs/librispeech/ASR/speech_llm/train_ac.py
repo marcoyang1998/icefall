@@ -321,6 +321,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If use the whisper encoder as the speech encoder"
     )
+    
+    group.add_argument(
+        "--whisper-version",
+        type=str,
+        default="small.en",
+        help="The version of whisper to be used"
+    )
 
     parser.add_argument(
         "--use-encoder-projection",

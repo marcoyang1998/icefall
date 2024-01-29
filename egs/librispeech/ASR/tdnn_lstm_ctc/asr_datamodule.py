@@ -258,13 +258,6 @@ class LibriSpeechAsrDataModule:
             choices=["balanced", "unbalanced"]
         )
 
-        group.add_argument(
-            "--whisper-version",
-            type=str,
-            default="small.en",
-            help="The version of whisper to be used"
-        )
-
     def train_dataloaders(
         self,
         cuts_train: CutSet,
