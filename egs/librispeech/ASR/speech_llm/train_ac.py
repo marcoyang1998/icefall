@@ -322,7 +322,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="If use the whisper encoder as the speech encoder"
     )
     
-    group.add_argument(
+    parser.add_argument(
         "--whisper-version",
         type=str,
         default="small.en",

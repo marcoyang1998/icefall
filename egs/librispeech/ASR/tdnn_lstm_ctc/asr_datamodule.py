@@ -257,6 +257,20 @@ class LibriSpeechAsrDataModule:
             default="balanced",
             choices=["balanced", "unbalanced"]
         )
+        
+        group.add_argument(
+            "--use-audiocaps",
+            type=str2bool,
+            default=False,
+            help="If using audiocaps for training AC"
+        )
+        
+        group.add_argument(
+            "--use-clotho",
+            type=str2bool,
+            default=False,
+            help="If using clotho for training AC"
+        )
 
     def train_dataloaders(
         self,
