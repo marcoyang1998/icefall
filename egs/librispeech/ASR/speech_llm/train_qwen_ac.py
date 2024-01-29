@@ -913,7 +913,6 @@ def compute_loss(
     all_caps = [c.supervisions[0].audio_captions.split(";;") for c in cuts]
     texts = [random.sample(caps, 1)[0] for caps in all_caps]
 
-    import pdb; pdb.set_trace()
     # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
@@ -1323,7 +1322,6 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args)
 
-    import pdb; pdb.set_trace()
     train_cuts = []
     sampling_weights = []
     if params.use_clotho:
@@ -1396,7 +1394,7 @@ def run(rank, world_size, args):
     if params.use_clotho:
         clotho_valid_cuts = librispeech.clotho_eval_cuts().map(add_dummy_text)
         valid_dls.append(librispeech.valid_dataloaders(clotho_valid_cuts))
-        valid_sets.append("Clotho_audiocaps")
+        valid_sets.append("AC_clotho")
     
     logging.info(f"Validation on: {valid_sets}")
 
