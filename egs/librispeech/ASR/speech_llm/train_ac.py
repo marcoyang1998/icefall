@@ -1327,10 +1327,28 @@ def run(rank, world_size, args):
     librispeech = LibriSpeechAsrDataModule(args)
 
     train_cuts = []
-    train_cuts = librispeech.clotho_train_cuts().repeat(
-        5,
-        preserve_id=False,
-    )
+    sampling_weights = []
+    if params.use_clotho:
+        clothos_cuts = librispeech.clotho_train_cuts().repeat(
+            5,
+            preserve_id=False,
+        )
+        train_cuts.append(clothos_cuts)
+        sampling_weights.append(2893 * 5)
+    
+    if params.use_audiocaps:
+        audiocaps_cuts = librispeech.audiocaps_train_cuts()
+        train_cuts.append(audiocaps_cuts)
+        sampling_weights.append(42104)
+        
+    if len(train_cuts) > 1:
+        train_cuts = CutSet.mux(
+            *train_cuts,
+            weights=sampling_weights,
+            stop_early=True,
+        )
+    else:
+        train_cuts = train_cuts[0]
     
     logging.info(train_cuts)
 
@@ -1370,12 +1388,19 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.clotho_eval_cuts()
-    valid_cuts = valid_cuts.map(add_dummy_text)
-    valid_dl = librispeech.valid_dataloaders(valid_cuts)
-    valid_dls = [valid_dl]
-    valid_sets = ["AC"]
-    logging.info(valid_cuts)
+    valid_dls = []
+    valid_sets = []
+    if params.use_audiocaps:
+        audiocaps_valid_cuts = librispeech.audiocaps_val_cuts().map(add_dummy_text)
+        valid_dls.append(librispeech.valid_dataloaders(audiocaps_valid_cuts))
+        valid_sets.append("AC_audiocaps")
+        
+    if params.use_clotho:
+        clotho_valid_cuts = librispeech.clotho_eval_cuts().map(add_dummy_text)
+        valid_dls.append(librispeech.valid_dataloaders(clotho_valid_cuts))
+        valid_sets.append("AC_clotho")
+    
+    logging.info(f"Validation on: {valid_sets}")
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
