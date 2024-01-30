@@ -251,6 +251,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "be converted to a number of chunks.  If splitting into chunks, "
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
+    
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=0,
+        help="The length of a learnable prefix after the audio soft prompt"
+    )
 
         
     parser.add_argument(
@@ -747,6 +754,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         speech_encoder_dim=speech_encoder_dim,
         do_avg_pooling=params.do_avg_pooling,
         pooling_stride=params.pooling_stride,
+        prefix_len=params.prefix_len,
         pad_token=params.pad_token_id,
     )
     
@@ -912,6 +920,7 @@ def compute_loss(
 
     all_caps = [c.supervisions[0].audio_captions.split(";;") for c in cuts]
     texts = [random.sample(caps, 1)[0] for caps in all_caps]
+    texts = [t + params.eos_token for t in texts] # add the eos token
 
     # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS

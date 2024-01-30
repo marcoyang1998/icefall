@@ -41,8 +41,24 @@ class SpeechLLMModel(nn.Module):
         do_avg_pooling: bool = False,
         pooling_stride: int = 2,
         pad_token: int = 0,
+        prefix_len: int = 0,
         llm_requires_bos_id: bool = False,
     ):
+        """A large language model with speech input
+
+        Args:
+            llm (nn.Module): The LLM model
+            speech_encoder (MultiKDModel): The audio encoder
+            vocab_size (int): The vocabulary size
+            llm_embed_dim (int, optional): The embedding dimension of the LLM. 
+            speech_encoder_dim (int, optional): The embedding dimension of the speech encoder. 
+                If the speech encoder has a projection, this should be the dimension after projection. 
+            do_avg_pooling (bool, optional): If add an average pooling layer after the speech encoder. D
+            pooling_stride (int, optional): The stride of the pooling operation. Defaults to 2.
+            pad_token (int, optional): The ID of the padding token. 
+            prefix_len (int, optional): The length of a learnable prefix after the audio. 
+            llm_requires_bos_id (bool, optional): If the LLM is trained with an BOS token. 
+        """
         super().__init__()
         self.speech_encoder = speech_encoder # a pre-trained speech encoder
         self.speech_encoder_dim = speech_encoder_dim
@@ -63,6 +79,13 @@ class SpeechLLMModel(nn.Module):
         )
 
         self.audio_sos_eos_embedding = nn.Embedding(2, llm_embed_dim)
+        
+        # A learnable prefix to capture extra information 
+        self.prefix_len = prefix_len
+        if prefix_len > 0:
+            self.learnable_prefix = nn.Embedding(prefix_len, llm_embed_dim)
+        else:
+            self.learnable_prefix = None
         
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
         
@@ -146,7 +169,7 @@ class SpeechLLMModel(nn.Module):
         # Construct the mask of tokens for loss computations, True on those positions
         mask = torch.arange(logits.shape[1]).expand(bs, -1).to(device)
         # The prediction at (x_lens -1)-th position should be the first non-speech token
-        mask = mask >= (x_lens - 1 + text_prompt_lens).unsqueeze(-1) # the positions of all target text tokens should be True
+        mask = mask >= (x_lens - 1 + text_prompt_lens + self.prefix_len).unsqueeze(-1) # the positions of all target text tokens should be True
         padding_mask = ~ make_pad_mask(total_lens - 1, max_len=total_lens.max()) # the positions on the padding token & eos token is False
         mask = torch.logical_and(mask, padding_mask)
         
@@ -163,18 +186,24 @@ class SpeechLLMModel(nn.Module):
         return loss
     
     def concat_token_embedings(self, x, x_lens, y, y_lens):
-        # Concat the audio token embeddings with the text token embeddings
+        # Concat the audio token embeddings with the text token embeddings, potentially with 
+        # the learnable prefix embeddings. The concatenated token embeddings will be
+        # used as input to the LLM
         # This also works with empty sequence of text tokens
         # The audio embeddings is pre-pended with soa_embedding and appended with eoa_embedding
+        # <soa> a a <eos> p p p t t t <eos>
         bs = x.shape[0]
         new_tensors = [] # List[Tensor], each (B,T+U,C)
         soa_embedding = self.audio_sos_eos_embedding.weight[0, None]
         eoa_embedding = self.audio_sos_eos_embedding.weight[1, None]
         for i in range(bs):
-            new_tensor = torch.cat((soa_embedding, x[i, :x_lens[i]-2], eoa_embedding, y[i]), dim=0) # <soa> audio <eoa> text prompt
+            if self.prefix_len > 0:
+                new_tensor = torch.cat((soa_embedding, x[i, :x_lens[i]-2], eoa_embedding, self.learnable_prefix.weight, y[i]), dim=0) # <soa> audio <eoa> text prompt
+            else:
+                new_tensor = torch.cat((soa_embedding, x[i, :x_lens[i]-2], eoa_embedding, y[i]), dim=0) # <soa> audio <eoa> text prompt
             new_tensors.append(new_tensor)
         new_tensors = nn.utils.rnn.pad_sequence(new_tensors, batch_first=True)
-        total_lens = x_lens + y_lens
+        total_lens = x_lens + y_lens + self.prefix_len
         
         new_tensors = new_tensors[:, :total_lens.max(), :] # truncate to the maximal length
         
