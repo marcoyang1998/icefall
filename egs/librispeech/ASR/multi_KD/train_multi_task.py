@@ -1033,14 +1033,16 @@ def compute_loss(
     feature_lens = supervisions["num_frames"].to(device)
 
     # audio tagging label
-    # events = supervisions["audio_event"] # the label indices are in CED format
-    # if params.beats_label:
-    #     audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
-    # else:
-    #     audio_tagging_label, _ = str2multihot(events)
-    # audio_tagging_label = audio_tagging_label.to(device)
-
-    audio_tagging_label = extract_beats_embeddings(cuts).squeeze(1).to(device)
+    events = [c.supervisions[0].audio_event if hasattr(c.supervisions[0], "audio_event") else "0" for c in cuts]
+    if random.random() < 0.03:
+        logging.info(f"Audio tagging label: {events}")
+    #events = supervisions["audio_event"] # the label indices are in CED format
+    if params.beats_label:
+        audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
+    else:
+        audio_tagging_label, _ = str2multihot(events)
+    audio_tagging_label = audio_tagging_label.to(device)
+    # audio_tagging_label = extract_beats_embeddings(cuts).squeeze(1).to(device)
 
     # ASR labels
     texts = batch["supervisions"]["text"]
