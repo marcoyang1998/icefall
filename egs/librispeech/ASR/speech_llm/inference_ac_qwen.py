@@ -95,6 +95,7 @@ Usage:
 
 
 import argparse
+import csv
 import logging
 import math
 import os
@@ -110,7 +111,8 @@ from lhotse.cut import Cut
 import nltk
 from asr_datamodule import LibriSpeechAsrDataModule
 
-from train_qwen_clotho import add_model_arguments, get_model, get_params
+from train_qwen_ac import add_model_arguments, get_model, get_params
+from caption_evaluation_tools.eval_metrics import evaluate_metrics
 from modelscope import AutoTokenizer
 
 from icefall import ContextGraph, LmScorer, NgramLm
@@ -463,7 +465,6 @@ def decode_one_batch(
         hyp = output[0, audio_lens:]
         hyps.append(hyp.tolist())
 
-    # import pdb; pdb.set_trace()
     hyps = [sp.decode(hyp[:-1]).split() for hyp in hyps] # remove the endoftext token
     
     return {params.decoding_method: hyps}
@@ -537,7 +538,6 @@ def decode_dataset(
             ngram_lm_scale=ngram_lm_scale,
         )
 
-        
         for name, hyps in hyps_dict.items():
             this_batch = []
             assert len(hyps) == len(audio_catpions)
@@ -566,22 +566,42 @@ def compute_bleu(results):
     
     return avg_score
 
+def write_results_to_csv(results, csv_path):
+    # the hyp csv file should have the following fields
+    # file_name, caption_predicted
+    # the ref csv file should have the following fields
+    # file_name, caption_reference_01, ..., caption_reference_05
+    
+    with open(csv_path, "w") as f:
+        w = csv.writer(f)
+        w.writerow(["file_name", "caption_predicted"])
+        for (file_id, ref, hyp) in results:
+            w.writerow([file_id, " ".join(hyp)])
+    
+    return csv_path
+
 def save_results(
     params: AttributeDict,
     test_set_name: str,
+    reference_csv: str,
     results_dict: Dict[str, List[Tuple[str, List[str], List[str]]]],
 ):
     test_set_wers = dict()
     for key, results in results_dict.items():
         recog_path = (
-            params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.txt"
+            params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.csv"
         )
         results = sorted(results)
-        store_transcripts(filename=recog_path, texts=results)
+        
+        recog_path = write_results_to_csv(results, recog_path)
         logging.info(f"The generated results are stored in {recog_path}")
         
-        score = compute_bleu(results)
-        logging.info("The bleu score over {} test sentences is {:.2f}".format(len(results), score))
+        metrics = evaluate_metrics(recog_path, reference_csv, nb_reference_captions=5)
+        for m, scores in metrics.items():
+            overall_score = scores["score"]
+            logging.info(f"Evaluating on {test_set_name}, Metirc: {m}, score: {overall_score}")
+        
+        # logging.info("Storing the evaluation result for each testing clip")
 
 @torch.no_grad()
 def main():
@@ -772,14 +792,26 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    eval_cuts = librispeech.clotho_eval_cuts()
-    eval_cuts = eval_cuts.map(add_dummy_text)
-    eval_dl = librispeech.test_dataloaders(eval_cuts)
+    test_sets = []
+    test_dls = []
+    gt_captions = []
     
-    test_sets = ["eval"]
-    test_dl = [eval_dl]
+    if params.use_clotho:
+        clotho_eval_cuts = librispeech.clotho_eval_cuts().map(add_dummy_text)
+        clotho_test_dl = librispeech.test_dataloaders(clotho_eval_cuts)
+        test_dls.append(clotho_test_dl)
+        test_sets.append("eval_clotho")
+        gt_captions.append("data/fbank_clotho/clotho_evaluation_captions.csv")
+    if params.use_audiocaps:
+        audiocaps_test_cuts = librispeech.audiocaps_test_cuts().map(add_dummy_text)
+        audiocaps_test_dl = librispeech.test_dataloaders(audiocaps_test_cuts)
+        test_dls.append(audiocaps_test_dl)
+        test_sets.append("test_audiocaps")
+        gt_captions.append("data/fbank_audiocaps/audiocaps_test_captions.csv")
+    
+    assert len(test_sets) >= 1
 
-    for test_set, test_dl in zip(test_sets, test_dl):
+    for test_set, test_dl, gt_caption in zip(test_sets, test_dls, gt_captions):
         results_dict = decode_dataset(
             dl=test_dl,
             params=params,
@@ -790,6 +822,7 @@ def main():
         save_results(
             params=params,
             test_set_name=test_set,
+            reference_csv=gt_caption,
             results_dict=results_dict,
         )
 

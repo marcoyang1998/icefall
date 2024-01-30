@@ -8,3 +8,4 @@ run
 *.h5
 *.npy
 *.gz
+test_*.py
