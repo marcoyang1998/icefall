@@ -941,6 +941,7 @@ def compute_loss(
         texts = [s.lower() for s in texts]
 
     # texts = [sp.bos_token + s for s in texts] # pre-pend a token to each string
+    # This automatically handles the eos token
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]

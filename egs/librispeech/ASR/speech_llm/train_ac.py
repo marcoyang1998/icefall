@@ -252,6 +252,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=0,
+        help="The length of a learnable prefix after the audio soft prompt"
+    )
         
     parser.add_argument(
         "--freeze-embeddings",
@@ -767,6 +773,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         speech_encoder=speech_encoder,
         speech_encoder_dim=speech_encoder_dim,
+        prefix_len=params.prefix_len,
         do_avg_pooling=params.do_avg_pooling,
     )
     
