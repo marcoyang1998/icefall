@@ -43,6 +43,8 @@ class SpeechLLMModel(nn.Module):
         pad_token: int = 0,
         prefix_len: int = 0,
         llm_requires_bos_id: bool = False,
+        multitask: bool = False,
+        task_related_tokens: int = 200,
     ):
         """A large language model with speech input
 
@@ -58,6 +60,7 @@ class SpeechLLMModel(nn.Module):
             pad_token (int, optional): The ID of the padding token. 
             prefix_len (int, optional): The length of a learnable prefix after the audio. 
             llm_requires_bos_id (bool, optional): If the LLM is trained with an BOS token. 
+            task_related_tokens: how many task-specific tokens reserved, this can be a large number so that it won't be used up
         """
         super().__init__()
         self.speech_encoder = speech_encoder # a pre-trained speech encoder
@@ -86,6 +89,12 @@ class SpeechLLMModel(nn.Module):
             self.learnable_prefix = nn.Embedding(prefix_len, llm_embed_dim)
         else:
             self.learnable_prefix = None
+        
+        if multitask:
+            self.task_prompt_embedding = nn.Embedding(task_related_tokens, llm_embed_dim)
+            self.task_token_start_id = 151850
+        else:
+            self.task_prompt_embedding = None
         
         self.criterion = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
         
@@ -159,7 +168,7 @@ class SpeechLLMModel(nn.Module):
         x, x_lens = self.encode_audio(x, x_lens) # (N,T,C)
         x_lens += 2 # we will add an <soa> and an <eoa> embedding to the audio
         
-        y_embed = self.llm.get_input_embeddings()(y) # (N,U,C)
+        y_embed = self.embed_tokens(y, text_prompt_lens=text_prompt_lens) # (N,U,C)
         concatenated_tokens, total_lens = self.concat_token_embedings(x, x_lens, y_embed, y_lens) # (N,U,C))
         
         logits = self.forward_LLM(concatenated_tokens, total_lens)
@@ -169,7 +178,7 @@ class SpeechLLMModel(nn.Module):
         # Construct the mask of tokens for loss computations, True on those positions
         mask = torch.arange(logits.shape[1]).expand(bs, -1).to(device)
         # The prediction at (x_lens -1)-th position should be the first non-speech token
-        mask = mask >= (x_lens - 1 + text_prompt_lens + self.prefix_len).unsqueeze(-1) # the positions of all target text tokens should be True
+        mask = mask >= (x_lens + self.prefix_len + text_prompt_lens -1).unsqueeze(-1) # the positions of all target text tokens should be True
         padding_mask = ~ make_pad_mask(total_lens - 1, max_len=total_lens.max()) # the positions on the padding token & eos token is False
         mask = torch.logical_and(mask, padding_mask)
         
@@ -209,8 +218,19 @@ class SpeechLLMModel(nn.Module):
         
         return new_tensors, total_lens
 
-    def embed_tokens(self, y):
-        return self.llm.get_input_embeddings()(y)
+    def embed_tokens(self, y, text_prompt_lens=0):
+        # embed the input tokens to the large language model
+        # The embeddings of customized text prompt will be take from another embedding matrix
+        # For simplicity, we assume that all the text prompt shares the same length
+        assert torch.all(text_prompt_lens == text_prompt_lens[0])
+        
+        if self.task_prompt_embedding is not None:
+            text_prompt_embeddings = self.task_prompt_embedding(y[:, :text_prompt_lens[0]] - self.task_token_start_id)
+            text_embeddings = self.llm.get_input_embeddings()(y[:, text_prompt_lens[0]:])
+        
+            return torch.cat((text_prompt_embeddings, text_embeddings), dim=1)
+        else:
+            return self.llm.get_input_embeddings()(y)
 
     def encode_audio(self, x, x_lens):
         x, x_lens = self.forward_speech_encoder(x, x_lens) # (N,T,C)
