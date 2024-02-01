@@ -569,35 +569,35 @@ class LibriSpeechAsrDataModule:
     def clotho_train_cuts(self) -> CutSet:
         logging.info("About to get clotho training cuts")
         return load_manifest_lazy(
-            "data/fbank_clotho/cuts_clotho_development.jsonl.gz"
+            self.args.manifest_dir / "cuts_clotho_development.jsonl.gz"
         )
 
     @lru_cache()
     def clotho_eval_cuts(self) -> CutSet:
         logging.info("About to get clotho evaluation cuts")
         return load_manifest_lazy(
-            "data/fbank_clotho/cuts_clotho_evaluation.jsonl.gz"
+            self.args.manifest_dir / "cuts_clotho_evaluation.jsonl.gz"
         )
         
     @lru_cache()
     def audiocaps_train_cuts(self) -> CutSet:
         logging.info("About to get audiocaps training cuts")
         return load_manifest_lazy(
-            "data/fbank_audiocaps/cuts_audiocaps_train.jsonl.gz"
+            self.args.manifest_dir / "cuts_audiocaps_train.jsonl.gz"
         )
         
     @lru_cache()
     def audiocaps_val_cuts(self) -> CutSet:
         logging.info("About to get audiocaps valid cuts")
         return load_manifest_lazy(
-            "data/fbank_audiocaps/cuts_audiocaps_val.jsonl.gz"
+            self.args.manifest_dir / "cuts_audiocaps_val.jsonl.gz"
         )
         
     @lru_cache()
     def audiocaps_test_cuts(self) -> CutSet:
         logging.info("About to get audiocaps test cuts")
         return load_manifest_lazy(
-            "data/fbank_audiocaps/cuts_audiocaps_test.jsonl.gz"
+            self.args.manifest_dir / "cuts_audiocaps_test.jsonl.gz"
         )
 
     @lru_cache()
