@@ -129,7 +129,6 @@ def main():
             storage_type=LilcomChunkyWriter,
         )
 
-    import pdb; pdb.set_trace()
     manifest_output_dir = fbank_dir + "/" + f"cuts_clotho_{split}.jsonl.gz"
 
     logging.info(f"Storing the manifest to {manifest_output_dir}")
