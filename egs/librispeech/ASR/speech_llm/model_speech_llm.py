@@ -195,6 +195,8 @@ class SpeechLLMModel(nn.Module):
         return loss
     
     def concat_token_embedings(self, x, x_lens, y, y_lens):
+        # This builds the prefix for the LLM input, including audio embeddings,
+        # learnable prefix, and task specific prompt
         # Concat the audio token embeddings with the text token embeddings, potentially with 
         # the learnable prefix embeddings. The concatenated token embeddings will be
         # used as input to the LLM
@@ -231,6 +233,10 @@ class SpeechLLMModel(nn.Module):
             return torch.cat((text_prompt_embeddings, text_embeddings), dim=1)
         else:
             return self.llm.get_input_embeddings()(y)
+
+    def embed_text_prompt(self, text_prompt):
+        # embed the text prompt tokens
+        return self.task_prompt_embedding(text_prompt - self.task_token_start_id)
 
     def encode_audio(self, x, x_lens):
         x, x_lens = self.forward_speech_encoder(x, x_lens) # (N,T,C)

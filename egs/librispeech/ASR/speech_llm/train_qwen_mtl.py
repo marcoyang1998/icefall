@@ -92,7 +92,21 @@ def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
             module.batch_count = batch_count
         if hasattr(module, "name"):
             module.name = name
+
+def get_tokenizer(params: AttributeDict):
+    # sp = AutoTokenizer.from_pretrained("/root/.cache/modelscope/hub/qwen/Qwen-1_8B",revision='master', trust_remote_code=True)
+    sp = QWenTokenizer.from_pretrained("/root/.cache/modelscope/hub/qwen/Qwen-1_8B",revision='master', trust_remote_code=True)
+    # deal with special tokens
+    assert sp.decode(151643) == "<|endoftext|>"
+    sp.eos_token = "<|endoftext|>"
+    sp.eos_token_id = 151643
     
+    assert sp.decode(151646) == "<|extra_0|>"
+    sp.pad_token = "<|extra_0|>" # needed for batch padding
+    sp.pad_token_id = 151646
+    
+    return sp
+
 def get_task_prompt(
     task_name: str = "ASR",
     input_language: str = "en",
@@ -582,6 +596,13 @@ def get_parser():
         default=1,
         help="How many times to repeat LS",
     )
+    
+    parser.add_argument(
+        "--repeat-AC",
+        type=int,
+        default=3,
+        help="How many times to repeat audio caption data",
+    )
 
     parser.add_argument(
         "--use-lowercase",
@@ -945,6 +966,9 @@ def compute_loss(
     cuts = batch["supervisions"]["cut"]
     cut_ids = [c.id for c in cuts]
     task_names = [c.task_name for c in cuts]
+    if random.random() < 0.02:
+        logging.info(f"Task names: {task_names}")
+        
     task_prompts = [
         get_task_prompt(
             task_name=task_name,
@@ -956,7 +980,6 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    import pdb; pdb.set_trace()
     texts = batch["supervisions"]["text"]
     if params.use_lowercase:
         texts = [s.lower() for s in texts]
@@ -966,6 +989,8 @@ def compute_loss(
     encoded_texts = sp.batch_encode_plus(texts, return_tensors="pt", return_length=True, padding=True).to(device) # Has EOS
     y = encoded_texts["input_ids"]
     y_lens = encoded_texts["length"]
+    
+    # This should be changed if we change the task prompt
     text_prompt_lens = torch.tensor([3] * len(texts), device=device).long() # no bos token is needed, thus 0
 
     with torch.set_grad_enabled(is_training):
@@ -1281,17 +1306,8 @@ def run(rank, world_size, args):
     if torch.cuda.is_available():
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
-
-    # sp = AutoTokenizer.from_pretrained("/root/.cache/modelscope/hub/qwen/Qwen-1_8B",revision='master', trust_remote_code=True)
-    sp = QWenTokenizer.from_pretrained("/root/.cache/modelscope/hub/qwen/Qwen-1_8B",revision='master', trust_remote_code=True)
-    # deal with special tokens
-    assert sp.decode(151643) == "<|endoftext|>"
-    sp.eos_token = "<|endoftext|>"
-    sp.eos_token_id = 151643
     
-    assert sp.decode(151646) == "<|extra_0|>"
-    sp.pad_token = "<|extra_0|>" # needed for batch padding
-    sp.pad_token_id = 151646
+    sp = get_tokenizer(params)
     
     params.eos_token = sp.eos_token
     params.vocab_size = sp.vocab_size
@@ -1399,18 +1415,23 @@ def run(rank, world_size, args):
 
     # AC data
     if params.use_clotho:
-        clotho_cuts = librispeech.clotho_train_cuts()
+        clotho_cuts = librispeech.clotho_train_cuts().repeat(
+            params.repeat_AC,
+            preserve_id=False,
+        )
         clotho_cuts = clotho_cuts.map(partial(_set_task_name, "AC"))
         train_cuts.append(clotho_cuts)
-        sampling_weights.append(14465)
+        sampling_weights.append(14465 * params.repeat_AC)
     
     if params.use_audiocaps:
-        audiocaps_cuts = librispeech.audiocaps_train_cuts()
+        audiocaps_cuts = librispeech.audiocaps_train_cuts().repeat(
+            params.repeat_AC,
+            preserve_id=False,
+        )
         audiocaps_cuts =audiocaps_cuts.map(partial(_set_task_name, "AC"))
         train_cuts.append(audiocaps_cuts)
-        sampling_weights.append(42104)
+        sampling_weights.append(42104 * params.repeat_AC)
 
-    import pdb; pdb.set_trace()    
     if len(train_cuts) > 1:
         logging.info(f"Using mux to combine {train_cuts}")
         logging.info(f"Using weights: {sampling_weights}")
@@ -1467,6 +1488,7 @@ def run(rank, world_size, args):
     # For ASR
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
+    valid_cuts = valid_cuts.map(partial(_set_task_name, "ASR"))
     valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
     
@@ -1476,14 +1498,14 @@ def run(rank, world_size, args):
     # For AC
     if params.use_clotho:
         clotho_valid_cuts = librispeech.clotho_eval_cuts()
-        clotho_valid_cuts = clotho_valid_cuts.map(add_dummy_text)
+        clotho_valid_cuts = clotho_valid_cuts.map(partial(_set_task_name, "AC")).map(add_dummy_text)
         clotho_valid_dl = librispeech.valid_dataloaders(clotho_valid_cuts)
         valid_dls.append(clotho_valid_dl)
         valid_sets.append("AC_clotho")
     
     if params.use_audiocaps:
         audiocaps_valid_cuts = librispeech.audiocaps_val_cuts()
-        audiocaps_valid_cuts = audiocaps_valid_cuts.map(add_dummy_text)
+        audiocaps_valid_cuts = audiocaps_valid_cuts.map(partial(_set_task_name, "AC")).map(add_dummy_text)
         audiocaps_valid_dl = librispeech.valid_dataloaders(audiocaps_valid_cuts)
         valid_dls.append(audiocaps_valid_dl)
         valid_sets.append("AC_audiocaps")
