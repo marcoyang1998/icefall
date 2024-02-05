@@ -259,6 +259,12 @@ class LibriSpeechAsrDataModule:
         )
         
         group.add_argument(
+            "--use-librispeech",
+            type=str2bool,
+            default=True,
+        )
+        
+        group.add_argument(
             "--use-audiocaps",
             type=str2bool,
             default=False,
