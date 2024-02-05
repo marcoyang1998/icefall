@@ -127,7 +127,11 @@ def get_task_prompt(
         "fr": "<|fr|>",
         "ja": "<|ja|>",
         "it": "<|it|>",
+        "unk": "<|unknown|>", # unknown languages
     }
+    
+    if task_name == "AC":
+        input_language = "unk"
     
     return language_tags[input_language] + task_tags[task_name] + language_tags[output_language]
 
@@ -966,14 +970,16 @@ def compute_loss(
     cuts = batch["supervisions"]["cut"]
     cut_ids = [c.id for c in cuts]
     task_names = [c.task_name for c in cuts]
-    if random.random() < 0.02:
-        logging.info(f"Task names: {task_names}")
+    input_language = ["en" if t =="ASR" else "unk" for t in task_names]
         
     task_prompts = [
         get_task_prompt(
             task_name=task_name,
         ) for task_name in task_names
     ]
+    if is_training and random.random() < 0.02:
+        logging.info(f"Task prompt: {task_prompts}")
+        logging.info(f"Cut IDs: {cut_ids}")
 
     feature_lens = supervisions["num_frames"].to(device)
 
@@ -1395,23 +1401,26 @@ def run(rank, world_size, args):
         c.task_name = task_name
         return c
     
-    # ASR data
-    if not params.full_libri: 
-        librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
-            times=params.repeat_librispeech,
-            preserve_id=False,
-        )
-        librispeech_cuts_len = 28539 * 3  # with speed purturb
-    else:
-        librispeech_cuts = librispeech.train_all_shuf_cuts().repeat(
-            times=params.repeat_librispeech,
-            preserve_id=False,
-        )
-        librispeech_cuts_len = 281239 * 3 # with speed purturb
+    assert params.use_librispeech or params.use_clotho or params.use_audiocaps
     
-    librispeech_cuts = librispeech_cuts.map(partial(_set_task_name, "ASR"))
-    train_cuts.append(librispeech_cuts)
-    sampling_weights.append(librispeech_cuts_len)
+    # ASR data
+    if params.use_librispeech:
+        if not params.full_libri: 
+            librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
+                times=params.repeat_librispeech,
+                preserve_id=False,
+            )
+            librispeech_cuts_len = 28539 * 3  # with speed purturb
+        else:
+            librispeech_cuts = librispeech.train_all_shuf_cuts().repeat(
+                times=params.repeat_librispeech,
+                preserve_id=False,
+            )
+            librispeech_cuts_len = 281239 * 3 # with speed purturb
+        
+        librispeech_cuts = librispeech_cuts.map(partial(_set_task_name, "ASR"))
+        train_cuts.append(librispeech_cuts)
+        sampling_weights.append(librispeech_cuts_len)
 
     # AC data
     if params.use_clotho:
@@ -1486,20 +1495,22 @@ def run(rank, world_size, args):
     valid_sets = []
 
     # For ASR
-    valid_cuts = librispeech.dev_clean_cuts()
-    valid_cuts += librispeech.dev_other_cuts()
-    valid_cuts = valid_cuts.map(partial(_set_task_name, "ASR"))
-    valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
-    valid_dl = librispeech.valid_dataloaders(valid_cuts)
-    
-    valid_dls.append(valid_dl)
-    valid_sets.append("ASR")
+    if params.use_librispeech:
+        valid_cuts = librispeech.dev_clean_cuts()
+        valid_cuts += librispeech.dev_other_cuts()
+        valid_cuts = valid_cuts.map(partial(_set_task_name, "ASR"))
+        valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
+        valid_dl = librispeech.valid_dataloaders(valid_cuts)
+        
+        valid_dls.append(valid_dl)
+        valid_sets.append("ASR")
     
     # For AC
     if params.use_clotho:
         clotho_valid_cuts = librispeech.clotho_eval_cuts()
         clotho_valid_cuts = clotho_valid_cuts.map(partial(_set_task_name, "AC")).map(add_dummy_text)
         clotho_valid_dl = librispeech.valid_dataloaders(clotho_valid_cuts)
+        
         valid_dls.append(clotho_valid_dl)
         valid_sets.append("AC_clotho")
     
@@ -1507,11 +1518,11 @@ def run(rank, world_size, args):
         audiocaps_valid_cuts = librispeech.audiocaps_val_cuts()
         audiocaps_valid_cuts = audiocaps_valid_cuts.map(partial(_set_task_name, "AC")).map(add_dummy_text)
         audiocaps_valid_dl = librispeech.valid_dataloaders(audiocaps_valid_cuts)
+        
         valid_dls.append(audiocaps_valid_dl)
         valid_sets.append("AC_audiocaps")
     
     logging.info(valid_sets)
-    logging.info(valid_cuts)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:

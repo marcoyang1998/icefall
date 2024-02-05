@@ -47,6 +47,7 @@ AUDIO_TOKENS = (
     '<|audiocaption|>',
     # Language Tag
     *[f"<|{lang}|>" for lang in LANGUAGES.keys()],
+    "<|unknown|>",  # unknown language
 )
 SPECIAL_TOKENS = tuple(
     enumerate(
