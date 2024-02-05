@@ -40,6 +40,7 @@ class AsrModel(nn.Module):
         decoder_dim: int = 512,
         durations: List[int] = [0,1,2,3,4],
         tdt_sigma: float = 0.05,
+        tdt_omega: float = 0.0,
         vocab_size: int = 500,
         use_transducer: bool = True,
         use_ctc: bool = False,
@@ -103,6 +104,7 @@ class AsrModel(nn.Module):
                 reduction="sum",
                 durations=durations,
                 sigma=tdt_sigma,
+                omega=tdt_omega,
             )
         else:
             assert decoder is None

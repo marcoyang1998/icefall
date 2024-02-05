@@ -367,6 +367,14 @@ def get_parser():
         "--tdt-sigma",
         type=float,
         default=0.05,
+        help=""
+    )
+    
+    parser.add_argument(
+        "--tdt-omega",
+        type=float,
+        default=0.0,
+        help="The prob of sampling conventional RNNT loss"
     )
 
     parser.add_argument(
@@ -644,6 +652,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         durations =durations,
         tdt_sigma=params.tdt_sigma,
+        tdt_omega=params.tdt_omega,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
     )
