@@ -113,7 +113,6 @@ from asr_datamodule import LibriSpeechAsrDataModule
 
 from train_qwen_mtl import add_model_arguments, get_model, get_params, get_task_prompt, get_tokenizer
 from caption_evaluation_tools.eval_metrics import evaluate_metrics
-from modelscope import AutoTokenizer
 
 from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (
@@ -433,27 +432,29 @@ def decode_one_batch(
     hyps = []
 
     for i in range(batch_size):
-        prompt = torch.full((1, 0), 0).to(device)
+        task_prompt = [get_task_prompt(task_name="AC")]
+        # prompt = torch.full((1, 0), 0).to(device) # qwen tokenizer does not have a bos token
+        prompt = sp.batch_encode_plus(task_prompt, return_tensors="pt", padding=True, return_length=True).to(device)    
         
-        # initial empty prefix
-        prompt_lens = torch.full((1,), 0).int().to(device)
-        prompt_embeddings = model.embed_tokens(prompt)
+        prompt_tokens = prompt["input_ids"]
+        prompt_lens = prompt["length"]
+        prompt_embeddings = model.embed_text_prompt(prompt_tokens)
 
         # the audio with <soa> and <eoa> embedding
-        audio_embeddings, audio_lens = model.concat_token_embedings(
+        prefix_embeddings, prefix_lens = model.concat_token_embedings(
             x=encoder_out[i, None],
             x_lens=encoder_out_lens[i, None],
             y=prompt_embeddings,
             y_lens=prompt_lens,
         )
         
-        input_ids = torch.tensor([[0] * audio_lens.item()]).long().to(device)
+        input_ids = torch.tensor([[0] * prefix_lens.item()]).long().to(device)
 
         generation_kwargs = {
             "do_sample": params.do_sample,
             "input_ids": input_ids,
-            "audio_embeddings": audio_embeddings,
-            "audio_lens": audio_lens,
+            "audio_embeddings": prefix_embeddings,
+            "audio_lens": prefix_lens,
             "max_new_tokens": 24,
             "pad_token_id": sp.pad_token_id,
             "eos_token_id": sp.eos_token_id,
@@ -462,7 +463,7 @@ def decode_one_batch(
         }
         
         output = model.llm.generate(**generation_kwargs)
-        hyp = output[0, audio_lens:]
+        hyp = output[0, prefix_lens:]
         hyps.append(hyp.tolist())
 
     hyps = [sp.decode(hyp[:-1]).split() for hyp in hyps] # remove the endoftext token
@@ -522,6 +523,7 @@ def decode_dataset(
     for batch_idx, batch in enumerate(dl):
         cuts = batch["supervisions"]["cut"]
         
+        # import pdb; pdb.set_trace()
         cut_ids = [cut.id for cut in cuts]
         audio_catpions = [c.supervisions[0].audio_captions.split(";;") for c in cuts]
 

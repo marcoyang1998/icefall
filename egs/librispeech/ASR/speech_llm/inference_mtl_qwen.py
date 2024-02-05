@@ -95,6 +95,7 @@ Usage:
 
 
 import argparse
+import csv
 import logging
 import math
 import os
@@ -106,9 +107,11 @@ import k2
 import sentencepiece as spm
 import torch
 import torch.nn as nn
+from lhotse.cut import Cut
 from asr_datamodule import LibriSpeechAsrDataModule
 
 from train_qwen_mtl import add_model_arguments, get_model, get_params, get_task_prompt, get_tokenizer
+from caption_evaluation_tools.eval_metrics import evaluate_metrics
 
 from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (
@@ -193,6 +196,14 @@ def get_parser():
         type=Path,
         default="data/lang_bpe_500",
         help="The lang dir containing word table and LG graph",
+    )
+    
+    parser.add_argument(
+        "--task-type",
+        type=str,
+        default="ASR",
+        required=True,
+        choices=["ASR","AC"]
     )
 
     parser.add_argument(
@@ -371,6 +382,7 @@ def decode_one_batch(
     LM: Optional[LmScorer] = None,
     ngram_lm=None,
     ngram_lm_scale: float = 0.0,
+    task_type: str = "ASR",
 ) -> Dict[str, List[List[str]]]:
     """Decode one batch and return the result in a dict. The dict has the
     following format:
@@ -428,8 +440,8 @@ def decode_one_batch(
     hyps = []
 
     for i in range(batch_size):
-        task_prompt = [get_task_prompt(task_name="ASR")]
-        # prompt = torch.full((1, 0), 0).to(device) # qwen tokenizer does not have a bos token
+        task_prompt = [get_task_prompt(task_name=task_type)]
+        
         prompt = sp.batch_encode_plus(task_prompt, return_tensors="pt", padding=True, return_length=True).to(device)    
         
         prompt_tokens = prompt["input_ids"]
@@ -451,6 +463,8 @@ def decode_one_batch(
             "input_ids": input_ids,
             "audio_embeddings": prefix_embeddings,
             "audio_lens": prefix_lens,
+            "pad_token_id": sp.pad_token_id,
+            "eos_token_id": sp.eos_token_id,
             "top_p": 1.0,
             "top_k": 50,
             "max_new_tokens": 300,
@@ -460,7 +474,10 @@ def decode_one_batch(
         hyp = output[0, prefix_lens:]
         hyps.append(hyp.tolist())
 
-    hyps = [sp.decode(hyp[:-1]).upper().split() for hyp in hyps] # remove the endoftext token
+    if task_type == "ASR":
+        hyps = [sp.decode(hyp[:-1]).upper().split() for hyp in hyps] # remove the endoftext token
+    elif task_type == "AC":
+        hyps = [sp.decode(hyp[:-1]).split() for hyp in hyps] # remove the endoftext token
     
     return {params.decoding_method: hyps}
 
@@ -470,6 +487,7 @@ def decode_dataset(
     params: AttributeDict,
     model: nn.Module,
     sp: spm.SentencePieceProcessor,
+    task_type: str,
     word_table: Optional[k2.SymbolTable] = None,
     decoding_graph: Optional[k2.Fsa] = None,
     context_graph: Optional[ContextGraph] = None,
@@ -516,7 +534,11 @@ def decode_dataset(
     results = defaultdict(list)
     for batch_idx, batch in enumerate(dl):
         texts = batch["supervisions"]["text"]
+        cuts = batch["supervisions"]["cut"]
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
+        
+        if task_type == "AC":
+            texts = [c.supervisions[0].audio_captions.split(";;") for c in cuts]
 
         hyps_dict = decode_one_batch(
             params=params,
@@ -529,13 +551,17 @@ def decode_dataset(
             LM=LM,
             ngram_lm=ngram_lm,
             ngram_lm_scale=ngram_lm_scale,
+            task_type=task_type,
         )
 
         for name, hyps in hyps_dict.items():
             this_batch = []
             assert len(hyps) == len(texts)
             for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
-                ref_words = ref_text.split()
+                if task_type == "ASR":
+                    ref_words = ref_text.split()
+                elif task_type == "AC":
+                    ref_words = [t.split() for t in ref_text]
                 this_batch.append((cut_id, ref_words, hyp_words))
 
             results[name].extend(this_batch)
@@ -547,6 +573,20 @@ def decode_dataset(
 
             logging.info(f"batch {batch_str}, cuts processed until now is {num_cuts}")
     return results
+
+def write_results_to_csv(results, csv_path):
+    # the hyp csv file should have the following fields
+    # file_name, caption_predicted
+    # the ref csv file should have the following fields
+    # file_name, caption_reference_01, ..., caption_reference_05
+    
+    with open(csv_path, "w") as f:
+        w = csv.writer(f)
+        w.writerow(["file_name", "caption_predicted"])
+        for (file_id, ref, hyp) in results:
+            w.writerow([file_id, " ".join(hyp)])
+    
+    return csv_path
 
 
 def save_results(
@@ -593,6 +633,29 @@ def save_results(
     logging.info(s)
 
 
+
+def evaluate_captions(
+    params: AttributeDict,
+    test_set_name: str,
+    reference_csv: str,
+    results_dict: Dict[str, List[Tuple[str, List[str], List[str]]]],
+):
+    for key, results in results_dict.items():
+        recog_path = (
+            params.res_dir / f"recogs-{test_set_name}-{key}-{params.suffix}.csv"
+        )
+        results = sorted(results)
+        
+        recog_path = write_results_to_csv(results, recog_path)
+        logging.info(f"The generated results are stored in {recog_path}")
+        
+        metrics = evaluate_metrics(recog_path, reference_csv, nb_reference_captions=5)
+        for m, scores in metrics.items():
+            overall_score = scores["score"]
+            logging.info(f"Evaluating on {test_set_name}, Metirc: {m}, score: {overall_score}")
+
+
+
 @torch.no_grad()
 def main():
     parser = get_parser()
@@ -608,7 +671,7 @@ def main():
         "greedy_search",
         "sample"
     )
-    params.res_dir = params.exp_dir / params.decoding_method
+    params.res_dir = params.exp_dir / (params.decoding_method + params.task_type)
     
     if params.decoding_method == "greedy_search":
         params.do_sample = False
@@ -764,33 +827,68 @@ def main():
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
+    
+    def add_dummy_text(c: Cut):
+        if c.supervisions[0].text is None:
+            c.supervisions[0].text = "Dummy text added as a place holder."
+        return c
 
     # we need cut ids to display recognition results.
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    test_clean_cuts = librispeech.test_clean_cuts().subset(first=200)
-    test_other_cuts = librispeech.test_other_cuts().subset(first=200)
+    if params.task_type == "ASR":
+        test_clean_cuts = librispeech.test_clean_cuts().subset(first=200)
+        test_other_cuts = librispeech.test_other_cuts().subset(first=200)
 
-    test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
-    test_other_dl = librispeech.test_dataloaders(test_other_cuts)
+        test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
+        test_other_dl = librispeech.test_dataloaders(test_other_cuts)
 
-    test_sets = ["test-clean", "test-other"]
-    test_dl = [test_clean_dl, test_other_dl]
+        test_sets = ["test-clean", "test-other"]
+        test_dls = [test_clean_dl, test_other_dl]
+        gt_captions = ["None"] * len(test_dls)
+    else:
+        test_sets = []
+        test_dls = []
+        gt_captions = []
+        
+        if params.use_clotho:
+            clotho_eval_cuts = librispeech.clotho_eval_cuts().map(add_dummy_text)
+            clotho_test_dl = librispeech.test_dataloaders(clotho_eval_cuts)
+            test_dls.append(clotho_test_dl)
+            test_sets.append("eval_clotho")
+            gt_captions.append("data/fbank_clotho/clotho_evaluation_captions.csv")
+        if params.use_audiocaps:
+            audiocaps_test_cuts = librispeech.audiocaps_test_cuts().map(add_dummy_text)
+            audiocaps_test_dl = librispeech.test_dataloaders(audiocaps_test_cuts)
+            test_dls.append(audiocaps_test_dl)
+            test_sets.append("test_audiocaps")
+            gt_captions.append("data/fbank_audiocaps/audiocaps_test_captions.csv")
 
-    for test_set, test_dl in zip(test_sets, test_dl):
+    for test_set, test_dl, gt_caption in zip(test_sets, test_dls, gt_captions):
         results_dict = decode_dataset(
             dl=test_dl,
             params=params,
             model=model,
             sp=sp,
+            task_type=params.task_type,
         )
-
-        save_results(
-            params=params,
-            test_set_name=test_set,
-            results_dict=results_dict,
-        )
+        
+        if params.task_type == "ASR":
+            save_results(
+                params=params,
+                test_set_name=test_set,
+                results_dict=results_dict,
+            )
+        elif params.task_type == "AC":
+            evaluate_captions(
+                params=params,
+                test_set_name=test_set,
+                reference_csv=gt_caption,
+                results_dict=results_dict,
+            )
+        else:
+            raise ValueError(f"Unseen task type: {params.task_type}")
 
     logging.info("Done!")
 
