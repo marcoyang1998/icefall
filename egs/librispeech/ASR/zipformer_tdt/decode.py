@@ -107,20 +107,6 @@ import sentencepiece as spm
 import torch
 import torch.nn as nn
 from asr_datamodule import LibriSpeechAsrDataModule
-from beam_search import (
-    beam_search,
-    fast_beam_search_nbest,
-    fast_beam_search_nbest_LG,
-    fast_beam_search_nbest_oracle,
-    fast_beam_search_one_best,
-    greedy_search,
-    greedy_search_batch,
-    modified_beam_search,
-    modified_beam_search_lm_rescore,
-    modified_beam_search_lm_rescore_LODR,
-    modified_beam_search_lm_shallow_fusion,
-    modified_beam_search_LODR,
-)
 from train import add_model_arguments, get_model, get_params
 
 from icefall import ContextGraph, LmScorer, NgramLm
@@ -214,13 +200,6 @@ def get_parser():
         default="greedy_search",
         help="""Possible values are:
           - greedy_search
-          - beam_search
-          - modified_beam_search
-          - modified_beam_search_LODR
-          - fast_beam_search
-          - fast_beam_search_nbest
-          - fast_beam_search_nbest_oracle
-          - fast_beam_search_nbest_LG
         If you use fast_beam_search_nbest_LG, you have to specify
         `--lang-dir`, which should contain `LG.pt`.
         """,
@@ -374,6 +353,75 @@ def get_parser():
 
     return parser
 
+def tdt_greedy_search(
+    model: nn.Module,
+    encoder_out: torch.Tensor,
+    max_sym_per_frame: int = 1,
+):
+    assert encoder_out.ndim == 3
+
+    # support only batch_size == 1 for now
+    assert encoder_out.size(0) == 1, encoder_out.size(0)
+    
+    blank_id = model.decoder.blank_id
+    context_size = model.decoder.context_size
+    n_durations = model.n_durations
+    vocab_size = model.vocab_size
+    unk_id = getattr(model, "unk_id", blank_id)
+
+    device = next(model.parameters()).device
+
+    decoder_input = torch.tensor(
+        [-1] * (context_size - 1) + [blank_id], device=device, dtype=torch.int64
+    ).reshape(1, context_size)
+    
+    decoder_out = model.decoder(decoder_input, need_pad=False)
+    decoder_out = model.joiner.decoder_proj(decoder_out)
+
+    encoder_out = model.joiner.encoder_proj(encoder_out)
+
+    T = encoder_out.size(1)
+    t = 0
+    hyp = [blank_id] * context_size
+    num_sym_cur_frame = 0
+    
+    while t < T:
+        current_encoder_out = encoder_out[:, t:t+1, :].unsqueeze(2)
+        logits = model.joiner(
+            current_encoder_out, decoder_out.unsqueeze(1), project_input=False
+        )
+        # logits is (1, 1, 1, vocab_size + n_durations)
+        
+        token_idx = torch.argmax(logits[:, :, :, :vocab_size])
+        duration_idx = torch.argmax(logits[:, :, :, vocab_size:])
+        
+        if token_idx != blank_id:
+            hyp.append(token_idx.item())
+            decoder_input = torch.tensor([hyp[-context_size:]], device=device).reshape(
+                1, context_size
+            )
+
+            decoder_out = model.decoder(decoder_input, need_pad=False)
+            decoder_out = model.joiner.decoder_proj(decoder_out)
+            
+            if duration_idx == 0:
+                num_sym_cur_frame += 1
+            else:
+                num_sym_cur_frame = 0
+                
+            # check if exceed the max sym per frame
+            if num_sym_cur_frame >= max_sym_per_frame:
+                t += max(1, duration_idx) # force to advance at least to the next frame
+                num_sym_cur_frame = 0
+                continue
+            
+            t += duration_idx
+        else:
+            t += max(1, duration_idx) # we don't allow blank duration of 0
+        
+    hyp = hyp[context_size:]
+    return hyp
+        
 
 def decode_one_batch(
     params: AttributeDict,
@@ -448,148 +496,22 @@ def decode_one_batch(
 
     hyps = []
 
-    if params.decoding_method == "fast_beam_search":
-        hyp_tokens = fast_beam_search_one_best(
-            model=model,
-            decoding_graph=decoding_graph,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam,
-            max_contexts=params.max_contexts,
-            max_states=params.max_states,
-        )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
-    elif params.decoding_method == "fast_beam_search_nbest_LG":
-        hyp_tokens = fast_beam_search_nbest_LG(
-            model=model,
-            decoding_graph=decoding_graph,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam,
-            max_contexts=params.max_contexts,
-            max_states=params.max_states,
-            num_paths=params.num_paths,
-            nbest_scale=params.nbest_scale,
-        )
-        for hyp in hyp_tokens:
-            hyps.append([word_table[i] for i in hyp])
-    elif params.decoding_method == "fast_beam_search_nbest":
-        hyp_tokens = fast_beam_search_nbest(
-            model=model,
-            decoding_graph=decoding_graph,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam,
-            max_contexts=params.max_contexts,
-            max_states=params.max_states,
-            num_paths=params.num_paths,
-            nbest_scale=params.nbest_scale,
-        )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
-    elif params.decoding_method == "fast_beam_search_nbest_oracle":
-        hyp_tokens = fast_beam_search_nbest_oracle(
-            model=model,
-            decoding_graph=decoding_graph,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam,
-            max_contexts=params.max_contexts,
-            max_states=params.max_states,
-            num_paths=params.num_paths,
-            ref_texts=sp.encode(supervisions["text"]),
-            nbest_scale=params.nbest_scale,
-        )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
-    elif params.decoding_method == "greedy_search" and params.max_sym_per_frame == 1:
-        hyp_tokens = greedy_search_batch(
-            model=model,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-        )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
-    elif params.decoding_method == "modified_beam_search":
-        hyp_tokens = modified_beam_search(
-            model=model,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam_size,
-            context_graph=context_graph,
-        )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
-    elif params.decoding_method == "modified_beam_search_lm_shallow_fusion":
-        hyp_tokens = modified_beam_search_lm_shallow_fusion(
-            model=model,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam_size,
-            LM=LM,
-        )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
-    elif params.decoding_method == "modified_beam_search_LODR":
-        hyp_tokens = modified_beam_search_LODR(
-            model=model,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam_size,
-            LODR_lm=ngram_lm,
-            LODR_lm_scale=ngram_lm_scale,
-            LM=LM,
-            context_graph=context_graph,
-        )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
-    elif params.decoding_method == "modified_beam_search_lm_rescore":
-        lm_scale_list = [0.01 * i for i in range(10, 50)]
-        ans_dict = modified_beam_search_lm_rescore(
-            model=model,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam_size,
-            LM=LM,
-            lm_scale_list=lm_scale_list,
-        )
-    elif params.decoding_method == "modified_beam_search_lm_rescore_LODR":
-        lm_scale_list = [0.02 * i for i in range(2, 30)]
-        ans_dict = modified_beam_search_lm_rescore_LODR(
-            model=model,
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            beam=params.beam_size,
-            LM=LM,
-            LODR_lm=ngram_lm,
-            sp=sp,
-            lm_scale_list=lm_scale_list,
-        )
-    else:
-        batch_size = encoder_out.size(0)
+    batch_size = encoder_out.size(0)
 
-        for i in range(batch_size):
-            # fmt: off
-            encoder_out_i = encoder_out[i:i+1, :encoder_out_lens[i]]
-            # fmt: on
-            if params.decoding_method == "greedy_search":
-                hyp = greedy_search(
-                    model=model,
-                    encoder_out=encoder_out_i,
-                    max_sym_per_frame=params.max_sym_per_frame,
-                )
-            elif params.decoding_method == "beam_search":
-                hyp = beam_search(
-                    model=model,
-                    encoder_out=encoder_out_i,
-                    beam=params.beam_size,
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported decoding method: {params.decoding_method}"
-                )
-            hyps.append(sp.decode(hyp).split())
+    for i in range(batch_size):
+        # fmt: off
+        encoder_out_i = encoder_out[i:i+1, :encoder_out_lens[i]]
+        # fmt: on
+        if params.decoding_method == "greedy_search":
+            hyp = tdt_greedy_search(
+                model=model,
+                encoder_out=encoder_out_i,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported decoding method: {params.decoding_method}"
+            )
+        hyps.append(sp.decode(hyp).split())
 
     if params.decoding_method == "greedy_search":
         return {"greedy_search": hyps}
@@ -763,19 +685,6 @@ def main():
     params = get_params()
     params.update(vars(args))
 
-    assert params.decoding_method in (
-        "greedy_search",
-        "beam_search",
-        "fast_beam_search",
-        "fast_beam_search_nbest",
-        "fast_beam_search_nbest_LG",
-        "fast_beam_search_nbest_oracle",
-        "modified_beam_search",
-        "modified_beam_search_LODR",
-        "modified_beam_search_lm_shallow_fusion",
-        "modified_beam_search_lm_rescore",
-        "modified_beam_search_lm_rescore_LODR",
-    )
     params.res_dir = params.exp_dir / params.decoding_method
 
     if os.path.exists(params.context_file):
