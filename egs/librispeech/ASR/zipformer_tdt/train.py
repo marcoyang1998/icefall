@@ -219,6 +219,27 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         to this dimension before adding.
         """,
     )
+    
+    parser.add_argument(
+        "--durations",
+        type=int,
+        default=5,
+        help="For TDT, if n, there will be n+1 available durations are [0,...,n]"
+    )
+    
+    parser.add_argument(
+        "--tdt-sigma",
+        type=float,
+        default=0.05,
+        help=""
+    )
+    
+    parser.add_argument(
+        "--tdt-omega",
+        type=float,
+        default=0.0,
+        help="The prob of sampling conventional RNNT loss"
+    )
 
     parser.add_argument(
         "--causal",
@@ -331,6 +352,18 @@ def get_parser():
     parser.add_argument(
         "--base-lr", type=float, default=0.045, help="The base learning rate."
     )
+    
+    parser.add_argument(
+        "--warmup-start",
+        type=float, 
+        default=0.5,
+    )
+    
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
+    )
 
     parser.add_argument(
         "--lr-batches",
@@ -354,27 +387,6 @@ def get_parser():
         default=600,
         help="Reference batch duration for purposes of adjusting batch counts for setting various "
         "schedules inside the model",
-    )
-
-    parser.add_argument(
-        "--durations",
-        type=int,
-        default=5,
-        help="For TDT, if n, there will be n+1 available durations are [0,...,n]"
-    )
-
-    parser.add_argument(
-        "--tdt-sigma",
-        type=float,
-        default=0.05,
-        help=""
-    )
-    
-    parser.add_argument(
-        "--tdt-omega",
-        type=float,
-        default=0.0,
-        help="The prob of sampling conventional RNNT loss"
     )
 
     parser.add_argument(
@@ -1162,7 +1174,13 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
+    scheduler = Eden(
+        optimizer,
+        params.lr_batches,
+        params.lr_epochs,
+        warmup_batches=params.warmup_batches,
+        warmup_start=params.warmup_start,
+    )
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
