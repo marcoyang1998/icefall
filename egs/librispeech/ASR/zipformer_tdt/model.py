@@ -86,6 +86,7 @@ class AsrModel(nn.Module):
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
+        self.vocab_size = vocab_size
 
         self.use_transducer = use_transducer
         if use_transducer:
@@ -224,7 +225,13 @@ class AsrModel(nn.Module):
         
         joiner_out = self.joiner(encoder_out, decoder_out, project_input=False)
 
-        tdt_loss = self.rnnt_loss(joiner_out, y_padded.long(), encoder_out_lens.long(), y_lens.long())
+        with torch.cuda.amp.autocast(enabled=False):
+            tdt_loss = self.rnnt_loss(
+                joiner_out,
+                y_padded.long(),
+                encoder_out_lens.long(),
+                y_lens.long()
+            )
 
         return tdt_loss
 
