@@ -26,71 +26,6 @@ Usage:
     --max-duration 600 \
     --decoding-method greedy_search
 
-(2) beam search (not recommended)
-./zipformer/decode.py \
-    --epoch 28 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --max-duration 600 \
-    --decoding-method beam_search \
-    --beam-size 4
-
-(3) modified beam search
-./zipformer/decode.py \
-    --epoch 28 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --max-duration 600 \
-    --decoding-method modified_beam_search \
-    --beam-size 4
-
-(4) fast beam search (one best)
-./zipformer/decode.py \
-    --epoch 28 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --max-duration 600 \
-    --decoding-method fast_beam_search \
-    --beam 20.0 \
-    --max-contexts 8 \
-    --max-states 64
-
-(5) fast beam search (nbest)
-./zipformer/decode.py \
-    --epoch 28 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --max-duration 600 \
-    --decoding-method fast_beam_search_nbest \
-    --beam 20.0 \
-    --max-contexts 8 \
-    --max-states 64 \
-    --num-paths 200 \
-    --nbest-scale 0.5
-
-(6) fast beam search (nbest oracle WER)
-./zipformer/decode.py \
-    --epoch 28 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --max-duration 600 \
-    --decoding-method fast_beam_search_nbest_oracle \
-    --beam 20.0 \
-    --max-contexts 8 \
-    --max-states 64 \
-    --num-paths 200 \
-    --nbest-scale 0.5
-
-(7) fast beam search (with LG)
-./zipformer/decode.py \
-    --epoch 28 \
-    --avg 15 \
-    --exp-dir ./zipformer/exp \
-    --max-duration 600 \
-    --decoding-method fast_beam_search_nbest_LG \
-    --beam 20.0 \
-    --max-contexts 8 \
-    --max-states 64
 """
 
 
@@ -99,6 +34,7 @@ import csv
 import logging
 import math
 import os
+from functools import partial
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -423,6 +359,7 @@ def decode_one_batch(
     """
     device = next(model.parameters()).device
     feature = batch["inputs"]
+    cuts = batch["supervisions"]["cut"]
     assert feature.ndim == 3
 
     feature = feature.to(device)
@@ -433,6 +370,10 @@ def decode_one_batch(
     supervisions = batch["supervisions"]
     texts = supervisions["text"]
     feature_lens = supervisions["num_frames"].to(device)
+    
+    task_names = [c.task_name for c in cuts]
+    input_languages = [c.input_language for c in cuts]
+    output_languages = [c.output_language for c in cuts]
 
     encoder_out, encoder_out_lens = model.encode_audio(feature, feature_lens)
     encoder_out_lens += 2
@@ -440,7 +381,7 @@ def decode_one_batch(
     hyps = []
 
     for i in range(batch_size):
-        task_prompt = [get_task_prompt(task_name=task_type)]
+        task_prompt = [get_task_prompt(task_name=task_names[i], input_language=input_languages[i], output_language=output_languages[i])]
         
         prompt = sp.batch_encode_plus(task_prompt, return_tensors="pt", padding=True, return_length=True).to(device)    
         
@@ -474,8 +415,14 @@ def decode_one_batch(
         hyp = output[0, prefix_lens:]
         hyps.append(hyp.tolist())
 
+    # remove the endoftext token, convert zh words to characters
     if task_type == "ASR":
-        hyps = [sp.decode(hyp[:-1]).upper().split() for hyp in hyps] # remove the endoftext token
+        if output_languages[0] == "zh":
+            hyps = [list("".join(sp.decode(hyp[:-1]).split())) for hyp in hyps] 
+        elif output_languages[0] == "en":
+            hyps = [sp.decode(hyp[:-1]).upper().split() for hyp in hyps] 
+        else:
+            raise ValueError("Unknown output language")
     elif task_type == "AC":
         hyps = [sp.decode(hyp[:-1]).split() for hyp in hyps] # remove the endoftext token
     
@@ -537,6 +484,8 @@ def decode_dataset(
         cuts = batch["supervisions"]["cut"]
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
         
+        out_language = cuts[0].output_language
+        
         if task_type == "AC":
             texts = [c.supervisions[0].audio_captions.split(";;") for c in cuts]
 
@@ -559,7 +508,10 @@ def decode_dataset(
             assert len(hyps) == len(texts)
             for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
                 if task_type == "ASR":
-                    ref_words = ref_text.split()
+                    if out_language == "en":
+                        ref_words = ref_text.split()
+                    elif out_language == "zh":
+                        ref_words = list("".join(ref_text.split()))
                 elif task_type == "AC":
                     ref_words = [t.split() for t in ref_text]
                 this_batch.append((cut_id, ref_words, hyp_words))
@@ -837,29 +789,52 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
+    def _set_task_prompt(task_name, input_language, output_language, c):
+        c.task_name = task_name
+        c.input_language = input_language
+        c.output_language = output_language
+        return c
+
+    test_sets = []
+    test_dls = []
+    gt_captions = []
+
     if params.task_type == "ASR":
-        test_clean_cuts = librispeech.test_clean_cuts().subset(first=200)
-        test_other_cuts = librispeech.test_other_cuts().subset(first=200)
+        if params.use_librispeech:
+            test_clean_cuts = librispeech.test_clean_cuts().subset(first=200)
+            test_other_cuts = librispeech.test_other_cuts().subset(first=200)
+            test_clean_cuts = test_clean_cuts.map(partial(_set_task_prompt, "ASR", "en", "en"))
+            test_other_cuts = test_other_cuts.map(partial(_set_task_prompt, "ASR", "en", "en"))
 
-        test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
-        test_other_dl = librispeech.test_dataloaders(test_other_cuts)
+            test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
+            test_other_dl = librispeech.test_dataloaders(test_other_cuts)
 
-        test_sets = ["test-clean", "test-other"]
-        test_dls = [test_clean_dl, test_other_dl]
-        gt_captions = ["None"] * len(test_dls)
-    else:
-        test_sets = []
-        test_dls = []
-        gt_captions = []
-        
+            test_sets += ["test-clean", "test-other"]
+            test_dls += [test_clean_dl, test_other_dl]
+            gt_captions += ["None"] * 2
+        if params.use_aishell:
+            aishell_dev_cuts = librispeech.aishell_dev_cuts().subset(first=200)
+            aishell_test_cuts = librispeech.aishell_test_cuts().subset(first=200)
+            aishell_dev_cuts = aishell_dev_cuts.map(partial(_set_task_prompt, "ASR", "zh", "zh"))
+            aishell_test_cuts = aishell_test_cuts.map(partial(_set_task_prompt, "ASR", "zh", "zh"))
+            
+            aishell_dev_dl = librispeech.test_dataloaders(aishell_dev_cuts)
+            aishell_test_dl = librispeech.test_dataloaders(aishell_test_cuts)
+            
+            test_sets += ["aishell-dev", "aishell-test"]
+            test_dls += [aishell_dev_dl, aishell_test_dl]
+            gt_captions += ["None"] * 2
+    elif params.task_type == "AC":
         if params.use_clotho:
             clotho_eval_cuts = librispeech.clotho_eval_cuts().map(add_dummy_text)
+            clotho_eval_cuts = clotho_eval_cuts.map(partial(_set_task_prompt, "AC", "unk", "en"))
             clotho_test_dl = librispeech.test_dataloaders(clotho_eval_cuts)
             test_dls.append(clotho_test_dl)
             test_sets.append("eval_clotho")
             gt_captions.append("data/fbank_clotho/clotho_evaluation_captions.csv")
         if params.use_audiocaps:
             audiocaps_test_cuts = librispeech.audiocaps_test_cuts().map(add_dummy_text)
+            audiocaps_test_cuts = audiocaps_test_cuts.map(partial(_set_task_prompt, "AC", "unk", "en"))
             audiocaps_test_dl = librispeech.test_dataloaders(audiocaps_test_cuts)
             test_dls.append(audiocaps_test_dl)
             test_sets.append("test_audiocaps")

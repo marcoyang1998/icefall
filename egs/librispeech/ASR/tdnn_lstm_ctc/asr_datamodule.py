@@ -263,6 +263,12 @@ class LibriSpeechAsrDataModule:
             type=str2bool,
             default=True,
         )
+
+        group.add_argument(
+            "--use-aishell",
+            type=str2bool,
+            default=False, 
+        )
         
         group.add_argument(
             "--use-audiocaps",
@@ -550,6 +556,27 @@ class LibriSpeechAsrDataModule:
         logging.info("About to get test-other cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_test-other.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def aishell_train_cuts(self) -> CutSet:
+        logging.info(f"About to get aishell train cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "aishell_cuts_train.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def aishell_dev_cuts(self) -> CutSet:
+        logging.info(f"About to get aishell dev cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "aishell_cuts_dev.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def aishell_test_cuts(self) -> CutSet:
+        logging.info(f"About to get aishell test cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "aishell_cuts_test.jsonl.gz"
         )
 
     @lru_cache()

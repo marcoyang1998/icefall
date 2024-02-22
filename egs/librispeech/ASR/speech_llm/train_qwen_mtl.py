@@ -602,6 +602,13 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--repeat-aishell",
+        type=int,
+        default=1,
+        help="How many times to repeat aishell",
+    )
+    
+    parser.add_argument(
         "--repeat-AC",
         type=int,
         default=3,
@@ -970,12 +977,13 @@ def compute_loss(
     cuts = batch["supervisions"]["cut"]
     cut_ids = [c.id for c in cuts]
     task_names = [c.task_name for c in cuts]
-    input_language = ["en" if t =="ASR" else "unk" for t in task_names]
+    input_languages = [c.input_language for c in cuts]
+    output_languages = [c.output_language for c in cuts]
         
     task_prompts = [
         get_task_prompt(
-            task_name=task_name,
-        ) for task_name in task_names
+            task_name=task_name, input_language=in_language, output_language=out_language,
+        ) for task_name, in_language, out_language in zip(task_names, input_languages, output_languages)
     ]
     if is_training and random.random() < 0.02:
         logging.info(f"Task prompt: {task_prompts}")
@@ -1401,6 +1409,12 @@ def run(rank, world_size, args):
         c.task_name = task_name
         return c
     
+    def _set_task_prompt(task_name, input_language, output_language, c):
+        c.task_name = task_name
+        c.input_language = input_language
+        c.output_language = output_language
+        return c
+    
     assert params.use_librispeech or params.use_clotho or params.use_audiocaps
     
     # ASR data
@@ -1418,9 +1432,20 @@ def run(rank, world_size, args):
             )
             librispeech_cuts_len = 281239 * 3 # with speed purturb
         
-        librispeech_cuts = librispeech_cuts.map(partial(_set_task_name, "ASR"))
+        librispeech_cuts = librispeech_cuts.map(partial(_set_task_prompt, "ASR", "en", "en"))
         train_cuts.append(librispeech_cuts)
         sampling_weights.append(librispeech_cuts_len)
+        
+    if params.use_aishell:
+        aishell_cuts = librispeech.aishell_train_cuts().repeat(
+            times=params.repeat_aishell,
+            preserve_id=False,
+        )
+        aishell_cuts_len = 360294
+        
+        aishell_cuts = aishell_cuts.map(partial(_set_task_prompt, "ASR", "zh", "zh"))
+        train_cuts.append(aishell_cuts)
+        sampling_weights.append(aishell_cuts_len)
 
     # AC data
     if params.use_clotho:
@@ -1428,7 +1453,7 @@ def run(rank, world_size, args):
             params.repeat_AC,
             preserve_id=False,
         )
-        clotho_cuts = clotho_cuts.map(partial(_set_task_name, "AC"))
+        clotho_cuts = clotho_cuts.map(partial(_set_task_prompt, "AC", "unk", "en"))
         train_cuts.append(clotho_cuts)
         sampling_weights.append(14465 * params.repeat_AC)
     
@@ -1437,7 +1462,7 @@ def run(rank, world_size, args):
             params.repeat_AC,
             preserve_id=False,
         )
-        audiocaps_cuts =audiocaps_cuts.map(partial(_set_task_name, "AC"))
+        audiocaps_cuts =audiocaps_cuts.map(partial(_set_task_prompt, "AC", "unk", "en"))
         train_cuts.append(audiocaps_cuts)
         sampling_weights.append(42104 * params.repeat_AC)
 
@@ -1498,17 +1523,26 @@ def run(rank, world_size, args):
     if params.use_librispeech:
         valid_cuts = librispeech.dev_clean_cuts()
         valid_cuts += librispeech.dev_other_cuts()
-        valid_cuts = valid_cuts.map(partial(_set_task_name, "ASR"))
+        valid_cuts = valid_cuts.map(partial(_set_task_prompt, "ASR", "en", "en"))
         valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
         valid_dl = librispeech.valid_dataloaders(valid_cuts)
         
         valid_dls.append(valid_dl)
         valid_sets.append("ASR")
+        
+    if params.use_aishell:
+        aishell_valid_cuts = librispeech.aishell_dev_cuts()
+        aishell_valid_cuts = aishell_valid_cuts.map(partial(_set_task_prompt, "ASR", "zh", "zh"))
+        aishell_valid_cuts = aishell_valid_cuts.filter(remove_short_and_long_utt)
+        aishell_valid_dl = librispeech.valid_dataloaders(aishell_valid_cuts)
+        
+        valid_dls.append(aishell_valid_dl)
+        valid_sets.append("ASR_aishell")
     
     # For AC
     if params.use_clotho:
         clotho_valid_cuts = librispeech.clotho_eval_cuts()
-        clotho_valid_cuts = clotho_valid_cuts.map(partial(_set_task_name, "AC")).map(add_dummy_text)
+        clotho_valid_cuts = clotho_valid_cuts.map(partial(_set_task_prompt, "AC", "unk", "en")).map(add_dummy_text)
         clotho_valid_dl = librispeech.valid_dataloaders(clotho_valid_cuts)
         
         valid_dls.append(clotho_valid_dl)
@@ -1516,7 +1550,7 @@ def run(rank, world_size, args):
     
     if params.use_audiocaps:
         audiocaps_valid_cuts = librispeech.audiocaps_val_cuts()
-        audiocaps_valid_cuts = audiocaps_valid_cuts.map(partial(_set_task_name, "AC")).map(add_dummy_text)
+        audiocaps_valid_cuts = audiocaps_valid_cuts.map(partial(_set_task_prompt, "AC", "unk", "en")).map(add_dummy_text)
         audiocaps_valid_dl = librispeech.valid_dataloaders(audiocaps_valid_cuts)
         
         valid_dls.append(audiocaps_valid_dl)
