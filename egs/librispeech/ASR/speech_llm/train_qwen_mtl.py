@@ -115,7 +115,8 @@ def get_task_prompt(
     # Prepare the task specific prompt for the LLM
     task_tags = {
         "ASR": "<|transcribe|>",
-        "AC": "<|audiocaption|>"
+        "AC": "<|audiocaption|>",
+        "AST": "<|translate|>",
     }
     
     language_tags = {
@@ -1446,6 +1447,24 @@ def run(rank, world_size, args):
         aishell_cuts = aishell_cuts.map(partial(_set_task_prompt, "ASR", "zh", "zh"))
         train_cuts.append(aishell_cuts)
         sampling_weights.append(aishell_cuts_len)
+
+    def _set_translation_as_text(c: Cut):
+        c.supervisions[0].text = c.translation
+        return c
+    
+    # AST data
+    import pdb; pdb.set_trace()
+    if params.use_covost:
+        covost_cuts = librispeech.covost_train_cuts().repeat(
+            times=params.repeat_covost,
+            preserve_id=False,
+        )
+        covost_cuts_len = 232939
+
+        covost_cuts = covost_cuts.map(_set_translation_as_text)
+        covost_cuts = covost_cuts.map(partial(_set_task_prompt, "AST", "en", "zh"))
+        train_cuts.append(covost_cuts)
+        sampling_weights.append(covost_cuts_len)
 
     # AC data
     if params.use_clotho:

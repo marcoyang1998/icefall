@@ -269,6 +269,12 @@ class LibriSpeechAsrDataModule:
             type=str2bool,
             default=False, 
         )
+
+        group.add_argument(
+            "--use-covost",
+            type=str2bool,
+            default=False,
+        )
         
         group.add_argument(
             "--use-audiocaps",
@@ -577,6 +583,27 @@ class LibriSpeechAsrDataModule:
         logging.info(f"About to get aishell test cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "aishell_cuts_test.jsonl.gz"
+        )
+
+    @lru_cache()
+    def covost_train_cuts(self) -> CutSet:
+        logging.info(f"About to get covost training cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_covost2_en_zh-CN_train.jsonl.gz"
+        )
+
+    @lru_cache()
+    def covost_dev_cuts(self) -> CutSet:
+        logging.info(f"About to get covost dev cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_covost2_en_zh-CN_dev.jsonl.gz"
+        )
+
+    @lru_cache()
+    def covost_test_cuts(self) -> CutSet:
+        logging.info(f"About to get covost test cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_covost2_en_zh-CN_test.jsonl.gz"
         )
 
     @lru_cache()
