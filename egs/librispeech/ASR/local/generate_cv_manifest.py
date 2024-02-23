@@ -15,7 +15,8 @@ from lhotse import (
 )
 from lhotse.cut import MonoCut
 from lhotse.audio import Recording
-from lhotse.supervision import SupervisionSegment
+from lhotse import RecordingSet, SupervisionSegment, SupervisionSet
+from lhotse.qa import fix_manifests, validate_recordings_and_supervisions
 from argparse import ArgumentParser
 
 from icefall.utils import get_executor, str2bool
@@ -61,7 +62,8 @@ def get_parser():
     parser.add_argument(
         "--split",
         type=str,
-        choices=["train", "test", "dev", "other"]
+        choices=["train_fixed", "test", "dev", "other"],
+        required=True,
     )
 
     return parser
@@ -78,7 +80,8 @@ def main():
     tsv_file = f"{root_dir}/{input_language}/{split}.tsv"
     tsv_file = parse_tsv(tsv_file)
 
-    new_cuts = []
+    recordings = []
+    supervisions = []
     num_cuts = 0
     for filename in tsv_file:
         full_path = f"{root_dir}/{input_language}/clips/{filename}"
@@ -86,34 +89,36 @@ def main():
         cut_id = full_path
 
         recording = Recording.from_file(full_path, cut_id)
-        cut = MonoCut(
-            id=cut_id,
-            start=0.0,
-            duration=recording.duration,
-            channel=0,
-            recording=recording,
-        )
-
+        recordings.append(recording)
+        
         supervision = SupervisionSegment(
-            id=cut_id,
-            recording_id=cut.recording.id,
+            id=recording.id,
+            recording_id=recording.id,
             start=0.0,
             channel=0,
             text=sentence,
             speaker=spkr_id,
             language=input_language,
-            duration=cut.duration,
+            duration=recording.duration,
         )
-
-        cut.supervisions = [supervision]
-        new_cuts.append(cut)
+        supervisions.append(supervision)
 
         num_cuts += 1
         if num_cuts % 100 == 0:
             logging.info(f"Processed {num_cuts} cuts until now.")
+
+    recordings = RecordingSet.from_recordings(recordings)
+    recordings = recordings.resample(16000)
+    supervisions = SupervisionSet.from_segments(supervisions)
     
-    cuts = CutSet.from_cuts(new_cuts)
-    cuts = cuts.resample(16000)
+    # Fix any missing recordings/supervisions.
+    recordings, supervisions = fix_manifests(recordings, supervisions)
+    validate_recordings_and_supervisions(recordings, supervisions)
+
+    cuts = CutSet.from_manifests(
+        recordings=recordings,
+        supervisions=supervisions,
+    )
 
     num_jobs = 15
     num_mel_bins = 80

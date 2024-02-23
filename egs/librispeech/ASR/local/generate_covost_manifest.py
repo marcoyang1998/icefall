@@ -96,7 +96,7 @@ def main():
 
     new_cuts = []
     for i, cut in enumerate(cv_cuts):
-        filename = cut.id.split('/')[-1]
+        filename = cut.recording.id.split('/')[-1]
         if filename not in tsv_file:
             logging.info(f"Skipping {filename}")
             continue
@@ -108,7 +108,7 @@ def main():
 
     cuts = CutSet.from_cuts(new_cuts)
 
-    manifest_output_dir = output_manifest_dir + "/" + f"cuts_covost_{input_language}_{output_language}_{split}.jsonl.gz"
+    manifest_output_dir = output_manifest_dir + "/" + f"cuts_covost2_{input_language}_{output_language}_{split}.jsonl.gz"
 
     logging.info(f"Storing the manifest to {manifest_output_dir}")
     cuts.to_jsonl(manifest_output_dir)
