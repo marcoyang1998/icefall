@@ -240,6 +240,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=0.0,
         help="The prob of sampling conventional RNNT loss"
     )
+    
+    parser.add_argument(
+        "--tdt-clamp",
+        type=float,
+        default=-1.0,
+        help="gradient clipping for tdt. if >=0, clamp the gradient to [-clamp, clamp]"
+    )
 
     parser.add_argument(
         "--causal",
@@ -665,6 +672,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         durations =durations,
         tdt_sigma=params.tdt_sigma,
         tdt_omega=params.tdt_omega,
+        tdt_clamp=params.tdt_clamp,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
     )
@@ -1283,7 +1291,7 @@ def run(rank, world_size, args):
     #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
-    if checkpoints and "grad_scaler" in checkpoints:
+    if checkpoints and "grad_scaler" in checkpoints and params.use_fp16:
         logging.info("Loading grad scaler state dict")
         scaler.load_state_dict(checkpoints["grad_scaler"])
 
