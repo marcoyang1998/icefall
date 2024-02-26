@@ -41,6 +41,10 @@ def register_inf_check_hooks(model: nn.Module) -> None:
                     raise ValueError(
                         f"The sum of {_name}.output is not finite: {_output}"
                     )
+                if _output.to(torch.float32).abs().sum() > 1e10:
+                    raise ValueError(
+                        f"The sum of {_name}.output is very large: {_output}"
+                    )
             elif isinstance(_output, tuple):
                 for i, o in enumerate(_output):
                     if isinstance(o, tuple):
@@ -51,6 +55,10 @@ def register_inf_check_hooks(model: nn.Module) -> None:
                         raise ValueError(
                             f"The sum of {_name}.output[{i}] is not finite: {_output}"
                         )
+                    if o.to(torch.float32).abs().sum() > 1e10:
+                        raise ValueError(
+                            f"The sum of {_name}.output[{i}] is very large: {_output}"
+                        )
 
         # default param _name is a way to capture the current value of the variable "name".
         def backward_hook(_module, _input, _output, _name=name):
@@ -58,6 +66,10 @@ def register_inf_check_hooks(model: nn.Module) -> None:
                 if not torch.isfinite(_output.to(torch.float32).sum()):
                     logging.warning(
                         f"The sum of {_name}.grad is not finite"  # ": {_output}"
+                    )
+                if _output.to(torch.float32).abs().sum() > 1e10:
+                    logging.warning(
+                        f"The sum of {_name}.grad is very large"  # ": {_output}"
                     )
             elif isinstance(_output, tuple):
                 for i, o in enumerate(_output):
@@ -67,6 +79,8 @@ def register_inf_check_hooks(model: nn.Module) -> None:
                         continue
                     if not torch.isfinite(o.to(torch.float32).sum()):
                         logging.warning(f"The sum of {_name}.grad[{i}] is not finite")
+                    if o.to(torch.float32).abs().sum() > 1e10:
+                        logging.warning(f"The sum of {_name}.grad[{i}] is very large")
 
         module.register_forward_hook(forward_hook)
         module.register_backward_hook(backward_hook)
@@ -76,6 +90,8 @@ def register_inf_check_hooks(model: nn.Module) -> None:
         def param_backward_hook(grad, _name=name):
             if not torch.isfinite(grad.to(torch.float32).sum()):
                 logging.warning(f"The sum of {_name}.param_grad is not finite")
+            if grad.to(torch.float32).abs().sum() > 1e10:
+                logging.warning(f"The sum of {_name}.param_grad is very large")
 
         parameter.register_hook(param_backward_hook)
 
