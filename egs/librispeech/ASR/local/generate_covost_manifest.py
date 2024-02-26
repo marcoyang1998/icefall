@@ -24,13 +24,16 @@ torch.set_num_interop_threads(1)
 def parse_tsv(tsv_file):
     mapping = {}
     with open(tsv_file, "r") as fin:
-        reader = csv.reader(fin, delimiter="\t")
-        for i, row in enumerate(reader):
-            if i == 0:
-                continue
-            filename = row[0]
-            translation= row[2]
+        fin.readline() # skip the first line
+        while True:
+            line = fin.readline()
+            if line == "":
+                break
+            line = line.strip().split('\t')
+            filename = line[0]
+            translation= line[2]
             mapping[filename] = translation
+            
     return mapping
 
 def get_parser():

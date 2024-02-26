@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 
 import torch
 import torchaudio
@@ -62,7 +63,7 @@ def get_parser():
     parser.add_argument(
         "--split",
         type=str,
-        choices=["train_fixed", "test", "dev", "other"],
+        choices=["train", "test", "dev", "other"],
         required=True,
     )
 
@@ -87,6 +88,11 @@ def main():
         full_path = f"{root_dir}/{input_language}/clips/{filename}"
         sentence, spkr_id = tsv_file[filename]
         cut_id = full_path
+
+        # There are some broken files in common voice
+        if os.path.getsize(full_path) == 0:
+            logging.info(f"Skipping {full_path}")
+            continue
 
         recording = Recording.from_file(full_path, cut_id)
         recordings.append(recording)
