@@ -48,6 +48,7 @@ from asr_datamodule import LibriSpeechAsrDataModule
 
 from train_qwen_mtl import add_model_arguments, get_model, get_params, get_task_prompt, get_tokenizer
 from caption_evaluation_tools.eval_metrics import evaluate_metrics
+import sacrebleu
 
 from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (
@@ -139,7 +140,7 @@ def get_parser():
         type=str,
         default="ASR",
         required=True,
-        choices=["ASR","AC"]
+        choices=["ASR","AC", "AST"]
     )
 
     parser.add_argument(
@@ -424,7 +425,12 @@ def decode_one_batch(
         else:
             raise ValueError("Unknown output language")
     elif task_type == "AC":
+        # For now only English
         hyps = [sp.decode(hyp[:-1]).split() for hyp in hyps] # remove the endoftext token
+    elif task_type == "AST":
+        hyps = [sp.decode(hyp[:-1]) for hyp in hyps]
+    else:
+        raise ValueError(f"Unknown task type: {task_type}")
     
     return {params.decoding_method: hyps}
 
@@ -514,6 +520,8 @@ def decode_dataset(
                         ref_words = list("".join(ref_text.split()))
                 elif task_type == "AC":
                     ref_words = [t.split() for t in ref_text]
+                elif task_type == "AST":
+                    ref_words = ref_text # no-op for AST
                 this_batch.append((cut_id, ref_words, hyp_words))
 
             results[name].extend(this_batch)
@@ -585,7 +593,6 @@ def save_results(
     logging.info(s)
 
 
-
 def evaluate_captions(
     params: AttributeDict,
     test_set_name: str,
@@ -605,7 +612,33 @@ def evaluate_captions(
         for m, scores in metrics.items():
             overall_score = scores["score"]
             logging.info(f"Evaluating on {test_set_name}, Metirc: {m}, score: {overall_score}")
+            
 
+def evaluate_translations(
+    params: AttributeDict,
+    test_set_name: str,
+    results_dict: Dict[str, List[Tuple[str, List[str], List[str]]]],
+    output_language: str = "zh",
+):
+    for key, results in results_dict.items():
+        recog_path = (
+            params.res_dir / f"translation-{test_set_name}-{key}-{params.suffix}.txt"
+        )
+        results = sorted(results)
+        store_transcripts(filename=recog_path, texts=results)
+        
+        if output_language == "ja":
+            output_language = "ja-mecab"
+        elif output_language == "zh":
+            output_language = "zh"
+        else:
+            output_language = "13a"
+        
+        refs = [items[1] for items in results]
+        hyps = [items[2] for items in results]
+        score = sacrebleu.corpus_bleu(hyps, [refs], tokenize=output_language)
+        logging.info(score)
+        logging.info(f"BLEU on {test_set_name}: {score.score}")
 
 
 @torch.no_grad()
@@ -824,6 +857,20 @@ def main():
             test_sets += ["aishell-dev", "aishell-test"]
             test_dls += [aishell_dev_dl, aishell_test_dl]
             gt_captions += ["None"] * 2
+    elif params.task_type == "AST":
+        def _set_translation_as_text(c: Cut):
+            c.supervisions[0].text = c.translation
+            return c
+        covost_test_cuts = librispeech.covost_test_cuts()# .subset(first=500)
+        covost_test_cuts = covost_test_cuts.map(_set_translation_as_text)
+        covost_test_cuts = covost_test_cuts.map(partial(_set_task_prompt, "AST", "en", "zh"))
+        
+        covost_test_dl = librispeech.test_dataloaders(covost_test_cuts) 
+        
+        test_sets += ["covost-test-zh"]
+        test_dls += [covost_test_dl]
+        gt_captions += ["None"] 
+        
     elif params.task_type == "AC":
         if params.use_clotho:
             clotho_eval_cuts = librispeech.clotho_eval_cuts().map(add_dummy_text)
@@ -862,6 +909,15 @@ def main():
                 reference_csv=gt_caption,
                 results_dict=results_dict,
             )
+        elif params.task_type == "AST":
+            output_language = test_set.split("-")[-1]
+            evaluate_translations(
+                params=params,
+                test_set_name=test_set,
+                results_dict=results_dict,
+                output_language=output_language,
+            )
+            
         else:
             raise ValueError(f"Unseen task type: {params.task_type}")
 
