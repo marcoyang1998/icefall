@@ -30,6 +30,8 @@ def get_parser():
     return parser
 
 def main():
+    # Write out the reference captions into a csv file conforming the evaluation format
+    # Can be used for both audiocaps and clotho
     parser = get_parser()
     args = parser.parse_args()
     

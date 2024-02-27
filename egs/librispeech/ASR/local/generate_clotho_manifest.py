@@ -62,6 +62,13 @@ def get_parser():
         default="data/fbank_clotho",
     )
 
+    parser.add_argument(
+        "--clotho-version",
+        type=str,
+        default="2.1",
+        help="The version of the clotho dataset"
+    )
+
     return parser
 
 def main():
@@ -72,11 +79,11 @@ def main():
     clotho_csv = args.clotho_csv
     split = args.split
     fbank_dir = args.fbank_dir
+    version = args.clotho_version
 
     num_jobs = 15
     num_mel_bins = 80
 
-    import pdb; pdb.set_trace()
     clotho_captions = parse_clotho(clotho_csv)
 
     wav_files = glob.glob(f"{clotho_dataset}/{split}/*.wav")
@@ -113,7 +120,6 @@ def main():
         if i % 100 == 0 and i:
             logging.info(f"Processed {i} cuts until now.")
     
-    import pdb; pdb.set_trace()
     cuts = CutSet.from_cuts(new_cuts)
     cuts = cuts.resample(16000)
 
@@ -123,13 +129,13 @@ def main():
     with get_executor() as ex:
         cuts = cuts.compute_and_store_features(
             extractor=extractor,
-            storage_path=f"{fbank_dir}/{split}_feats",
+            storage_path=f"{fbank_dir}/{split}_feats_v{version}",
             num_jobs=num_jobs if ex is None else 80,
             executor=ex,
             storage_type=LilcomChunkyWriter,
         )
 
-    manifest_output_dir = fbank_dir + "/" + f"cuts_clotho_{split}.jsonl.gz"
+    manifest_output_dir = fbank_dir + "/" + f"cuts_clotho_{split}.v{version}.jsonl.gz"
 
     logging.info(f"Storing the manifest to {manifest_output_dir}")
     cuts.to_jsonl(manifest_output_dir)
