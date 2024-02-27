@@ -63,7 +63,7 @@ def get_args():
         "--part",
         type=str,
         help="Which language to prepare, if all, prepare all languages",
-        choices=["english", "dutch", "german", "spanish", "all"]
+        choices=["english", "dutch", "german", "spanish", "french", "italian", "polish", "portuguese", "all"]
     )
 
     return parser.parse_args()
@@ -89,7 +89,10 @@ def compute_fbank_mls(
         dataset_parts = [part]
     splits = ["train", "test", "dev"]
 
-    import pdb; pdb.set_trace()
+    num_jobs = 15
+    num_mel_bins = 80
+    extractor = Fbank(FbankConfig(num_mel_bins=num_mel_bins))
+
     for language in dataset_parts:
         for split in splits:
             recording_file = src_dir / f"mls-{language}_recordings_{split}.jsonl.gz"
@@ -97,24 +100,26 @@ def compute_fbank_mls(
             recordings = CutSet.from_file(recording_file)
             supervisions = CutSet.from_file(supervision_file)
 
-            cutset = CutSet.from_manifests(
+            cut_set = CutSet.from_manifests(
                 recordings=recordings,
                 supervisions=supervisions,
             )
 
-            cut_set = cut_set.compute_and_store_features(
-                extractor=extractor,
-                storage_path=f"{output_dir}/{prefix}_feats_{partition}",
-                # when an executor is specified, make more partitions
-                num_jobs=num_jobs if ex is None else 80,
-                executor=ex,
-                storage_type=LilcomChunkyWriter,
-            )
+            prefix = f"mls-{language}"
+            with get_executor() as ex:
+                cut_set = cut_set.compute_and_store_features(
+                    extractor=extractor,
+                    storage_path=f"{output_dir}/{prefix}_feats_{split}",
+                    # when an executor is specified, make more partitions
+                    num_jobs=num_jobs if ex is None else 80,
+                    executor=ex,
+                    storage_type=LilcomChunkyWriter,
+                )
 
             cuts_filename = output_dir / f"mls-{language}_{split}.jsonl.gz"
             
             logging.info(f"Saving to {cuts_filename}")
-            cut_set.to_file(output_dir / cuts_filename)
+            cut_set.to_file(cuts_filename)
 
 
 if __name__ == "__main__":
