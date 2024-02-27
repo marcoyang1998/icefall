@@ -1420,7 +1420,7 @@ def run(rank, world_size, args):
         return c
     
     def remove_short_and_long_utt_covost(c: Cut):
-        if c.duration < 1.0 or c.duration > 15.0:
+        if c.duration < 1.0 or c.duration > 20.0:
             return False
         return True
     
@@ -1507,18 +1507,7 @@ def run(rank, world_size, args):
     logging.info(train_cuts)
 
     def remove_short_and_long_utt(c: Cut):
-        # Keep only utterances with duration between 1 second and 20 seconds
-        #
-        # Caution: There is a reason to select 20.0 here. Please see
-        # ../local/display_manifest_statistics.py
-        #
-        # You should use ../local/display_manifest_statistics.py to get
-        # an utterance duration distribution for your dataset to select
-        # the threshold
         if c.duration < 1.0 or c.duration > 28.0:
-            # logging.warning(
-            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            # )
             return False
         
         return True

@@ -861,7 +861,7 @@ def main():
         def _set_translation_as_text(c: Cut):
             c.supervisions[0].text = c.translation
             return c
-        covost_test_cuts = librispeech.covost_test_cuts()# .subset(first=500)
+        covost_test_cuts = librispeech.covost_test_cuts().subset(first=500)
         covost_test_cuts = covost_test_cuts.map(_set_translation_as_text)
         covost_test_cuts = covost_test_cuts.map(partial(_set_task_prompt, "AST", "en", "zh"))
         
@@ -878,7 +878,7 @@ def main():
             clotho_test_dl = librispeech.test_dataloaders(clotho_eval_cuts)
             test_dls.append(clotho_test_dl)
             test_sets.append("eval_clotho")
-            gt_captions.append("data/fbank_clotho/clotho_evaluation_captions.csv")
+            gt_captions.append("data/fbank_clotho/clotho_evaluation_captions.v2.1.csv")
         if params.use_audiocaps:
             audiocaps_test_cuts = librispeech.audiocaps_test_cuts().map(add_dummy_text)
             audiocaps_test_cuts = audiocaps_test_cuts.map(partial(_set_task_prompt, "AC", "unk", "en"))

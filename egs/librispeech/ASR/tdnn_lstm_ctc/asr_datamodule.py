@@ -629,7 +629,7 @@ class LibriSpeechAsrDataModule:
     def clotho_train_cuts(self) -> CutSet:
         logging.info("About to get clotho training cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_clotho_development.jsonl.gz"
+            self.args.manifest_dir / "cuts_clotho_development.v2.1.jsonl.gz"
         )
 
     @lru_cache()

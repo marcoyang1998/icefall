@@ -60,7 +60,9 @@ class SpeechLLMModel(nn.Module):
             pad_token (int, optional): The ID of the padding token. 
             prefix_len (int, optional): The length of a learnable prefix after the audio. 
             llm_requires_bos_id (bool, optional): If the LLM is trained with an BOS token. 
-            task_related_tokens: how many task-specific tokens reserved, this can be a large number so that it won't be used up
+            multi_task: If the model supports multi-task training, this decides whether different task tag embeddings
+                is used and prepended before 
+            task_related_tokens: how many task-specific tokens reserved, this can be a large number so that it won't be used up.
         """
         super().__init__()
         self.speech_encoder = speech_encoder # a pre-trained speech encoder
@@ -224,6 +226,7 @@ class SpeechLLMModel(nn.Module):
         # embed the input tokens to the large language model
         # The embeddings of customized text prompt will be take from another embedding matrix
         # For simplicity, we assume that all the text prompt shares the same length
+        # Note that the input y contains the task specific prompt tokens if text_prompt_lens > 0
         assert torch.all(text_prompt_lens == text_prompt_lens[0])
         
         if self.task_prompt_embedding is not None:
