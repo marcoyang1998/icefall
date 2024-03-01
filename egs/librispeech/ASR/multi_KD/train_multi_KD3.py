@@ -513,6 +513,13 @@ def get_parser():
         default=1,
         help="How many times to repeat LS",
     )
+    
+    parser.add_argument(
+        "--repeat-wenetspeech",
+        type=int,
+        default=1,
+        help="How many times to repeat wenetspeech",
+    )
 
     add_model_arguments(parser)
 
@@ -853,7 +860,10 @@ def compute_loss(
             loss += beats_loss * params.beats_loss_scale
         if params.use_ecapa:
             if task_id is not None:
-                sv_mask = task_id == 1 # not AT
+                if not params.share_asr:
+                    sv_mask = task_id == 1 # not AT
+                else:
+                    sv_mask = task_id != 2 # not AT
                 ecapa_loss *= sv_mask.unsqueeze(-1)
             ecapa_loss = ecapa_loss.sum()
             loss +=  ecapa_loss * params.ecapa_loss_scale
@@ -1240,6 +1250,15 @@ def run(rank, world_size, args):
         librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
     train_cuts.append(librispeech_cuts)
     sampling_weights.append(librispeech_cuts_len)
+    
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts().repeat(
+            times=params.repeat_wenetspeech,
+            preserve_id=False,
+        )
+        wenetspeech_cuts_len = 1375798
+        train_cuts.append(wenetspeech_cuts)
+        sampling_weights.append(wenetspeech_cuts_len)
 
     audioset_cuts_lens = {
         "balanced": 21155,
@@ -1282,14 +1301,6 @@ def run(rank, world_size, args):
     logging.info(train_cuts)
 
     def remove_short_and_long_utt(c: Cut):
-        # Keep only utterances with duration between 1 second and 20 seconds
-        #
-        # Caution: There is a reason to select 20.0 here. Please see
-        # ../local/display_manifest_statistics.py
-        #
-        # You should use ../local/display_manifest_statistics.py to get
-        # an utterance duration distribution for your dataset to select
-        # the threshold
         if c.duration < 1.0 or c.duration > 28.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
@@ -1328,6 +1339,10 @@ def run(rank, world_size, args):
 
     asr_valid_cuts = asr_valid_cuts.filter(remove_short_and_long_utt)
     asr_valid_dl = librispeech.valid_dataloaders(asr_valid_cuts)
+    
+    asr_wenet_cuts = librispeech.wenetspeech_dev_cuts()
+    asr_wenet_cuts = asr_wenet_cuts.filter(remove_short_and_long_utt)
+    asr_wenet_valid_dl = librispeech.valid_dataloaders(asr_wenet_cuts)
 
     # audio tagging validation
     at_valid_cuts = load_manifest_lazy(
@@ -1337,8 +1352,8 @@ def run(rank, world_size, args):
     at_valid_cuts = at_valid_cuts.filter(remove_short_and_long_utt)
     at_valid_dl = librispeech.valid_dataloaders(at_valid_cuts)
 
-    valid_sets = ["ASR", "Audio tagging"]
-    valid_dls = [asr_valid_dl, at_valid_dl]
+    valid_sets = ["ASR", "ASR_wenet", "Audio tagging"]
+    valid_dls = [asr_valid_dl, asr_wenet_valid_dl, at_valid_dl]
 
     # if not params.print_diagnostics:
     #     scan_pessimistic_batches_for_oom(

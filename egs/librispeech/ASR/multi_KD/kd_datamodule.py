@@ -157,21 +157,6 @@ class LibriSpeechKDDataModule:
         )
 
         group.add_argument(
-            "--use-voxceleb",
-            type=str2bool,
-            default=False,
-            help="If use voxceleb as training set.",
-        )
-
-        group.add_argument(
-            "--voxceleb-subset",
-            type=str,
-            default="vox1",
-            choices=["vox1", "vox2", "only_vox2"],
-            help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
-        )
-
-        group.add_argument(
             "--use-libriheavy",
             type=str2bool,
             default=False,
@@ -184,19 +169,41 @@ class LibriSpeechKDDataModule:
             default="small",
             choices=["small", "medium", "large"]
         )
+        
+        group.add_argument(
+            "--use-wenetspeech",
+            type=str2bool,
+            default=False,
+            help="If ONLY use audioset as the training set.",
+        )
 
         group.add_argument(
             "--use-audioset",
             type=str2bool,
             default=False,
-            help="If ONLY use audioset as the training set. If",
+            help="If use audioset as the training set.",
         )
-
+        
         group.add_argument(
             "--audioset-subset",
             type=str,
             default="balanced",
             choices=["balanced", "unbalanced"]
+        )
+        
+        group.add_argument(
+            "--use-voxceleb",
+            type=str2bool,
+            default=False,
+            help="If use voxceleb as training set.",
+        )
+
+        group.add_argument(
+            "--voxceleb-subset",
+            type=str,
+            default="vox1",
+            choices=["vox1", "vox2", "only_vox2"],
+            help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
         )
 
         group.add_argument(
@@ -853,6 +860,20 @@ class LibriSpeechKDDataModule:
         logging.info(f"About to get all eval cuts from audioset")
         return load_manifest_lazy(
             "data/fbank_audioset/cuts_audioset_eval_all.jsonl.gz"
+        )
+        
+    @lru_cache
+    def wenetspeech_train_cuts(self) -> CutSet:
+        logging.info(f"About to get wenetspeech training cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_M-with-whisper-large-v3-layer--3-embeddings.jsonl.gz"
+        )
+        
+    @lru_cache
+    def wenetspeech_dev_cuts(self) -> CutSet:
+        logging.info(f"About to get wenetspeech DEV cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_DEV-with-whisper-large-v3-layer--3-embeddings.jsonl.gz"
         )
         
     @lru_cache()
