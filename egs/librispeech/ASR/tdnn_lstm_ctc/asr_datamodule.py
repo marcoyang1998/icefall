@@ -274,6 +274,14 @@ class LibriSpeechAsrDataModule:
             "--use-covost",
             type=str2bool,
             default=False,
+            help="Currently only supports En->X"
+        )
+        
+        group.add_argument(
+            "--ast-tgt-languages",
+            type=str,
+            default="zh-CN",
+            help="a list of target languages, separated by comma"
         )
         
         group.add_argument(
@@ -586,10 +594,10 @@ class LibriSpeechAsrDataModule:
         )
 
     @lru_cache()
-    def covost_train_cuts(self) -> CutSet:
-        logging.info(f"About to get covost training cuts")
+    def covost_train_cuts(self, language="zh-CN") -> CutSet:
+        logging.info(f"About to get covost training cuts: en->{language}")
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_covost2_en_zh-CN_train.jsonl.gz"
+            self.args.manifest_dir / f"cuts_covost2_en_{language}_train.jsonl.gz"
         )
 
     @lru_cache()
