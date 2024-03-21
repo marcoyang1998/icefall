@@ -596,22 +596,28 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def covost_train_cuts(self, language="zh-CN") -> CutSet:
         logging.info(f"About to get covost training cuts: en->{language}")
+        if language == "zh":
+            language = "zh-CN"
         return load_manifest_lazy(
             self.args.manifest_dir / f"cuts_covost2_en_{language}_train.jsonl.gz"
         )
 
     @lru_cache()
-    def covost_dev_cuts(self) -> CutSet:
-        logging.info(f"About to get covost dev cuts")
+    def covost_dev_cuts(self, language="zh-CN") -> CutSet:
+        logging.info(f"About to get covost dev cuts: en->{language}")
+        if language == "zh":
+            language = "zh-CN"
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_covost2_en_zh-CN_dev.jsonl.gz"
+            self.args.manifest_dir / f"cuts_covost2_en_{language}_dev.jsonl.gz"
         )
 
     @lru_cache()
-    def covost_test_cuts(self) -> CutSet:
-        logging.info(f"About to get covost test cuts")
+    def covost_test_cuts(self, language="zh-CN") -> CutSet:
+        logging.info(f"About to get covost test cuts: en->{language}")
+        if language == "zh":
+            language = "zh-CN"
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_covost2_en_zh-CN_test.jsonl.gz"
+            self.args.manifest_dir / f"cuts_covost2_en_{language}_test.jsonl.gz"
         )
 
     @lru_cache()
