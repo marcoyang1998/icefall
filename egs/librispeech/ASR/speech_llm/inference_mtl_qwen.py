@@ -861,15 +861,18 @@ def main():
         def _set_translation_as_text(c: Cut):
             c.supervisions[0].text = c.translation
             return c
-        covost_test_cuts = librispeech.covost_test_cuts().subset(first=500)
-        covost_test_cuts = covost_test_cuts.map(_set_translation_as_text)
-        covost_test_cuts = covost_test_cuts.map(partial(_set_task_prompt, "AST", "en", "zh"))
         
-        covost_test_dl = librispeech.test_dataloaders(covost_test_cuts) 
+        tgt_languages = params.ast_tgt_languages.split(',')
+        for lang in tgt_languages:
+            covost_test_cuts = librispeech.covost_test_cuts(lang).subset(first=500)
+            covost_test_cuts = covost_test_cuts.map(_set_translation_as_text)
+            covost_test_cuts = covost_test_cuts.map(partial(_set_task_prompt, "AST", "en", lang))
         
-        test_sets += ["covost-test-zh"]
-        test_dls += [covost_test_dl]
-        gt_captions += ["None"] 
+            covost_test_dl = librispeech.test_dataloaders(covost_test_cuts) 
+        
+            test_sets += [f"covost-test-{lang}"]
+            test_dls += [covost_test_dl]
+            gt_captions += ["None"] 
         
     elif params.task_type == "AC":
         if params.use_clotho:
