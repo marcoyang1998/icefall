@@ -627,7 +627,9 @@ def get_parser():
         "--use-lowercase",
         type=str2bool,
         default=False,
-        help="Whether to lowercase the input",
+        help="""Whether to lowercase the target. Note that for some tasks, the target 
+        should not be affected!
+        """,
     )
 
     add_model_arguments(parser)
@@ -1003,8 +1005,11 @@ def compute_loss(
     warm_step = params.warm_step
 
     texts = batch["supervisions"]["text"]
-    if params.use_lowercase:
-        texts = [s.lower() for s in texts]
+    texts = target_text_preprocessing(
+        texts=texts, 
+        task_names=task_names,
+        params=params,
+    )
     
     texts = [prompt + t + params.eos_token for prompt, t in zip(task_prompts, texts)]
 
@@ -1082,6 +1087,20 @@ def compute_validation_loss(
 
     return tot_loss
 
+def target_text_preprocessing(texts: List[str], task_names: List[str], params: AttributeDict):
+    if not params.use_lowercase: # no-op
+        return texts
+    num_texts = len(texts)
+    new_texts = []
+    for i in range(num_texts):
+        task = task_names[i]
+        orig_text = texts[i]
+        if task == "ASR":
+            new_texts.append(orig_text.lower())
+        else:
+            new_texts.append(orig_text)
+    return new_texts
+    
 
 def train_one_epoch(
     params: AttributeDict,
@@ -1424,7 +1443,7 @@ def run(rank, world_size, args):
             return False
         return True
     
-    assert params.use_librispeech or params.use_clotho or params.use_audiocaps or params.use_covost
+    assert params.use_librispeech or params.use_aishell or params.use_clotho or params.use_audiocaps or params.use_covost
     
     # ASR data
     if params.use_librispeech:
@@ -1460,19 +1479,26 @@ def run(rank, world_size, args):
         c.supervisions[0].text = c.translation
         return c
     
+    def _set_cut_id(input_language:str, output_language: str, c: Cut):
+        c.id = c.id + f"-{input_language}-{output_language}"
+        return c
+    
     # AST data
     if params.use_covost:
-        covost_cuts = librispeech.covost_train_cuts().repeat(
-            times=params.repeat_covost,
-            preserve_id=False,
-        )
-        covost_cuts_len = 232939
+        tgt_languages = params.ast_tgt_languages.split(',')
+        for lang in tgt_languages:
+            covost_cuts = librispeech.covost_train_cuts(lang).repeat(
+                times=params.repeat_covost,
+                preserve_id=False,
+            )
+            covost_cuts_len = 232939
 
-        covost_cuts = covost_cuts.map(_set_translation_as_text)
-        covost_cuts = covost_cuts.map(partial(_set_task_prompt, "AST", "en", "zh"))
-        covost_cuts = covost_cuts.filter(remove_short_and_long_utt_covost)
-        train_cuts.append(covost_cuts)
-        sampling_weights.append(covost_cuts_len)
+            covost_cuts = covost_cuts.map(partial(_set_cut_id, "en", lang))
+            covost_cuts = covost_cuts.map(_set_translation_as_text)
+            covost_cuts = covost_cuts.map(partial(_set_task_prompt, "AST", "en", lang))
+            covost_cuts = covost_cuts.filter(remove_short_and_long_utt_covost)
+            train_cuts.append(covost_cuts)
+            sampling_weights.append(covost_cuts_len)
 
     # AC data
     if params.use_clotho:
@@ -1557,14 +1583,16 @@ def run(rank, world_size, args):
         
     # For AST 
     if params.use_covost:
-        covost_valid_cuts = librispeech.covost_dev_cuts()
-        covost_valid_cuts = covost_valid_cuts.map(_set_translation_as_text)
-        covost_valid_cuts = covost_valid_cuts.map(partial(_set_task_prompt, "AST", "en", "zh"))
-        covost_valid_cuts = covost_valid_cuts.filter(remove_short_and_long_utt_covost)
-        covost_valid_dl = librispeech.valid_dataloaders(covost_valid_cuts)
-        
-        valid_dls.append(covost_valid_dl)
-        valid_sets.append("AST_covost")
+        tgt_languages = params.ast_tgt_languages.split(',')
+        for lang in tgt_languages:
+            covost_valid_cuts = librispeech.covost_dev_cuts(lang)
+            covost_valid_cuts = covost_valid_cuts.map(_set_translation_as_text)
+            covost_valid_cuts = covost_valid_cuts.map(partial(_set_task_prompt, "AST", "en", lang))
+            covost_valid_cuts = covost_valid_cuts.filter(remove_short_and_long_utt_covost)
+            covost_valid_dl = librispeech.valid_dataloaders(covost_valid_cuts)
+            
+            valid_dls.append(covost_valid_dl)
+            valid_sets.append(f"AST_covost_{lang}")
     
     # For AC
     if params.use_clotho:
