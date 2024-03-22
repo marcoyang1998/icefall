@@ -73,6 +73,19 @@ from icefall.utils import (
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
+emo_dict = {
+    "fru": "frustrated",
+    "ang": "angry",
+    "neu": "neutral",
+    "sad": "sad",
+    "exc": "excited",
+    "hap": "happy",
+    "fea": "featful",
+    "sur": "surprised",
+    "oth": "other",
+    "dis": "disgusted",
+}
+
 def get_adjusted_batch_count(params: AttributeDict) -> float:
     # returns the number of batches we would have used so far if we had used the reference
     # duration.  This is for purposes of set_batch_count().
@@ -117,6 +130,7 @@ def get_task_prompt(
         "ASR": "<|transcribe|>",
         "AC": "<|audiocaption|>",
         "AST": "<|translate|>",
+        "ER": "<|emotionrecognition|>",
     }
     
     language_tags = {
@@ -621,6 +635,13 @@ def get_parser():
         type=int,
         default=3,
         help="How many times to repeat audio caption data",
+    )
+    
+    parser.add_argument(
+        "--repeat-iemocap",
+        type=int,
+        default=3,
+        help="How many times to repeat emotion recognition data",
     )
 
     parser.add_argument(
@@ -1443,7 +1464,7 @@ def run(rank, world_size, args):
             return False
         return True
     
-    assert params.use_librispeech or params.use_aishell or params.use_clotho or params.use_audiocaps or params.use_covost
+    assert params.use_librispeech or params.use_aishell or params.use_clotho or params.use_audiocaps or params.use_covost or params.use_iemocap
     
     # ASR data
     if params.use_librispeech:
@@ -1518,6 +1539,22 @@ def run(rank, world_size, args):
         audiocaps_cuts =audiocaps_cuts.map(partial(_set_task_prompt, "AC", "unk", "en"))
         train_cuts.append(audiocaps_cuts)
         sampling_weights.append(42104 * params.repeat_AC)
+    
+    # convert the emotion to a full sentence
+    def emotion2text(c):
+        emotion = c.supervisions[0].emotion
+        c.supervisions[0].text = f"The emotion of the person is {emo_dict[emotion]}."
+        return c
+    
+    if params.use_iemocap:
+        iemocap_cuts = librispeech.iemocap_train_cuts().repeat(
+            params.repeat_iemocap,
+            preserve_id=False,
+        )
+        iemocap_cuts = iemocap_cuts.map(partial(_set_task_prompt, "ER", "en", "en"))
+        iemocap_cuts = iemocap_cuts.map(emotion2text)
+        train_cuts.append(iemocap_cuts)
+        sampling_weights.append(5882 * params.repeat_iemocap)
 
     if len(train_cuts) > 1:
         logging.info(f"Using mux to combine {train_cuts}")
@@ -1610,6 +1647,15 @@ def run(rank, world_size, args):
         
         valid_dls.append(audiocaps_valid_dl)
         valid_sets.append("AC_audiocaps")
+        
+    if params.use_iemocap:
+        iemocap_valid_cuts = librispeech.iemocap_test_cuts()
+        iemocap_valid_cuts = iemocap_valid_cuts.map(partial(_set_task_prompt, "ER", "en", "en"))
+        iemocap_valid_cuts = iemocap_valid_cuts.map(emotion2text)
+        iemocap_valid_dl = librispeech.valid_dataloaders(iemocap_valid_cuts)
+        
+        valid_dls.append(iemocap_valid_dl)
+        valid_sets.append("ER_iemocap")
     
     logging.info(valid_sets)
 

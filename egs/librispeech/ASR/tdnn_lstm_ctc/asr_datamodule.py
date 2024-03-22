@@ -297,6 +297,13 @@ class LibriSpeechAsrDataModule:
             default=False,
             help="If using clotho for training AC"
         )
+        
+        group.add_argument(
+            "--use-iemocap",
+            type=str2bool,
+            default=False,
+            help="If using iemocap for emotion recognition"
+        )
 
     def train_dataloaders(
         self,
@@ -672,6 +679,20 @@ class LibriSpeechAsrDataModule:
         logging.info("About to get audiocaps test cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "cuts_audiocaps_test.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def iemocap_train_cuts(self) -> CutSet:
+        # iemocap has 5 sessions, the first 4 sessions are used as training set
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_iemocap_train.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def iemocap_test_cuts(self) -> CutSet:
+        # iemocap has 5 sessions, the first 4 sessions are used as training set
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_iemocap_test.jsonl.gz"
         )
 
     @lru_cache()
