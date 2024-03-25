@@ -684,15 +684,18 @@ class LibriSpeechAsrDataModule:
     @lru_cache()
     def iemocap_train_cuts(self) -> CutSet:
         # iemocap has 5 sessions, the first 4 sessions are used as training set
+        # the filtered dataset only contains 4 emotion categories, i.e happy,
+        # angry, sad, neutral. Note that "excited" is merged with the class
+        # happy. See Sec3.1 https://arxiv.org/pdf/2010.14102.pdf#/.
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_iemocap_train.jsonl.gz"
+            self.args.manifest_dir / "cuts_iemocap_train_filtered.jsonl.gz"
         )
         
     @lru_cache()
     def iemocap_test_cuts(self) -> CutSet:
         # iemocap has 5 sessions, the first 4 sessions are used as training set
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_iemocap_test.jsonl.gz"
+            self.args.manifest_dir / "cuts_iemocap_test_filtered.jsonl.gz"
         )
 
     @lru_cache()
