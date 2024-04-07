@@ -18,7 +18,7 @@ from sklearn.metrics import average_precision_score
 from lhotse import load_manifest
 from kd_datamodule import LibriSpeechKDDataModule
 
-from train_multi_KD import add_model_arguments, get_model, get_params
+from train_multi_KD3 import add_model_arguments, get_model, get_params
 from utils import get_class_dict, str2multihot
 
 from icefall import ContextGraph, LmScorer, NgramLm
@@ -326,7 +326,7 @@ def main():
     assert (params.trained_with_distillation and params.trained_with_multitask) == False
 
     if params.trained_with_distillation:
-        from train_multi_KD import get_model
+        from train_multi_KD3 import get_model
         model = get_model(params)
     elif params.trained_with_multitask:
         from train_asr import get_model

@@ -115,6 +115,13 @@ def add_fields_to_manifest(
     whisper_cb_manifest: str=None,
 ):
     orig_cuts = load_manifest(orig_manifest)
+    
+    def filter_long_sentence(c):
+        if c.duration > 29.0 or c.duration < 1.0:
+            return False
+        return True
+    orig_cuts = orig_cuts.filter(filter_long_sentence)
+    
     logging.info("Finish loading original manifest")
     
     new_cuts = []
@@ -167,8 +174,9 @@ def add_task_id(input_manifest, output_manifest, id):
     # ASR: 0
     # SV: 1
     # AT：2
-    cuts = load_manifest(manifest)
+    cuts = load_manifest_lazy(input_manifest)
 
+    import pdb; pdb.set_trace()
     def _add_task_id(c):
         c.task_id = id
         return c
@@ -177,11 +185,14 @@ def add_task_id(input_manifest, output_manifest, id):
     logging.info(f"Saving the output manifest to {output_manifest}")
     cuts.to_jsonl(output_manifest)
 
-def add_dummy_embeddings(input_manifest, output_manifest, whisper_dim=1280):
+def add_dummy_embeddings_and_taskID(input_manifest, output_manifest, whisper_dim=1280, task_ID: int=0):
+    # ASR: 0
+    # SV: 1
+    # AT：2
     from lhotse.features.io import NumpyHdf5Writer
 
-    import pdb; pdb.set_trace()
-    # cuts = load_manifest(input_manifest)
+    cuts = load_manifest_lazy(input_manifest)
+    logging.info(f"Finish loading the manifest")
 
     T = 1510
     dummy_whisper_embedding = np.random.rand(1510, whisper_dim) # (T, whisper_dim)
@@ -207,8 +218,6 @@ def add_dummy_embeddings(input_manifest, output_manifest, whisper_dim=1280):
             value=dummy_ecapa_embedding,
         )
 
-    import pdb; pdb.set_trace()
-
     dummy_beats_path = "dummy_beats_embedding.h5"
     assert not os.path.exists(dummy_beats_path)
     with NumpyHdf5Writer("dummy_beats_embedding.h5") as writer:
@@ -217,45 +226,21 @@ def add_dummy_embeddings(input_manifest, output_manifest, whisper_dim=1280):
             value=dummy_beats_embedding,
         )
 
-    new_cuts = []
-    for c in cuts:
+    def add_embeddings(c):
         if not c.has_custom("whisper_embedding"):
             c.whisper_embedding = dummy_whisper_embedding
         if not c.has_custom("ecapa_embedding"):
             c.ecapa_embedding = dummy_ecapa_embedding
         if not c.has_custom("beats_embedding"):
             c.beats_embedding = dummy_beats_embedding
-        new_cuts.append(c)
+        c.task_id = task_ID
+        return c
+
+    cuts = cuts.map(add_embeddings)
+    import pdb; pdb.set_trace()
 
     logging.info(f"Saved manifest to {output_manifest}") 
-    CutSet.from_cuts(new_cuts).to_jsonl(output_manifest)
-
-def change_whisper_dummy_embedding(input_manifest, output_manifest, whisper_dim=1280):
-    from lhotse.features.io import NumpyHdf5Writer
-
-    import pdb; pdb.set_trace()
-    cuts = load_manifest(input_manifest)
-
-    dummy_whisper_embedding = np.random.rand(510, whisper_dim) # (T, whisper_dim)
-
-    import pdb; pdb.set_trace()
-    with NumpyHdf5Writer("dummy_whisper_embedding_510.h5") as writer:
-        dummy_whisper_embedding = writer.store_array(
-            key="dummy_whisper_embedding",
-            value=dummy_whisper_embedding,
-            temporal_dim=0,
-            frame_shift=0.02,
-            start=0,
-        )
-
-    def _change_embedding(c):
-        c.whisper_embedding = dummy_whisper_embedding
-        return c
-    
-    cuts = cuts.map(_change_embedding)
-    logging.info(f"Saving manifest to {output_manifest}") 
     cuts.to_jsonl(output_manifest)
-
 
 if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
@@ -278,15 +263,15 @@ if __name__=="__main__":
     #         whisper_cb_manifest=f"data/fbank_with_whisper_{teacher_model}/with_cb_librispeech_{key}.jsonl.gz",
     #     )
 
-    # keys = ["eval"]
+    # keys = ["test"]
     # teacher = "large-v3"
     # for key in keys:
     #     add_fields_to_manifest(
-    #         orig_manifest=f"data/fbank_audioset/cuts_audioset_{key}.jsonl.gz",
-    #         output_manifest=f"data/fbank_with_as_with_whisper_{teacher}/cuts_audioset_{key}-with-3-embeddings.jsonl.gz",
-    #         beats_manifest=f"data/fbank_audioset/cuts_audioset_{key}-with-beats-embeddings.jsonl.gz",
-    #         ecapa_manifest=f"data/fbank_audioset/cuts_audioset_{key}-with-ecapa-embeddings.jsonl.gz",
-    #         whisper_manifest=f"data/fbank_with_as_with_whisper_{teacher}/whisper-{teacher}--1-embeddings-audioset-{key}.jsonl.gz",
+    #         orig_manifest=f"data/fbank/cuts_vox1_{key}.jsonl.gz",
+    #         output_manifest=f"data/fbank_vox1/cuts_xo1_{key}-with-3-embeddings.jsonl.gz",
+    #         beats_manifest=f"data/fbank_vox1/cuts_audioset_{key}-with-beats-embeddings.jsonl.gz",
+    #         ecapa_manifest=f"data/fbank_vox1/ecapa-tdnn-embeddings-{key}.jsonl.gz",
+    #         whisper_manifest=f"data/fbank_vox1/whisper-{teacher}--1-embeddings-audioset-{key}.jsonl.gz",
     #     )
 
     ######## For speaker dictionary ########
@@ -298,22 +283,13 @@ if __name__=="__main__":
     # with open("data/speaker/librispeech_cuts_train-all-shuf.pkl", "wb") as f:
     #     pickle.dump(spkr_dict, f)
     
-    ######## For adding task ID
-    # manifest = "/star-data/xiaoyu/icefall_multi_KD/egs/librispeech/ASR/data/fbank_with_as_with_whisper_large-v3/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
-    # output_manifest = "/star-data/xiaoyu/icefall_multi_KD/egs/librispeech/ASR/data/fbank_with_as_with_whisper_large-v3_with_taskID/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
-
-    # add_task_id(manifest, output_manifest, id=2)
 
     ######## For adding dummy embeddings
-    input_manifest = "data/fbank/cuts_vox1.jsonl.gz"
-    output_manifest = "data/fbank_LSVoxAs_with_whisper_large-v3_with_taskID/cuts_vox1_train-with-3-embeddings.jsonl.gz"
-    add_dummy_embeddings(
+    input_manifest = "data/fbank_vox1/cuts_vox1_test-with-1-embeddings.jsonl.gz"
+    output_manifest = "data/fbank_vox1/cuts_vox1_test-with-3-embeddings.jsonl.gz"
+    add_dummy_embeddings_and_taskID(
         input_manifest=input_manifest,
         output_manifest=output_manifest,
-        whisper_dim=1280
+        whisper_dim=1280,
+        task_ID=1,
     )
-
-    # change_whisper_dummy_embedding(
-    #     input_manifest=input_manifest,
-    #     output_manifest=output_manifest,
-    # )
