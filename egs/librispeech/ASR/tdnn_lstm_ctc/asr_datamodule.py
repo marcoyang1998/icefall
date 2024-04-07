@@ -250,6 +250,20 @@ class LibriSpeechAsrDataModule:
             help="If use whisper teacher model when collecting batch;",
             default=True,
         )
+        
+        group.add_argument(
+            "--use-librispeech",
+            type=str2bool,
+            default=False,
+            help="If use librispeech as the training set.",
+        )
+        
+        group.add_argument(
+            "--use-wenetspeech",
+            type=str2bool,
+            default=False,
+            help="If use wenetspeech as the training set.",
+        )
 
         group.add_argument(
             "--use-voxceleb",
@@ -558,6 +572,34 @@ class LibriSpeechAsrDataModule:
         logging.info("About to get test-other cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_test-other.jsonl.gz"
+        )
+        
+    @lru_cache
+    def wenetspeech_train_cuts(self) -> CutSet:
+        logging.info(f"About to get wenetspeech training cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_M-with-whisper-large-v3-layer--3-embeddings.jsonl.gz"
+        )
+        
+    @lru_cache
+    def wenetspeech_dev_cuts(self) -> CutSet:
+        logging.info(f"About to get wenetspeech DEV cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_DEV-with-whisper-large-v3-layer--3-embeddings.jsonl.gz"
+        )
+        
+    @lru_cache
+    def wenetspeech_test_net_cuts(self) -> CutSet:
+        logging.info(f"About to get wenetspeech test NET cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_TEST_NET.jsonl.gz"
+        )
+        
+    @lru_cache
+    def wenetspeech_test_meeting_cuts(self) -> CutSet:
+        logging.info(f"About to get wenetspeech test MEETING cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "cuts_TEST_MEETING.jsonl.gz"
         )
 
     @lru_cache()

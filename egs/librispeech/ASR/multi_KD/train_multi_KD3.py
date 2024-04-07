@@ -99,6 +99,8 @@ from icefall.utils import (
     str2bool,
 )
 
+from functools import partial
+
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
 
@@ -816,16 +818,19 @@ def compute_loss(
     whisper_codebook_indexes = None
     whisper_codebook_indexes_lens = None
     
-    if params.use_task_id and is_training:
-        try:
-            task_id = torch.tensor([c.task_id for c in cuts]).to(device)
-        except:
-            task_id = torch.tensor([0 for _ in cuts]).to(device)
-        if random.random() < 0.05:
-            logging.info(cut_ids)
-            logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS, {sum(task_id==1)} from Vox, {sum(task_id==2)} fro AS")
+    if is_training:
+        if params.use_task_id:
+            try:
+                task_id = torch.tensor([c.task_id for c in cuts]).to(device)
+            except:
+                task_id = torch.tensor([0 for _ in cuts]).to(device)
+            if random.random() < 0.05:
+                logging.info(cut_ids)
+                logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS+wenet, {sum(task_id==1)} from Vox, {sum(task_id==2)} fro AS")
+        else:
+            task_id = None
     else:
-        task_id = None
+        task_id = torch.tensor([c.task_id for c in cuts]).to(device)
 
     feature_lens = supervisions["num_frames"].to(device)
 
@@ -870,6 +875,16 @@ def compute_loss(
         if params.use_whisper:
             if task_id is not None:
                 asr_mask = task_id == 0
+                mask = whisper_loss.abs() > 30
+                whisper_loss.clamp_(-30, 30) # loss clamping
+                
+                # nan_mask = whisper_loss.isnan()
+                # whisper_loss[nan_mask] = 0.0
+                # if nan_mask.sum() > 0:
+                #     from lhotse.utils import uuid4
+                #     batch_name = params.exp_dir / f"bad_batch_{uuid()}.pt"
+                #     logging.info(f"Encountering nan! Save bad batch to {batch_name}!")
+                #     torch.save(batch, params.exp_dir / batch_name)
                 whisper_loss *= asr_mask.unsqueeze(-1).unsqueeze(-1)
             whisper_loss = whisper_loss.sum()
             loss += whisper_loss * params.whisper_loss_scale
@@ -1235,58 +1250,58 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechKDDataModule(args, device=device)
     train_cuts = []
-    sampling_weights = [] 
-    if not params.full_libri: 
-        librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
-            times=params.repeat_librispeech,
-            preserve_id=False,
-        )
-        librispeech_cuts_len = 28539 * params.repeat_librispeech  # no speed purturb
-    else:
-        librispeech_cuts = librispeech.train_960_cuts().repeat(
-            times=params.repeat_librispeech,
-            preserve_id=False,
-        )
-        librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
-    train_cuts.append(librispeech_cuts)
-    sampling_weights.append(librispeech_cuts_len)
+    sampling_weights = []
+    
+    if params.use_librispeech:
+        if not params.full_libri: 
+            librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
+                times=params.repeat_librispeech,
+                preserve_id=False,
+            )
+            librispeech_cuts_len = 28539 * params.repeat_librispeech  # no speed purturb
+        else:
+            librispeech_cuts = librispeech.train_960_cuts().repeat(
+                times=params.repeat_librispeech,
+                preserve_id=False,
+            )
+            librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
+        train_cuts.append(librispeech_cuts)
+        sampling_weights.append(librispeech_cuts_len)
     
     if params.use_wenetspeech:
+        def _fix_offset(c):
+            c.whisper_embedding.start = c.start
+            return c
+            
         wenetspeech_cuts = librispeech.wenetspeech_train_cuts().repeat(
             times=params.repeat_wenetspeech,
             preserve_id=False,
         )
+        wenetspeech_cuts = wenetspeech_cuts.map(_fix_offset)
         wenetspeech_cuts_len = 1375798
         train_cuts.append(wenetspeech_cuts)
         sampling_weights.append(wenetspeech_cuts_len)
 
-    audioset_cuts_lens = {
-        "balanced": 21155,
-        "unbalanced": 1883591 + 21155
-    }
     if params.use_audioset:
+        audioset_cuts_lens = {
+            "balanced": 21155,
+            "unbalanced": 1883591 + 21155
+        }
         logging.info(f"Getting audioset cuts")
         audioset_cuts = librispeech.audioset_cuts_KD()
         train_cuts.append(audioset_cuts)
         sampling_weights.append(audioset_cuts_lens[params.audioset_subset])
-    else:
-        audioset_cuts = None
-    logging.info(f"AudioSet cuts: {audioset_cuts}")
 
-    voxceleb_cuts_lens = {
-        "vox1": 148642,
-        "vox2": 1039062 + 148642,
-    }
-
-    if params.use_voxceleb: 
+    if params.use_voxceleb:
+        voxceleb_cuts_lens = {
+            "vox1": 148642,
+            "vox2": 1039062 + 148642,
+        }
         vox_cuts = librispeech.voxceleb_cuts()
         train_cuts.append(vox_cuts)
         sampling_weights.append(voxceleb_cuts_lens[params.voxceleb_subset])
-    else:
-        vox_cuts = None
-    logging.info(f"VoxCeleb cuts: {vox_cuts}")
     
-    logging.info(f"Using mux to combine Librispeech, audioset and voxceleb")
+    logging.info(f"Using mux to combine Librispeech: {params.use_librispeech}, WenetSpeech: {params.use_wenetspeech}, audioset: {params.use_audioset} and voxceleb: {params.use_voxceleb}")
     if len(train_cuts) > 1:
         logging.info(f"Using mux to combine {train_cuts}")
         logging.info(f"Using weights: {sampling_weights}")
@@ -1302,9 +1317,6 @@ def run(rank, world_size, args):
 
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 1.0 or c.duration > 28.0:
-            # logging.warning(
-            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            # )
             return False
         
         if len(c.supervisions) == 0:
@@ -1333,36 +1345,55 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    # ASR validation
-    asr_valid_cuts = librispeech.dev_clean_cuts()
-    asr_valid_cuts += librispeech.dev_other_cuts()
-
-    asr_valid_cuts = asr_valid_cuts.filter(remove_short_and_long_utt)
-    asr_valid_dl = librispeech.valid_dataloaders(asr_valid_cuts)
+    valid_sets = []
+    valid_dls = []
     
-    asr_wenet_cuts = librispeech.wenetspeech_dev_cuts()
-    asr_wenet_cuts = asr_wenet_cuts.filter(remove_short_and_long_utt)
-    asr_wenet_valid_dl = librispeech.valid_dataloaders(asr_wenet_cuts)
+    def _set_task_id(id: int, c: Cut):
+        c.task_id = id
+        return c
 
+    # ASR validation
+    if params.use_librispeech:
+        asr_valid_cuts = librispeech.dev_clean_cuts()
+        asr_valid_cuts += librispeech.dev_other_cuts()
+
+        asr_valid_cuts = asr_valid_cuts.map(partial(_set_task_id, 0))
+        asr_valid_cuts = asr_valid_cuts.filter(remove_short_and_long_utt)
+        asr_valid_dl = librispeech.valid_dataloaders(asr_valid_cuts)
+        
+        valid_sets.append("ASR_libri")
+        valid_dls.append(asr_valid_dl)
+        
+    if params.use_wenetspeech:
+        asr_wenet_cuts = librispeech.wenetspeech_dev_cuts()
+        asr_wenet_cuts = asr_wenet_cuts.map(partial(_set_task_id, 0))
+        asr_wenet_cuts = asr_wenet_cuts.filter(remove_short_and_long_utt)
+        asr_wenet_valid_dl = librispeech.valid_dataloaders(asr_wenet_cuts)
+        
+        valid_sets.append("ASR_wenet")
+        valid_dls.append(asr_wenet_valid_dl)
+    
+    # sv validation
+    if params.use_voxceleb:
+        vox_test_cuts = librispeech.voxceleb1_test_cuts()
+        vox_test_cuts = vox_test_cuts.map(partial(_set_task_id, 1))
+        vox_test_cuts = vox_test_cuts.filter(remove_short_and_long_utt)
+        vox_test_dl = librispeech.valid_dataloaders(vox_test_cuts)
+        
+        valid_sets.append("SV_voxceleb1")
+        valid_dls.append(vox_test_dl)
+    
     # audio tagging validation
-    at_valid_cuts = load_manifest_lazy(
-        "data/fbank_LSVoxAs_with_whisper_large-v3_with_taskID/cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
-    )
+    if params.use_audioset:
+        at_eval_cuts = librispeech.audioset_eval_cuts()
+        at_eval_cuts = at_eval_cuts.map(partial(_set_task_id, 2))
+        at_eval_cuts = at_eval_cuts.filter(remove_short_and_long_utt)
+        at_valid_dl = librispeech.valid_dataloaders(at_eval_cuts)
+        
+        valid_sets.append("AT_audioset")
+        valid_dls.append(at_valid_dl)
 
-    at_valid_cuts = at_valid_cuts.filter(remove_short_and_long_utt)
-    at_valid_dl = librispeech.valid_dataloaders(at_valid_cuts)
-
-    valid_sets = ["ASR", "ASR_wenet", "Audio tagging"]
-    valid_dls = [asr_valid_dl, asr_wenet_valid_dl, at_valid_dl]
-
-    # if not params.print_diagnostics:
-    #     scan_pessimistic_batches_for_oom(
-    #         model=model,
-    #         train_dl=train_dl,
-    #         optimizer=optimizer,
-    #         sp=sp,
-    #         params=params,
-    #     )
+    logging.info(valid_sets)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
@@ -1444,9 +1475,9 @@ def display_and_save_batch(
 
     logging.info(f"features shape: {features.shape}")
 
-    y = sp.encode(supervisions["text"], out_type=int)
-    num_tokens = sum(len(i) for i in y)
-    logging.info(f"num tokens: {num_tokens}")
+    # y = sp.encode(supervisions["text"], out_type=int)
+    # num_tokens = sum(len(i) for i in y)
+    # logging.info(f"num tokens: {num_tokens}")
 
 
 def scan_pessimistic_batches_for_oom(

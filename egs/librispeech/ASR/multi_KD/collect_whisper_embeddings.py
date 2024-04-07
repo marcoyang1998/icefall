@@ -148,7 +148,7 @@ def extract_embeddings(
                     value=embeddings[idx][: embedding_lens[idx]],
                     temporal_dim=0,
                     frame_shift=0.02,
-                    start=0,
+                    start=c.start,
                 )
                 new_cuts.append(new_cut)
                 num_cuts += 1
