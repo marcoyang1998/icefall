@@ -171,10 +171,17 @@ class LibriSpeechKDDataModule:
         )
         
         group.add_argument(
+            "--use-librispeech",
+            type=str2bool,
+            default=False,
+            help="If use librispeech as the training set.",
+        )
+        
+        group.add_argument(
             "--use-wenetspeech",
             type=str2bool,
             default=False,
-            help="If ONLY use audioset as the training set.",
+            help="If use wenetspeech as the training set.",
         )
 
         group.add_argument(
@@ -774,7 +781,7 @@ class LibriSpeechKDDataModule:
     def voxceleb1_test_cuts(self) -> CutSet:
         logging.info("About to get the test set of voxceleb1 set.")
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_vox1_test.jsonl.gz"
+            self.args.manifest_dir / "cuts_vox1_test-with-3-embeddings.jsonl.gz"
         )
         
     @lru_cache()
@@ -846,8 +853,9 @@ class LibriSpeechKDDataModule:
     def audioset_eval_cuts(self) -> CutSet:
         logging.info("About to get the audioset eval cuts.")
         return load_manifest_lazy(
-            "data/fbank_audioset/cuts_audioset_eval-with-beats-embeddings.jsonl.gz"
+            self.args.manifest_dir / "cuts_audioset_eval-with-3-embeddings.jsonl.gz"
         )
+        
     @lru_cache()
     def audioset_eval_cuts_no_KD(self) -> CutSet:
         logging.info("About to get the audioset eval cuts.")

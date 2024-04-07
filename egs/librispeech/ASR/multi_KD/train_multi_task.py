@@ -83,12 +83,13 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from train_multi_KD import get_encoder_embed, get_encoder_model
+from train_multi_KD3 import get_encoder_embed, get_encoder_model
 from utils import compare_model, str2multihot, ced2beats_mapping
 
 from zipformer import Zipformer2
 
 from icefall import diagnostics
+from icefall.char_graph_compiler import CharCtcTrainingGraphCompiler
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
 from icefall.checkpoint import (
@@ -98,6 +99,7 @@ from icefall.checkpoint import (
 from icefall.dist import cleanup_dist, setup_dist
 from icefall.env import get_env_info
 from icefall.hooks import register_inf_check_hooks
+from icefall.lexicon import Lexicon
 from icefall.utils import (
     AttributeDict,
     MetricsTracker,
@@ -328,6 +330,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If do audio tagging multi task training"
     )
+    
+    parser.add_argument(
+        "--audio-tagging-KD",
+        type=str2bool,
+        default=False,
+        help="If training audio tagging with soft labels"
+    )
 
     parser.add_argument(
         "--use-encoder-projection",
@@ -457,6 +466,22 @@ def get_parser():
         It specifies the directory where all training related
         files, e.g., checkpoints, log, etc, are saved
         """,
+    )
+    
+    parser.add_argument(
+        "--lang-dir",
+        type=str,
+        default="data/lang_char",
+        help="""The lang dir
+        It contains language related input files such as
+        "lexicon.txt"
+        """,
+    )
+
+    parser.add_argument(
+        "--use-bpe",
+        type=str2bool,
+        help="If use BPE model (English), Otherwise use char (Chinese)"
     )
 
     parser.add_argument(
@@ -622,6 +647,13 @@ def get_parser():
     
     parser.add_argument(
         "--repeat-librispeech",
+        type=int,
+        default=1,
+        help="Repeat Librispeech in one epoch for how many times"
+    )
+    
+    parser.add_argument(
+        "--repeat-wenetspeech",
         type=int,
         default=1,
         help="Repeat Librispeech in one epoch for how many times"
@@ -820,7 +852,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_ctc=params.use_ctc,
         do_audio_tagging=params.do_audio_tagging,
         do_speaker_verification=params.do_sv,
-        num_spkrs=params.num_spkrs,
+        num_spkrs=params.num_spkrs if params.do_sv else 0,
         speaker_input_idx=params.speaker_input_idx,
         freeze_encoder=params.freeze_encoder,
         freezing_encoder_layer_index=params.freezing_encoder_layer_index,
@@ -1033,20 +1065,28 @@ def compute_loss(
     feature_lens = supervisions["num_frames"].to(device)
 
     # audio tagging label
-    events = [c.supervisions[0].audio_event if hasattr(c.supervisions[0], "audio_event") else "0" for c in cuts]
-    if random.random() < 0.03:
-        logging.info(f"Audio tagging label: {events}")
-    #events = supervisions["audio_event"] # the label indices are in CED format
-    if params.beats_label:
-        audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
+    if params.do_audio_tagging:
+        if params.audio_tagging_KD:
+            audio_tagging_label = extract_beats_embeddings(cuts).squeeze(1).to(device)
+        else:
+            events = [c.supervisions[0].audio_event if hasattr(c.supervisions[0], "audio_event") else "0" for c in cuts]
+            if random.random() < 0.03:
+                logging.info(f"Audio tagging label: {events}")
+            if params.beats_label:
+                audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
+            else:
+                audio_tagging_label, _ = str2multihot(events)
+            audio_tagging_label = audio_tagging_label.to(device)
     else:
-        audio_tagging_label, _ = str2multihot(events)
-    audio_tagging_label = audio_tagging_label.to(device)
-    # audio_tagging_label = extract_beats_embeddings(cuts).squeeze(1).to(device)
+        audio_tagging_label = None
 
     # ASR labels
     texts = batch["supervisions"]["text"]
-    y = sp.encode(texts, out_type=int)
+    if params.use_bpe:
+        y = sp.encode(texts, out_type=int)
+    else:
+        y = sp.texts_to_ids(texts)
+    
     y = k2.RaggedTensor(y)
     
     batch_idx_train = params.batch_idx_train
@@ -1425,12 +1465,20 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
+    if params.use_bpe:
+        sp = spm.SentencePieceProcessor()
+        sp.load(params.bpe_model)        
+        # <blk> is defined in local/train_bpe_model.py
+        params.blank_id = sp.piece_to_id("<blk>")
+        params.vocab_size = sp.get_piece_size()
+    else:
+        lexicon = Lexicon(params.lang_dir)
+        sp = CharCtcTrainingGraphCompiler(
+            lexicon=lexicon,
+            device=device,
+        )
+        params.blank_id = lexicon.token_table["<blk>"]
+        params.vocab_size = max(lexicon.tokens) + 1
 
     if not params.use_transducer:
         params.ctc_loss_scale = 1.0
@@ -1513,7 +1561,7 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    if params.freeze_modules is not None:
+    if params.freeze_modules != "None":
         freeze_modules = params.freeze_modules.split(',') # manually set the freezing parameters
         freeze_modules = [m.strip() for m in freeze_modules]
         # logging.info("Freeze encoder steps is ignored as freeze_encoder is set to true")
@@ -1557,40 +1605,62 @@ def run(rank, world_size, args):
 
     train_cuts = []
     sampling_weights = []
-    if not params.full_libri: 
-        librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
-            times=params.repeat_librispeech,
+    
+    assert params.use_librispeech or params.use_wenetspeech
+    
+    if params.use_librispeech:
+        if not params.full_libri: 
+            librispeech_cuts = librispeech.train_clean_100_cuts().repeat(
+                times=params.repeat_librispeech,
+                preserve_id=False,
+            )
+            librispeech_cuts_len = 28539 * params.repeat_librispeech  # no speed purturb
+        else:
+            librispeech_cuts = librispeech.train_all_shuf_cuts().repeat(
+                times=params.repeat_librispeech,
+                preserve_id=False,
+            )
+            librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
+        train_cuts.append(librispeech_cuts)
+        sampling_weights.append(librispeech_cuts_len)
+        
+    if params.use_wenetspeech:
+        def _fix_offset(c):
+            c.whisper_embedding.start = c.start
+            return c
+            
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts().repeat(
+            times=params.repeat_wenetspeech,
             preserve_id=False,
         )
-        librispeech_cuts_len = 28539 * params.repeat_librispeech  # no speed purturb
-    else:
-        librispeech_cuts = librispeech.train_all_shuf_cuts().repeat(
-            times=params.repeat_librispeech,
-            preserve_id=False,
-        )
-        librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
-    train_cuts.append(librispeech_cuts)
-    sampling_weights.append(librispeech_cuts_len)
+        wenetspeech_cuts = wenetspeech_cuts.map(_fix_offset)
+        wenetspeech_cuts_len = 1375798
+        train_cuts.append(wenetspeech_cuts)
+        sampling_weights.append(wenetspeech_cuts_len)
 
-    audioset_cuts_lens = {
-        "balanced": 21155,
-        "unbalanced": 1883591 + 21155
-    }
+    
     if params.do_audio_tagging:
         logging.info(f"Getting audioset cuts")
+        audioset_cuts_lens = {
+            "balanced": 21155,
+            "unbalanced": 1883591 + 21155
+        }
         audioset_cuts = librispeech.audioset_cuts_KD()
         train_cuts.append(audioset_cuts)
         sampling_weights.append(audioset_cuts_lens[params.audioset_subset])
     else:
         audioset_cuts = None
+        
     logging.info(f"AudioSet cuts: {audioset_cuts}")
 
-    voxceleb_cuts_lens = {
-        "vox1": 148642,
-        "vox2": 1039062 + 148642,
-        "only_vox2": 1039062,
-    }
+    
     if params.do_sv and params.use_voxceleb:
+        logging.info("Getting VoxCeleb cuts")
+        voxceleb_cuts_lens = {
+            "vox1": 148642,
+            "vox2": 1039062 + 148642,
+            "only_vox2": 1039062,
+        }
         vox_cuts = librispeech.voxceleb_cuts()
         if params.voxceleb_subset == "only_vox2":
             params.spkr_dict = librispeech.voxceleb2_train_spkr_dict()
@@ -1601,6 +1671,7 @@ def run(rank, world_size, args):
     else:
         vox_cuts = None
         params.spkr_dict = {}
+        
     logging.info(f"VoxCeleb cuts: {vox_cuts}")
     
     if len(train_cuts) > 1:
@@ -1622,14 +1693,6 @@ def run(rank, world_size, args):
         return c
 
     def remove_short_and_long_utt(c: Cut):
-        # Keep only utterances with duration between 1 second and 20 seconds
-        #
-        # Caution: There is a reason to select 20.0 here. Please see
-        # ../local/display_manifest_statistics.py
-        #
-        # You should use ../local/display_manifest_statistics.py to get
-        # an utterance duration distribution for your dataset to select
-        # the threshold
         if c.duration < 1.0 or c.duration > 20.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
@@ -1642,19 +1705,19 @@ def run(rank, world_size, args):
 
         # In ./zipformer.py, the conv module uses the following expression
         # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
+        # T = ((c.num_frames - 7) // 2 + 1) // 2
+        # tokens = sp.encode(c.supervisions[0].text, out_type=str)
 
-        if T < len(tokens):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. "
-                f"Number of frames (before subsampling): {c.num_frames}. "
-                f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
-                f"Tokens: {tokens}. "
-                f"Number of tokens: {len(tokens)}"
-            )
-            return False
+        # if T < len(tokens):
+        #     logging.warning(
+        #         f"Exclude cut with ID {c.id} from training. "
+        #         f"Number of frames (before subsampling): {c.num_frames}. "
+        #         f"Number of frames (after subsampling): {T}. "
+        #         f"Text: {c.supervisions[0].text}. "
+        #         f"Tokens: {tokens}. "
+        #         f"Number of tokens: {len(tokens)}"
+        #     )
+        #     return False
 
         return True
 
@@ -1672,13 +1735,24 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.dev_clean_cuts_KD()
-    valid_cuts += librispeech.dev_other_cuts_KD()
-    valid_cuts = valid_cuts.map(add_dummy_text)
-    valid_dl = librispeech.valid_dataloaders(valid_cuts)
-    valid_dls = [valid_dl]
-    valid_sets = ["ASR"]
-    logging.info(valid_cuts)
+    valid_sets = []
+    valid_dls = []
+
+    if params.use_librispeech:
+        valid_cuts = librispeech.dev_clean_cuts_KD()
+        valid_cuts += librispeech.dev_other_cuts_KD()
+        valid_cuts = valid_cuts.map(add_dummy_text)
+        valid_dl = librispeech.valid_dataloaders(valid_cuts)
+        valid_dls.append(valid_dl)
+        valid_sets.append("ASR_libri")
+    
+    if params.use_wenetspeech:
+        asr_wenet_cuts = librispeech.wenetspeech_dev_cuts()
+        asr_wenet_cuts = asr_wenet_cuts.map(add_dummy_text)
+        asr_wenet_valid_dl = librispeech.valid_dataloaders(asr_wenet_cuts)
+        
+        valid_dls.append(asr_wenet_valid_dl)
+        valid_sets.append("ASR_wenet")
     
     if params.do_audio_tagging:
         at_valid_cuts = librispeech.audioset_eval_cuts_KD()
@@ -1688,14 +1762,7 @@ def run(rank, world_size, args):
         logging.info(at_valid_cuts)
         valid_sets += ["Audio"]
     
-    # if not params.print_diagnostics:
-    #     scan_pessimistic_batches_for_oom(
-    #         model=model,
-    #         train_dl=train_dl,
-    #         optimizer=optimizer,
-    #         sp=sp,
-    #         params=params,
-    #     )
+    logging.info(valid_sets)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
