@@ -121,8 +121,10 @@ from beam_search import (
     modified_beam_search_lm_shallow_fusion,
     modified_beam_search_LODR,
 )
-from finetune_asr import add_model_arguments, get_model, get_params
+from train_multi_task import add_model_arguments, get_model, get_params
 
+from icefall.char_graph_compiler import CharCtcTrainingGraphCompiler
+from icefall.lexicon import Lexicon
 from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (
     average_checkpoints,
@@ -193,6 +195,13 @@ def get_parser():
         default="zipformer/exp",
         help="The experiment dir",
     )
+    
+    parser.add_argument(
+        "--use-bpe",
+        type=str2bool,
+        default=False,
+        help="If using BPE model"
+    )
 
     parser.add_argument(
         "--bpe-model",
@@ -204,7 +213,7 @@ def get_parser():
     parser.add_argument(
         "--lang-dir",
         type=Path,
-        default="data/lang_bpe_500",
+        default="data/lang_char",
         help="The lang dir containing word table and LG graph",
     )
 
@@ -382,6 +391,7 @@ def decode_one_batch(
     batch: dict,
     word_table: Optional[k2.SymbolTable] = None,
     decoding_graph: Optional[k2.Fsa] = None,
+    lexicon: Lexicon = None,
     context_graph: Optional[ContextGraph] = None,
     LM: Optional[LmScorer] = None,
     ngram_lm=None,
@@ -511,8 +521,12 @@ def decode_one_batch(
             encoder_out=encoder_out,
             encoder_out_lens=encoder_out_lens,
         )
-        for hyp in sp.decode(hyp_tokens):
-            hyps.append(hyp.split())
+        if params.use_bpe:
+            for hyp in sp.decode(hyp_tokens):
+                hyps.append(hyp.split())
+        else:
+            for i in range(encoder_out.size(0)):
+                hyps.append([lexicon.token_table[idx] for idx in hyp_tokens[i]])
     elif params.decoding_method == "modified_beam_search":
         hyp_tokens = modified_beam_search(
             model=model,
@@ -632,6 +646,7 @@ def decode_dataset(
     model: nn.Module,
     sp: spm.SentencePieceProcessor,
     word_table: Optional[k2.SymbolTable] = None,
+    lexicon: Optional[Lexicon] = None,
     decoding_graph: Optional[k2.Fsa] = None,
     context_graph: Optional[ContextGraph] = None,
     LM: Optional[LmScorer] = None,
@@ -684,6 +699,7 @@ def decode_dataset(
             model=model,
             sp=sp,
             decoding_graph=decoding_graph,
+            lexicon=lexicon,
             context_graph=context_graph,
             word_table=word_table,
             batch=batch,
@@ -696,8 +712,11 @@ def decode_dataset(
             this_batch = []
             assert len(hyps) == len(texts)
             for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
-                ref_words = ref_text.split()
-                this_batch.append((cut_id, ref_words, hyp_words))
+                if params.use_bpe:
+                    ref_words = ref_text.split()
+                    this_batch.append((cut_id, ref_words, hyp_words))
+                else:
+                    this_batch.append((cut_id, ref_text, hyp_words))
 
             results[name].extend(this_batch)
 
@@ -841,13 +860,21 @@ def main():
 
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> and <unk> are defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.unk_id = sp.piece_to_id("<unk>")
-    params.vocab_size = sp.get_piece_size()
+    if params.use_bpe:
+        sp = spm.SentencePieceProcessor()
+        sp.load(params.bpe_model)        
+        # <blk> is defined in local/train_bpe_model.py
+        params.blank_id = sp.piece_to_id("<blk>")
+        params.vocab_size = sp.get_piece_size()
+        lexicon = None
+    else:
+        lexicon = Lexicon(params.lang_dir)
+        sp = CharCtcTrainingGraphCompiler(
+            lexicon=lexicon,
+            device=device,
+        )
+        params.blank_id = lexicon.token_table["<blk>"]
+        params.vocab_size = max(lexicon.tokens) + 1
 
     logging.info(params)
 
@@ -1020,16 +1047,36 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    test_clean_cuts = librispeech.test_clean_cuts()
-    test_other_cuts = librispeech.test_other_cuts()
+    assert params.use_librispeech or params.use_wenetspeech
+    test_sets = []
+    test_dl = []
+    if params.use_librispeech:
+        test_clean_cuts = librispeech.test_clean_cuts()
+        test_other_cuts = librispeech.test_other_cuts()
 
-    test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
-    test_other_dl = librispeech.test_dataloaders(test_other_cuts)
+        test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
+        test_other_dl = librispeech.test_dataloaders(test_other_cuts)
 
-    test_sets = ["test-clean", "test-other"]
-    test_dl = [test_clean_dl, test_other_dl]
+        test_sets += ["test-clean", "test-other"]
+        test_dls += [test_clean_dl, test_other_dl]
+        
+    if params.use_wenetspeech:
+        def remove_short_and_long_utt(c):
+            if c.duration < 1.0 or c.duration > 20.0:
+                return False
+            return True
+        test_net_cuts = librispeech.wenetspeech_test_net_cuts()
+        test_net_cuts = test_net_cuts.filter(remove_short_and_long_utt)
+        test_net_dl = librispeech.test_dataloaders(test_net_cuts)
+        
+        test_meeting_cuts = librispeech.wenetspeech_test_meeting_cuts()
+        test_meeting_cuts = test_meeting_cuts.filter(remove_short_and_long_utt)
+        test_meeting_dl = librispeech.test_dataloaders(test_meeting_cuts)
+        
+        test_sets = ["TEST_NET", "TEST_MEETING"]
+        test_dls = [test_net_dl, test_meeting_dl]
 
-    for test_set, test_dl in zip(test_sets, test_dl):
+    for test_set, test_dl in zip(test_sets, test_dls):
         results_dict = decode_dataset(
             dl=test_dl,
             params=params,
@@ -1037,6 +1084,7 @@ def main():
             sp=sp,
             word_table=word_table,
             decoding_graph=decoding_graph,
+            lexicon=lexicon,
             context_graph=context_graph,
             LM=LM,
             ngram_lm=ngram_lm,
