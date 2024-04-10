@@ -293,6 +293,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--co-training-loss-scale",
+        type=float,
+        default=0.5,
+        help="The loss scale for the co-training loss",
+    )
+
+    parser.add_argument(
         "--ref-duration",
         type=float,
         default=600,
@@ -659,11 +666,19 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
+    co_training_loss_scale = (
+        params.co_training_loss_scale if batch_idx_train > warm_step else 0
+    )
+
     with torch.set_grad_enabled(is_training):
-        loss = model(
+        at_loss, co_training_loss = model(
             x=feature,
             x_lens=feature_lens,
             target=labels,
+        )
+        loss = (
+            at_loss * (1 - co_training_loss_scale)
+            + co_training_loss * co_training_loss_scale
         )
 
     assert loss.requires_grad == is_training
@@ -675,6 +690,8 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
+    info["at_loss"] = at_loss.detach().cpu().item()
+    info["co_training_loss"] = co_training_loss.detach().cpu().item()
 
     return loss, info
 

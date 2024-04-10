@@ -87,7 +87,6 @@ class AudioTaggingModel(nn.Module):
           encoder_out_lens:
             Encoder output lengths, of shape (N,).
         """
-        # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
         x, x_lens = self.encoder_embed(x, x_lens)
         # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
 
@@ -128,7 +127,7 @@ class AudioTaggingModel(nn.Module):
             x.repeat(2, 1, 1), x_lens.repeat(2)
         )
 
-        # Forward the speaker module
+        # Forward the audio tagging module
         logits = self.forward_audio_tagging(
             encoder_out=encoder_out, encoder_out_lens=encoder_out_lens
         )  # (2*N, num_classes)
@@ -136,12 +135,12 @@ class AudioTaggingModel(nn.Module):
         # compute the co-training loss
         co_training_target = torch.cat(
             [logits[N:, :].detach(), logits[:N, :].detach()]
-        )  # exchange target
+        ).sigmoid()  # exchange target
         co_training_loss = self.criterion(logits, co_training_target)
 
         loss = self.criterion(logits, target.repeat(2, 1))
 
-        return loss
+        return loss / 2.0, co_training_loss / 2.0
 
     def forward_audio_tagging(self, encoder_out, encoder_out_lens):
         """
