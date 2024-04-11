@@ -34,6 +34,7 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 import argparse
 import copy
+import inspect
 import logging
 import warnings
 from pathlib import Path
@@ -47,6 +48,7 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 from at_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
+from lhotse.dataset import SpecAugment
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import AudioTaggingModel
@@ -207,6 +209,27 @@ def add_model_arguments(parser: argparse.ArgumentParser):
 
     parser.add_argument(
         "--num-events", type=int, default=527, help="Number of sound events"
+    )
+
+    parser.add_argument(
+        "--use-spec-aug",
+        type=str2bool,
+        default=False,
+        help="If True, apply specaug to the duplicated batch inside the encoder forward.",
+    )
+
+    parser.add_argument(
+        "--use-time-warp",
+        type=str2bool,
+        default=False,
+        help="If True, apply time warp to the duplicated batch inside the encoder forward.",
+    )
+
+    parser.add_argument(
+        "--use-time-mask",
+        type=str2bool,
+        default=False,
+        help="If True, apply time mask to the duplicated batch inside the encoder forward",
     )
 
 
@@ -670,11 +693,30 @@ def compute_loss(
         params.co_training_loss_scale if batch_idx_train > warm_step else 0
     )
 
+    if is_training:
+        supervision_intervals = batch["supervisions"]
+        supervision_segments = torch.stack(
+            [
+                supervision_intervals["sequence_idx"],
+                supervision_intervals["start_frame"],
+                supervision_intervals["num_frames"],
+            ],
+            dim=1,
+        )  # shape: (S, 3)
+    else:
+        supervision_segments = None
+
     with torch.set_grad_enabled(is_training):
         at_loss, co_training_loss = model(
             x=feature,
             x_lens=feature_lens,
             target=labels,
+            use_spec_aug=params.use_spec_aug,
+            use_time_warp=params.use_time_warp,
+            use_time_mask=params.use_time_mask,
+            time_warp_factor=params.spec_aug_time_warp_factor,
+            num_frame_masks=params.num_frame_masks,
+            supervision_segments=supervision_segments,
         )
         loss = (
             at_loss * (1 - co_training_loss_scale)
@@ -980,6 +1022,14 @@ def run(rank, world_size, args):
 
     logging.info("About to create model")
     model = get_model(params)
+
+    num_frame_masks = 10
+    num_frame_masks_parameter = inspect.signature(SpecAugment.__init__).parameters[
+        "num_frame_masks"
+    ]
+    if num_frame_masks_parameter.default == 1:
+        num_frame_masks = 2
+    params.num_frame_masks = num_frame_masks
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")

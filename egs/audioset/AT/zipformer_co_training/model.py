@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import math
 import random
 from typing import List, Optional, Tuple
 
@@ -23,6 +24,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from encoder_interface import EncoderInterface
+from lhotse.dataset import SpecAugment
+from lhotse.dataset.signal_transforms import mask_along_axis_optimized
+from lhotse.dataset.signal_transforms import time_warp as time_warp_impl
 
 from icefall.utils import AttributeDict, make_pad_mask
 
@@ -105,6 +109,16 @@ class AudioTaggingModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         target: torch.Tensor,
+        use_spec_aug: bool = False,
+        use_time_warp: bool = False,
+        use_time_mask: bool = False,
+        supervision_segments: Optional[torch.Tensor] = None,
+        time_warp_factor: Optional[int] = 80,
+        num_frame_masks: int = 10,
+        features_mask_size: int = 27,
+        num_feature_masks: int = 2,
+        frames_mask_size: int = 100,
+        max_frames_mask_fraction: float = 0.15,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -122,10 +136,51 @@ class AudioTaggingModel(nn.Module):
         assert x_lens.ndim == 1, x_lens.shape
         N, T, C = x.shape
 
+        # import pdb; pdb.set_trace()
+        if use_spec_aug and self.training:
+            if use_time_warp:
+                assert supervision_segments is not None
+                # Apply time warping before duplicating
+                x = time_warp(
+                    x,
+                    time_warp_factor=time_warp_factor,
+                    supervision_segments=supervision_segments,
+                )
+
+            # Apply frequency masking on two copies respectively
+            x1 = frequency_mask(
+                x,
+                features_mask_size=features_mask_size,
+                num_feature_masks=num_feature_masks,
+            )
+            x2 = frequency_mask(
+                x,
+                features_mask_size=features_mask_size,
+                num_feature_masks=num_feature_masks,
+            )
+
+            if use_time_mask:
+                # Apply time masking on two copies respectively
+                x1 = time_mask(
+                    x1,
+                    num_frame_masks=num_frame_masks,
+                    frames_mask_size=frames_mask_size,
+                    max_frames_mask_fraction=max_frames_mask_fraction,
+                )
+                x2 = time_mask(
+                    x2,
+                    num_frame_masks=num_frame_masks,
+                    frames_mask_size=frames_mask_size,
+                    max_frames_mask_fraction=max_frames_mask_fraction,
+                )
+
+            x = torch.cat([x1, x2], dim=0)
+        else:
+            x = x.repeat(2, 1, 1)
+
+        x_lens = x_lens.repeat(2)
         # Compute encoder outputs from the duplicated batch
-        encoder_out, encoder_out_lens = self.forward_encoder(
-            x.repeat(2, 1, 1), x_lens.repeat(2)
-        )
+        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
 
         # Forward the audio tagging module
         logits = self.forward_audio_tagging(
@@ -163,3 +218,105 @@ class AudioTaggingModel(nn.Module):
         )  # normalize the logits
 
         return logits
+
+
+def time_warp(
+    features: torch.Tensor,
+    p: float = 0.9,
+    time_warp_factor: Optional[int] = 80,
+    supervision_segments: Optional[torch.Tensor] = None,
+):
+    if time_warp_factor is None or time_warp_factor < 1:
+        return features
+    assert (
+        len(features.shape) == 3
+    ), "SpecAugment only supports batches of single-channel feature matrices."
+    features = features.clone()
+    if supervision_segments is None:
+        # No supervisions - apply spec augment to full feature matrices.
+        for sequence_idx in range(features.size(0)):
+            if random.random() > p:
+                # Randomly choose whether this transform is applied
+                continue
+            features[sequence_idx] = time_warp_impl(
+                features[sequence_idx], factor=time_warp_factor
+            )
+    else:
+        # Supervisions provided - we will apply time warping only on the supervised areas.
+        for sequence_idx, start_frame, num_frames in supervision_segments:
+            if random.random() > p:
+                # Randomly choose whether this transform is applied
+                continue
+            end_frame = start_frame + num_frames
+            features[sequence_idx, start_frame:end_frame] = time_warp_impl(
+                features[sequence_idx, start_frame:end_frame], factor=time_warp_factor
+            )
+
+    return features
+
+
+def frequency_mask(
+    features: torch.Tensor,
+    p: float = 0.9,
+    features_mask_size: int = 27,
+    num_feature_masks: int = 10,
+):
+    # Apply frequency masking to a batch of features
+    assert (
+        len(features.shape) == 3
+    ), "SpecAugment only supports batches of single-channel feature matrices."
+    features = features.clone()
+    for sequence_idx in range(features.size(0)):
+        if random.random() > p:
+            # Randomly choose whether this transform is applied
+            continue
+        feat = features[sequence_idx]
+        mean = feat.mean()
+        # Frequency masking
+        feat = mask_along_axis_optimized(
+            feat,
+            mask_size=features_mask_size,
+            mask_times=num_feature_masks,
+            mask_value=mean,
+            axis=2,
+        )
+        features[sequence_idx] = feat
+
+    return features
+
+
+def time_mask(
+    features: torch.Tensor,
+    p: float = 0.9,
+    num_frame_masks: int = 10,
+    frames_mask_size: int = 100,
+    max_frames_mask_fraction: float = 0.15,
+):
+    # apply time mask to a batch of features
+    assert (
+        len(features.shape) == 3
+    ), "SpecAugment only supports batches of single-channel feature matrices."
+    features = features.clone()
+    for sequence_idx in range(features.size(0)):
+        if random.random() > p:
+            # Randomly choose whether this transform is applied
+            continue
+        feat = features[sequence_idx]
+        mean = feat.mean()
+        # Time masking
+        max_tot_mask_frames = max_frames_mask_fraction * feat.size(0)
+        num_frame_masks = min(
+            num_frame_masks,
+            math.ceil(max_tot_mask_frames / frames_mask_size),
+        )
+        max_mask_frames = min(frames_mask_size, max_tot_mask_frames // num_frame_masks)
+        feat = mask_along_axis_optimized(
+            feat,
+            mask_size=max_mask_frames,
+            mask_times=num_frame_masks,
+            mask_value=mean,
+            axis=1,
+        )
+        features[sequence_idx] = feat
+
+    return features
