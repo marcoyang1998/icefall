@@ -212,6 +212,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--frame-level-co-training",
+        type=str2bool,
+        default=False,
+        help="Do the frame level co-training",
+    )
+
+    parser.add_argument(
         "--use-spec-aug",
         type=str2bool,
         default=False,
@@ -522,6 +529,12 @@ def get_model(params: AttributeDict) -> nn.Module:
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
+    if params.frame_level_co_training:
+        from model_frame_co_training import AudioTaggingModel
+
+        logging.info("Doing frame level co-training")
+    else:
+        from model import AudioTaggingModel
     model = AudioTaggingModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
