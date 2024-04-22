@@ -703,7 +703,7 @@ def compute_loss(
     warm_step = params.warm_step
 
     co_training_loss_scale = (
-        params.co_training_loss_scale if batch_idx_train > warm_step else 0
+        params.co_training_loss_scale if batch_idx_train > warm_step else 0.0
     )
 
     if is_training:
@@ -1036,6 +1036,9 @@ def run(rank, world_size, args):
     logging.info("About to create model")
     model = get_model(params)
 
+    if params.use_spec_aug:
+        assert params.enable_spec_aug == False, "Specaug should be done inside model forward"
+    
     num_frame_masks = 10
     num_frame_masks_parameter = inspect.signature(SpecAugment.__init__).parameters[
         "num_frame_masks"

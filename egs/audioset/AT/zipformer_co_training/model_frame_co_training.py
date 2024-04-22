@@ -140,7 +140,7 @@ class AudioTaggingModel(nn.Module):
         if use_spec_aug and self.training:
             if use_time_warp:
                 assert supervision_segments is not None
-                # Apply time warping before duplicating
+                # Apply time warping before duplicating, so both copies have the same time-warp
                 x = time_warp(
                     x,
                     time_warp_factor=time_warp_factor,
@@ -182,7 +182,7 @@ class AudioTaggingModel(nn.Module):
         # Compute encoder outputs from the duplicated batch
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
 
-        # Forward the audio tagging module
+        # Forward the audio tagging module, frame level
         logits = self.forward_audio_tagging(
             encoder_out=encoder_out, encoder_out_lens=encoder_out_lens, frame_level=True
         )  # (2*N, T, num_classes)
@@ -202,6 +202,7 @@ class AudioTaggingModel(nn.Module):
         logits = logits.sum(dim=1)  # mask the padding frames
         logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits)
 
+        # compute the clip-level loss
         loss = self.criterion(logits, target.repeat(2, 1)).sum()  # (2 * N, 527)
 
         return loss / 2.0, co_training_loss / 2.0
