@@ -206,6 +206,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=2,
+        help="The final output downsampling factor"
+    )
+
+    parser.add_argument(
         "--num-events", type=int, default=527, help="Number of sound events"
     )
 
@@ -466,7 +473,7 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
