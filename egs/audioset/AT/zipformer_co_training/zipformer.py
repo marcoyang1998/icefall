@@ -1,1 +1,1 @@
-../../../librispeech/ASR/zipformer/zipformer.py
+../zipformer/zipformer.py
