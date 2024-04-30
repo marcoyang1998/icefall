@@ -239,6 +239,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="If True, apply time mask to the duplicated batch inside the encoder forward",
     )
 
+    parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=2,
+        help="The final output downsampling factor of Zipformer"
+    )
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -503,7 +510,7 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
