@@ -212,6 +212,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--final-dropout-rate",
+        type=float,
+        default=0.1,
+        help="The final layer dropout rate",
+    )
+
+    parser.add_argument(
         "--frame-level-co-training",
         type=str2bool,
         default=False,
@@ -522,7 +529,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         num_heads=_to_int_tuple(params.num_heads),
         feedforward_dim=_to_int_tuple(params.feedforward_dim),
         cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
+        dropout=ScheduledFloat((0.0, 0.3), (20000.0, params.final_dropout_rate)),
         warmup_batches=4000.0,
         causal=params.causal,
         chunk_size=_to_int_tuple(params.chunk_size),
