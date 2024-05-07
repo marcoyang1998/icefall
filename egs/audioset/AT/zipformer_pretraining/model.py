@@ -40,7 +40,6 @@ class AudioPretrainingModel(nn.Module):
         encoder_input_dim: int = 192,
         decoder_dim: int = 384,
         decoder_input_dim: int = 192,
-        bottleneck_dim: int = 192,
         noise_scale: float = 0.1,
     ):
         """An audio pretraining model
@@ -67,6 +66,7 @@ class AudioPretrainingModel(nn.Module):
         self.encoder_embed = encoder_embed
         self.encoder = encoder
         self.encoder_dim = encoder_dim
+        self.fbank_dim = fbank_dim
         
         self.decoder = decoder
         self.decoder_input_dim = decoder_input_dim
@@ -147,16 +147,17 @@ class AudioPretrainingModel(nn.Module):
 
         src_key_padding_mask = make_pad_mask(x_lens)
 
-        x, mask_indices = self.apply_mask(
-            x,
+        x_masked, mask_indices = self.apply_mask(
+            x.clone(),
             padding_mask=src_key_padding_mask,
         )
 
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
+        x_masked = x_masked.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+        encoder_out, encoder_out_lens = self.encoder(x_masked, x_lens, src_key_padding_mask)
         
         # Add noise
-        encoder_out = encoder_out / (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
+        normalize_factor = (encoder_out.detach() ** 2).mean(dim=-1, keepdim=True).sqrt()
+        encoder_out = encoder_out / normalize_factor
         noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
         encoder_out += noise
 
@@ -168,14 +169,20 @@ class AudioPretrainingModel(nn.Module):
         decoder_out = decoder_out.permute(1, 0, 2) # (T, N, C) -> (N, T, C)
 
         # compute the reconstruction loss
+        assert target.size(1) >= 4 * decoder_out.size(1), (target.size(1), decoder_out.size(1))
+        target = target[:, : 4 * decoder_out.size(1), :].reshape(N, -1, 4, self.fbank_dim) 
+        target = target.reshape(N, -1, 4 * self.fbank_dim)
         l2_loss = nn.functional.mse_loss(
             decoder_out,
             target,
-            reduction="sum"
-        )
+            reduction="none"
+        ) # (N, T, C)
 
+        # mask the loss on the padding positions
+        l2_loss.masked_fill_(decoder_src_key_padding_mask.unsqueeze(-1), 0.0)
+        
         # normalize the mse loss by the feature dimension 
-        l2_loss = l2_loss / decoder_out.size(-1)
+        l2_loss = l2_loss.sum() / decoder_out.size(-1)
 
         return l2_loss
 
@@ -202,6 +209,8 @@ class AudioPretrainingModel(nn.Module):
             )
             mask_indices = torch.from_numpy(mask_indices).to(x.device)
             x = index_put(x, mask_indices, self.mask_emb)
+            if random.random() > 0.97:
+                logging.info(f"A proportion of {mask_indices.sum()/mask_indices.numel():.2f} frames are masked")
         else:
             mask_indices = None
 
