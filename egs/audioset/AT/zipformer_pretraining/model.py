@@ -41,6 +41,10 @@ class AudioPretrainingModel(nn.Module):
         decoder_dim: int = 384,
         decoder_input_dim: int = 192,
         noise_scale: float = 0.1,
+        mask_prob: float = 0.65,
+        mask_length: int = 10,
+        mask_selection: str = "static",
+        mask_other: float = 0.0,
     ):
         """An audio pretraining model
 
@@ -82,10 +86,10 @@ class AudioPretrainingModel(nn.Module):
         )
 
         self.mask_emb = nn.Parameter(torch.FloatTensor(encoder_input_dim).uniform_())
-        self.mask_prob = 0.65
-        self.mask_length = 10
-        self.mask_selection = "static"
-        self.mask_other = 0.0
+        self.mask_prob = mask_prob
+        self.mask_length = mask_length
+        self.mask_selection = mask_selection
+        self.mask_other = mask_other
 
         self.noise_scale = noise_scale
 

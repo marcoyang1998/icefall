@@ -249,6 +249,25 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--mask-prob",
+        type=float,
+        default=0.65,
+    )
+
+    parser.add_argument(
+        "--mask-length",
+        type=int,
+        default=10,
+        help="The length of mask over time axis",
+    )
+
+    parser.add_argument(
+        "--mask-selection",
+        type=str,
+        default="static",
+    )
+
+    parser.add_argument(
         "--noise-scale",
         type=float,
         default=0.1,
@@ -572,6 +591,9 @@ def get_model(params: AttributeDict) -> nn.Module:
         fbank_dim=params.feature_dim,
         decoder_dim=max(_to_int_tuple(params.decoder_dim)),
         decoder_input_dim=_to_int_tuple(params.decoder_dim)[0],
+        mask_prob=params.mask_prob,
+        mask_length=params.mask_length,
+        mask_selection=params.mask_selection,
     )
     return model
 
@@ -728,7 +750,6 @@ def compute_loss(
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    import pdb; pdb.set_trace()
     with torch.set_grad_enabled(is_training):
         loss = model(
             x=feature,
