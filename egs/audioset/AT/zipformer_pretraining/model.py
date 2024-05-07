@@ -29,7 +29,7 @@ from lhotse.dataset import SpecAugment
 from icefall.utils import AttributeDict, make_pad_mask
 
 
-class AudioTaggingModel(nn.Module):
+class AudioPretrainingModel(nn.Module):
     def __init__(
         self,
         encoder_embed: nn.Module,
@@ -37,9 +37,12 @@ class AudioTaggingModel(nn.Module):
         decoder: nn.Module,
         input_dim: int = 80,
         encoder_dim: int = 384,
-        num_events: int = 527,
+        decoder_dim: int = 384,
+        decoder_input_dim: int = 192,
+        bottleneck_dim: int = 192,
+        noise_scale: float = 0.1,
     ):
-        """An audio tagging model
+        """An audio pretraining model
 
         Args:
           encoder_embed:
@@ -53,8 +56,8 @@ class AudioTaggingModel(nn.Module):
             `logit_lens` of shape (N,).
           encoder_dim:
             Dimension of the encoder.
-          num_event:
-            The number of classes.
+          noise_scale:
+            The scale of the gaussia noise.
         """
         super().__init__()
 
@@ -63,20 +66,31 @@ class AudioTaggingModel(nn.Module):
         self.encoder_embed = encoder_embed
         self.encoder = encoder
         self.encoder_dim = encoder_dim
-
+        self.bottleneck_dim = bottleneck_dim
+        
         self.decoder = decoder
+        self.decoder_input_dim = decoder_input_dim
+        self.decoder_dim = decoder_dim
 
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(encoder_dim, num_events),
+        # projection layer to IBN
+        self.encoder_proj = nn.Linear(encoder_dim, bottleneck_dim, bias=True)
+        
+        # decoder embed
+        self.decoder_embed = nn.Linear(
+            bottleneck_dim, decoder_input_dim, bias=True,
+        )
+        # decoder pred to fbank dim
+        self.decoder_pred = nn.Linear(
+            decoder_dim, input_dim, bias=True,
         )
 
-        self.mask_emb = nn.Parameter(torch.FloatTensor(input_dim).uniform_())
-
+        self.mask_emb = nn.Parameter(torch.FloatTensor(bottleneck_dim).uniform_())
         self.mask_prob = 0.65
         self.mask_length = 10
         self.mask_selection = "static"
         self.mask_other = 0.0
+
+        self.noise_scale = noise_scale
 
     def forward_encoder(
         self,
@@ -132,70 +146,65 @@ class AudioTaggingModel(nn.Module):
         assert x_lens.ndim == 1, x_lens.shape
         N, T, C = x.shape
 
-        import pdb
+        x, x_lens = self.encoder_embed(x, x_lens) # (N,T,C)
 
-        x, x_lens = self.encoder_embed(x, x_lens)
-
-        import pdb; pdb.set_trace()
         src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
         x, mask_indices = self.apply_mask(
             x,
-            mask_indices=None,
+            padding_mask=src_key_padding_mask,
         )
 
+        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
+        encoder_out = self.encoder_proj(encoder_out) # (T,N,bottleneck_dim)
+        
+        # TODO: Add noice
+        encoder_out = encoder_out / (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
+        noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+        
+        encoder_out += noise
 
-        return
+        # perform the reconstruction
+        decoder_src_key_padding_mask = make_pad_mask(encoder_out_lens)
+        encoder_out = self.decoder_embed(encoder_out)
+        decoder_out, decoder_out_lens = self.decoder(encoder_out, encoder_out_lens, decoder_src_key_padding_mask)
+        decoder_out = self.decoder_pred(decoder_out)
 
-    def forward_audio_tagging(self, encoder_out, encoder_out_lens):
-        """
-        Args:
-          encoder_out:
-            A 3-D tensor of shape (N, T, C).
-          encoder_out_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
+        # compute the reconstruction loss
+        l2_loss = nn.functional.mse_loss(
+            decoder_out,
+            target,
+            reduction="sum"
+        )
 
-        Returns:
-          A 3-D tensor of shape (N, num_classes).
-        """
-        logits = self.classifier(encoder_out)  # (N, T, num_classes)
-        padding_mask = make_pad_mask(encoder_out_lens)
-        logits[padding_mask] = 0
-        logits = logits.sum(dim=1)  # mask the padding frames
-        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(
-            logits
-        )  # normalize the logits
+        # normalize the mse loss by the feature dimension 
+        l2_loss = l2_loss / decoder_out.size(-1)
 
-        return logits
+        return l2_loss
 
     def apply_mask(
         self,
         x: torch.Tensor,
         padding_mask,
-        mask_indices=None,
     ):
-        # this function is modified from fairseq
+        # this function is modified from fairseq: https://github.com/facebookresearch/fairseq/blob/bedb259bf34a9fc22073c13a1cee23192fa70ef3/fairseq/models/wav2vec/wav2vec2.py#L429
         B, T, C = x.shape
 
-        import pdb; pdb.set_trace()
         if self.mask_prob > 0:
-            if mask_indices is None:
-                mask_indices = compute_mask_indices(
-                    (B, T),
-                    padding_mask,
-                    self.mask_prob,
-                    self.mask_length,
-                    mask_type=self.mask_selection,
-                    mask_other=self.mask_other,
-                    min_masks=2,
-                    no_overlap=False,  # False
-                    min_space=self.mask_min_space,  # 1
-                    require_same_masks=False,
-                )
-                mask_indices = torch.from_numpy(mask_indices).to(x.device)
+            mask_indices = compute_mask_indices(
+                (B, T),
+                padding_mask,
+                self.mask_prob,
+                self.mask_length,
+                mask_type=self.mask_selection,
+                mask_other=self.mask_other,
+                min_masks=2,
+                no_overlap=False,  # False
+                min_space=1,  # 1
+                require_same_masks=False,
+            )
+            mask_indices = torch.from_numpy(mask_indices).to(x.device)
             x = index_put(x, mask_indices, self.mask_emb)
         else:
             mask_indices = None

@@ -45,11 +45,11 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from at_datamodule import AudioSetATDatamodule
+from pretraining_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model import AudioTaggingModel
+from model import AudioPretrainingModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -206,24 +206,32 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--num-encoder-layers",
+        "--num-decoder-layers",
         type=str,
-        default="2,2,3,4,3,2",
-        help="Number of zipformer encoder layers per stack, comma separated.",
+        default="2,2,2,2,2,2",
+        help="Number of zipformer decoder layers per stack, comma separated.",
     )
 
     parser.add_argument(
-        "--downsampling-factor",
+        "--decoder-downsampling-factor",
         type=str,
         default="1,2,4,8,4,2",
         help="Downsampling factor for each stack of encoder layers.",
     )
 
     parser.add_argument(
+        "--decoder-unmasked-dim",
+        type=str,
+        default="192,192,256,256,256,192",
+        help="Unmasked dimensions in the decoders, relates to augmentation during training.  "
+        "A single int or comma-separated list.  Must be <= each corresponding encoder_dim.",
+    )
+
+    parser.add_argument(
         "--decoder-feedforward-dim",
         type=str,
-        default="512,768,1024,1536,1024,768",
-        help="Feedforward dimension of the zipformer encoder layers, per stack, comma separated.",
+        default="512,768,1024,1024,1024,768",
+        help="Feedforward dimension of the zipformer decoder layers, per stack, comma separated.",
     )
 
     parser.add_argument(
@@ -236,8 +244,22 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--decoder-dim",
         type=str,
-        default="192,256,384,512,384,256",
+        default="192,256,384,384,384,256",
         help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
+    )
+
+    parser.add_argument(
+        "--bottleneck-dim",
+        type=int,
+        default=192,
+        help="The dimension of the IBN",
+    )
+
+    parser.add_argument(
+        "--noise-scale",
+        type=float,
+        default=0.1,
+        help="The scale of the noise to be added"
     )
 
 
@@ -518,18 +540,19 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 def get_decoder_model(params: AttributeDict) -> nn.Module:
+    # get a zipformer decoder (actually an encoder)
     decoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=1, # we do not downsample at the end
         downsampling_factor=_to_int_tuple(params.decoder_downsampling_factor),
-        num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
-        encoder_dim=_to_int_tuple(params.encoder_dim),
-        encoder_unmasked_dim=_to_int_tuple(params.encoder_unmasked_dim),
+        num_encoder_layers=_to_int_tuple(params.num_decoder_layers),
+        encoder_dim=_to_int_tuple(params.decoder_dim),
+        encoder_unmasked_dim=_to_int_tuple(params.decoder_unmasked_dim),
         query_head_dim=_to_int_tuple(params.query_head_dim),
         pos_head_dim=_to_int_tuple(params.pos_head_dim),
         value_head_dim=_to_int_tuple(params.value_head_dim),
         pos_dim=params.pos_dim,
-        num_heads=_to_int_tuple(params.num_heads),
-        feedforward_dim=_to_int_tuple(params.feedforward_dim),
+        num_heads=_to_int_tuple(params.decoder_num_heads),
+        feedforward_dim=_to_int_tuple(params.decoder_feedforward_dim),
         cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
         warmup_batches=4000.0,
@@ -545,12 +568,17 @@ def get_model(params: AttributeDict) -> nn.Module:
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
+    decoder = get_decoder_model(params)
 
-    model = AudioTaggingModel(
+    model = AudioPretrainingModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
+        decoder=decoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        num_events=params.num_events,
+        input_dim=params.feature_dim,
+        decoder_dim=max(_to_int_tuple(params.decoder_dim)),
+        decoder_input_dim=_to_int_tuple(params.decoder_dim)[0],
+        bottleneck_dim=params.bottleneck_dim,
     )
     return model
 
@@ -702,22 +730,17 @@ def compute_loss(
     feature = feature.to(device)
 
     supervisions = batch["supervisions"]
-    events = supervisions[
-        "audio_event"
-    ]  # the label indices are in CED format (https://github.com/RicherMans/CED)
-    labels, _ = str2multihot(events, n_classes=params.num_events)
-    labels = labels.to(device)
-
     feature_lens = supervisions["num_frames"].to(device)
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
+    import pdb; pdb.set_trace()
     with torch.set_grad_enabled(is_training):
         loss = model(
             x=feature,
             x_lens=feature_lens,
-            target=labels,
+            target=feature,
         )
 
     assert loss.requires_grad == is_training
@@ -731,22 +754,6 @@ def compute_loss(
     info["loss"] = loss.detach().cpu().item()
 
     return loss, info
-
-
-def str2multihot(events: List[str], n_classes=527, id_mapping=None):
-    # Convert strings separated by semi-colon to multi-hot class labels
-    # input: ["0;1", "1;2"]
-    # output: torch.tensor([[1,1,0], [0,1,1]])
-    labels = [list(map(int, event.split(";"))) for event in events]
-    batch_size = len(labels)
-    out = torch.zeros(batch_size, n_classes)
-
-    for i, label in enumerate(labels):
-        if id_mapping is not None:
-            label = [id_mapping[lb] for lb in label]
-        out[i, label] = 1
-
-    return out, labels
 
 
 def compute_validation_loss(
