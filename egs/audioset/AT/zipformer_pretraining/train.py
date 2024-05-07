@@ -249,13 +249,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--bottleneck-dim",
-        type=int,
-        default=192,
-        help="The dimension of the IBN",
-    )
-
-    parser.add_argument(
         "--noise-scale",
         type=float,
         default=0.1,
@@ -575,10 +568,10 @@ def get_model(params: AttributeDict) -> nn.Module:
         encoder=encoder,
         decoder=decoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        input_dim=params.feature_dim,
+        encoder_input_dim=_to_int_tuple(params.encoder_dim)[0],
+        fbank_dim=params.feature_dim,
         decoder_dim=max(_to_int_tuple(params.decoder_dim)),
         decoder_input_dim=_to_int_tuple(params.decoder_dim)[0],
-        bottleneck_dim=params.bottleneck_dim,
     )
     return model
 

@@ -35,8 +35,9 @@ class AudioPretrainingModel(nn.Module):
         encoder_embed: nn.Module,
         encoder: EncoderInterface,
         decoder: nn.Module,
-        input_dim: int = 80,
+        fbank_dim: int = 80,
         encoder_dim: int = 384,
+        encoder_input_dim: int = 192,
         decoder_dim: int = 384,
         decoder_input_dim: int = 192,
         bottleneck_dim: int = 192,
@@ -66,25 +67,21 @@ class AudioPretrainingModel(nn.Module):
         self.encoder_embed = encoder_embed
         self.encoder = encoder
         self.encoder_dim = encoder_dim
-        self.bottleneck_dim = bottleneck_dim
         
         self.decoder = decoder
         self.decoder_input_dim = decoder_input_dim
         self.decoder_dim = decoder_dim
-
-        # projection layer to IBN
-        self.encoder_proj = nn.Linear(encoder_dim, bottleneck_dim, bias=True)
         
         # decoder embed
         self.decoder_embed = nn.Linear(
-            bottleneck_dim, decoder_input_dim, bias=True,
+            encoder_dim, decoder_input_dim, bias=True,
         )
-        # decoder pred to fbank dim
+        # decoder pred to 4 * fbank dim (we concatenate every 4 frames)
         self.decoder_pred = nn.Linear(
-            decoder_dim, input_dim, bias=True,
+            decoder_dim, fbank_dim * 4, bias=True,
         )
 
-        self.mask_emb = nn.Parameter(torch.FloatTensor(bottleneck_dim).uniform_())
+        self.mask_emb = nn.Parameter(torch.FloatTensor(encoder_input_dim).uniform_())
         self.mask_prob = 0.65
         self.mask_length = 10
         self.mask_selection = "static"
@@ -157,19 +154,18 @@ class AudioPretrainingModel(nn.Module):
 
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
-        encoder_out = self.encoder_proj(encoder_out) # (T,N,bottleneck_dim)
         
-        # TODO: Add noice
+        # Add noise
         encoder_out = encoder_out / (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
         noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
-        
         encoder_out += noise
 
         # perform the reconstruction
         decoder_src_key_padding_mask = make_pad_mask(encoder_out_lens)
         encoder_out = self.decoder_embed(encoder_out)
         decoder_out, decoder_out_lens = self.decoder(encoder_out, encoder_out_lens, decoder_src_key_padding_mask)
-        decoder_out = self.decoder_pred(decoder_out)
+        decoder_out = self.decoder_pred(decoder_out) 
+        decoder_out = decoder_out.permute(1, 0, 2) # (T, N, C) -> (N, T, C)
 
         # compute the reconstruction loss
         l2_loss = nn.functional.mse_loss(
