@@ -188,17 +188,18 @@ class AudioTaggingModel(nn.Module):
             encoder_out=encoder_out, encoder_out_lens=encoder_out_lens, frame_level=True
         )  # (2*N, T, num_classes)
 
-        # compute the co-training loss
-        co_training_target = torch.cat(
-            [logits[N:].detach(), logits[:N].detach()]
-        ).sigmoid()  # exchange target
-        co_training_loss = self.criterion(logits, co_training_target)  # (2 * N, T, 527)
-
-        # mask the co-training loss at padding positions
         padding_mask = make_pad_mask(encoder_out_lens)
-        co_training_loss.masked_fill_(padding_mask.unsqueeze(-1), 0)
 
         if self.training:
+            # compute the co-training loss
+            co_training_target = torch.cat(
+                [logits[N:].detach(), logits[:N].detach()]
+            ).sigmoid()  # exchange target
+            co_training_loss = self.criterion(logits, co_training_target)  # (2 * N, T, 527)
+
+            # mask the co-training loss at padding positions
+            co_training_loss.masked_fill_(padding_mask.unsqueeze(-1), 0)
+
             # only compute the co-training losses at time-mask positions, and it should also 
             # satisfy the requirement that the target is not masked
             valid_mask1 = mask_indexes1 * (1 - mask_indexes2) # (N,T)
