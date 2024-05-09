@@ -212,13 +212,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--frame-level-co-training",
-        type=str2bool,
-        default=False,
-        help="Do the frame level co-training",
-    )
-
-    parser.add_argument(
         "--use-spec-aug",
         type=str2bool,
         default=False,

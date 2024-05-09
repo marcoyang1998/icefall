@@ -194,7 +194,8 @@ class AudioTaggingModel(nn.Module):
         if self.training:
             # construct the segment level co-training target
             num_segments = logits.size(1) // segment_length
-            segment_level_logits = logits.reshape(2 * N, num_segments, 4, -1)
+            segment_level_logits = logits[:, :num_segments * segment_length, :]
+            segment_level_logits = segment_level_logits.reshape(2 * N, num_segments, segment_length, -1)
             segment_level_logits = segment_level_logits.sum(dim=2) # (2 * N, T//4, 527)
 
             # exchange target
@@ -207,9 +208,12 @@ class AudioTaggingModel(nn.Module):
             )
 
             # mask the co-training loss at padding positions
-            segment_padding_mask = nn.functional.max_pool1d(padding_mask, segment_length)
+            segment_padding_mask = nn.functional.max_pool1d(padding_mask.float(), segment_length)
             segment_padding_mask = segment_padding_mask[:, :num_segments]
-            co_training_loss.masked_fill_(segment_padding_mask, 0.0)
+            co_training_loss.masked_fill_(segment_padding_mask.bool().unsqueeze(dim=-1), 0.0)
+
+            # normalize the co-training loss
+            co_training_loss = co_training_loss.sum() / num_segments
         else:
             co_training_loss = 0.0
 
