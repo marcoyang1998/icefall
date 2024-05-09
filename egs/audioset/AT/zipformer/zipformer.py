@@ -1016,7 +1016,7 @@ class Zipformer2Encoder(nn.Module):
         warmup_begin: float,
         warmup_end: float,
         initial_layerdrop_rate: float = 0.5,
-        final_layerdrop_rate: float = 0.1,
+        final_layerdrop_rate: float = 0.05,
     ) -> None:
         super().__init__()
         self.encoder_pos = CompactRelPositionalEncoding(
