@@ -748,7 +748,8 @@ def compute_loss(
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
     info["at_loss"] = at_loss.detach().cpu().item()
-    info["co_training_loss"] = co_training_loss.detach().cpu().item()
+    if is_training:
+        info["co_training_loss"] = co_training_loss.detach().cpu().item()
 
     return loss, info
 
