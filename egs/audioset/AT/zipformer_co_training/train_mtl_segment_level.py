@@ -757,7 +757,8 @@ def compute_loss(
     info["loss"] = loss.detach().cpu().item()
     info["at_loss"] = at_loss.detach().cpu().item()
     if is_training:
-        info["co_training_loss"] = co_training_loss.detach().cpu().item()
+        info["segment_level_co_training_loss"] = segment_level_co_training_loss.detach().cpu().item()
+        info["clip_level_co_training_loss"] = clip_level_co_training_loss.detach().cpu().item()
 
     return loss, info
 

@@ -203,29 +203,39 @@ class AudioTaggingModel(nn.Module):
                 [segment_level_logits[N:].detach(), segment_level_logits[:N].detach()]
             ).sigmoid()  
 
-            co_training_loss = self.criterion(
+            segment_level_co_training_loss = self.criterion(
                 segment_level_logits, segment_level_co_training_target
             )
 
             # mask the co-training loss at padding positions
             segment_padding_mask = nn.functional.max_pool1d(padding_mask.float(), segment_length)
             segment_padding_mask = segment_padding_mask[:, :num_segments]
-            co_training_loss.masked_fill_(segment_padding_mask.bool().unsqueeze(dim=-1), 0.0)
+            segment_level_co_training_loss.masked_fill_(segment_padding_mask.bool().unsqueeze(dim=-1), 0.0)
 
             # normalize the co-training loss
-            co_training_loss = co_training_loss.sum() / num_segments
+            segment_level_co_training_loss = segment_level_co_training_loss.sum() / num_segments
         else:
-            co_training_loss = 0.0
+            segment_level_co_training_loss = 0.0
 
         # convert frame level logits to clip level logits
         logits[padding_mask] = 0
         logits = logits.sum(dim=1)  # mask the padding frames
         logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits)
 
-        # compute the clip-level main loss
+        # compute the clip-level co-training loss
+        if self.training:
+            clip_level_co_training_target = torch.cat(
+                [logits[N:, :].detach(), logits[:N, :].detach()]
+            ).sigmoid()  # exchange target
+            clip_level_co_training_loss = self.criterion(logits, clip_level_co_training_target) # (2*N,)
+            clip_level_co_training_loss = clip_level_co_training_loss.sum()
+        else:
+            clip_level_co_training_loss = 0.0
+
+        # compute the clip-level main AT loss with ground truth target
         loss = self.criterion(logits, target.repeat(2, 1)).sum()  # (2 * N, 527)
 
-        return loss / 2.0, co_training_loss / 2.0
+        return loss / 2.0, segment_level_co_training_loss / 2.0, clip_level_co_training_loss / 2.0
 
     def forward_audio_tagging(
         self, encoder_out, encoder_out_lens, frame_level: bool = True
