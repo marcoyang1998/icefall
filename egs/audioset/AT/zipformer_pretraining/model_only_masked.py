@@ -154,7 +154,7 @@ class AudioPretrainingModel(nn.Module):
         x_masked, mask_indices = self.apply_mask(
             x.clone(),
             padding_mask=src_key_padding_mask,
-        )
+        ) # (N,T,C), (N,T)
 
         x_masked = x_masked.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
         encoder_out, encoder_out_lens = self.encoder(x_masked, x_lens, src_key_padding_mask)
@@ -182,8 +182,11 @@ class AudioPretrainingModel(nn.Module):
             reduction="none"
         ) # (N, T, C)
 
-        # mask the loss on the padding positions
-        l2_loss.masked_fill_(decoder_src_key_padding_mask.unsqueeze(-1), 0.0)
+        # mask the loss on the padding positions 
+        mask_indices = nn.functional.max_pool1d(mask_indices.float(), 2)
+        assert decoder_src_key_padding_mask.shape == mask_indices.shape, (decoder_src_key_padding_mask.shape, mask_indices.shape)
+        loss_mask = torch.logical_or(mask_indices.bool(), decoder_src_key_padding_mask)
+        l2_loss.masked_fill_(loss_mask.unsqueeze(-1), 0.0)
         
         # normalize the mse loss by the feature dimension 
         l2_loss = l2_loss.sum() / decoder_out.size(-1)
@@ -196,6 +199,7 @@ class AudioPretrainingModel(nn.Module):
         padding_mask,
     ):
         # this function is modified from fairseq: https://github.com/facebookresearch/fairseq/blob/bedb259bf34a9fc22073c13a1cee23192fa70ef3/fairseq/models/wav2vec/wav2vec2.py#L429
+        # The masked indices have value 1
         B, T, C = x.shape
 
         if self.mask_prob > 0:
