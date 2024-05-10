@@ -79,6 +79,17 @@ from icefall.utils import (
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
+def set_eval(model, modules):
+    if isinstance(model, DDP):
+        for freeze_mod in modules:
+            for name, m in model.named_modules():
+                if name.startswith(freeze_mod + '.'):
+                    m.eval()
+    else:
+        for freeze_mod in modules:
+            for name, m in model.named_modules():
+                if name.startswith("module" + freeze_mod + '.'):
+                    m.eval()
 
 def get_adjusted_batch_count(params: AttributeDict) -> float:
     # returns the number of batches we would have used so far if we had used the reference
@@ -138,6 +149,13 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="Modules to be frozen. Comma separated"
+    )
+
+    parser.add_argument(
+        "--classifier-lr-scale",
+        type=float,
+        default=1.0,
+        help="The lr-scale of the classifier. Could be greater than 1.0."
     )
 
     parser.add_argument(
@@ -866,6 +884,9 @@ def train_one_epoch(
     """
     model.train()
 
+    if params.freeze_modules is not None:
+        set_eval(model, params.freeze_modules)
+
     tot_loss = MetricsTracker()
 
     saved_bad_model = False
@@ -1004,6 +1025,8 @@ def train_one_epoch(
                 world_size=world_size,
             )
             model.train()
+            if params.freeze_modules is not None:
+                set_eval(model, params.freeze_modules)
             logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
             logging.info(
                 f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
@@ -1078,6 +1101,9 @@ def run(rank, world_size, args):
         checkpoints = load_model_params(
             ckpt=params.finetune_ckpt, model=model, init_modules=modules
         )
+
+        logging.info(f"Setting the lr-scale of the classifier to {params.classifier_lr_scale}")
+        model.classifier.lr_scale = params.classifier_lr_scale
         # Need to update the model_avg if use initialisation
         if rank == 0:
             # model_avg is only used with rank 0
@@ -1088,6 +1114,16 @@ def run(rank, world_size, args):
         checkpoints = load_checkpoint_if_available(
             params=params, model=model, model_avg=model_avg
         )
+
+    params.freeze_modules = params.freeze_modules.split(",") if params.freeze_modules else None
+    if params.do_finetune and params.freeze_modules is not None:
+        logging.info(f"Freezing the following modules: {params.freeze_modules}")
+        for freeze_mod in params.freeze_modules:
+            for name, p in model.named_parameters():
+                if name.startswith(freeze_mod + "."):
+                    p.requires_grad = False
+    else:
+        logging.info("Not freezing any modules.")
 
     model.to(device)
     if world_size > 1:
