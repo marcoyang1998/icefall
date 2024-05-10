@@ -337,6 +337,13 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--segment-level-loss-scale",
+        type=float,
+        default=0.5,
+        help="The loss scale for the segment-level co-training loss (w.r.t clip-level loss)",
+    )
+
+    parser.add_argument(
         "--ref-duration",
         type=float,
         default=600,
@@ -721,7 +728,7 @@ def compute_loss(
         supervision_segments = None
 
     with torch.set_grad_enabled(is_training):
-        at_loss, co_training_loss = model(
+        at_loss, segment_level_co_training_loss, clip_level_co_training_loss = model(
             x=feature,
             x_lens=feature_lens,
             target=labels,
@@ -735,7 +742,8 @@ def compute_loss(
         )
         loss = (
             at_loss * (1 - co_training_loss_scale)
-            + co_training_loss * co_training_loss_scale
+            + segment_level_co_training_loss * co_training_loss_scale * params.segment_level_loss_scale
+            + clip_level_co_training_loss * co_training_loss_scale * (1- params.segment_level_loss_scale)
         )
 
     assert loss.requires_grad == is_training
