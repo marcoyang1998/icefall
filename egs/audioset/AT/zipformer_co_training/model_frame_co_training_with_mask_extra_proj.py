@@ -68,6 +68,11 @@ class AudioTaggingModel(nn.Module):
             nn.Linear(encoder_dim, num_events),
         )
 
+        self.frame_classifier = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Linear(encoder_dim, num_events),
+        )
+
         # for multi-class classification, reduction="none" for frame level
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
 
@@ -188,6 +193,11 @@ class AudioTaggingModel(nn.Module):
             encoder_out=encoder_out, encoder_out_lens=encoder_out_lens, frame_level=True
         )  # (2*N, T, num_classes)
 
+        # Forard the audio tagging module, clip level
+        clip_logits = self.forward_audio_tagging(
+            encoder_out=encoder_out, encoder_out_lens=encoder_out_lens, frame_level=False
+        )  # (2*N, num_classes)
+
         padding_mask = make_pad_mask(encoder_out_lens)
 
         if self.training:
@@ -217,15 +227,14 @@ class AudioTaggingModel(nn.Module):
         else:
             co_training_loss = 0.0
 
-        # convert frame level logits to clip level logits
-        logits[padding_mask] = 0
-        logits = logits.sum(dim=1)  # mask the padding frames
-        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits)
-
         # compute the clip-level loss
-        loss = self.criterion(logits, target.repeat(2, 1)).sum()  # (2 * N, 527)
+        loss = self.criterion(clip_logits, target.repeat(2, 1)).sum()  # (2 * N, 527)
 
-        return loss / 2.0, co_training_loss / 2.0
+        # compute the frame-level loss
+        frame_level_at_loss = self.criterion(logits, target.unsqueeze(dim=1).repeat(2, logits.size(1), 1))
+        frame_level_at_loss = frame_level_at_loss.masked_fill(padding_mask.unsqueeze(-1), 0.0).sum() / logits.size(1)
+
+        return loss / 2.0, frame_level_at_loss / 2.0, co_training_loss / 2.0, 
 
     def forward_audio_tagging(
         self, encoder_out, encoder_out_lens, frame_level: bool = True
@@ -245,9 +254,13 @@ class AudioTaggingModel(nn.Module):
           If frame_level==False, a 2-D tensor of shape (N, num_classes).
           else a 3-D tensor of shape (N, T, num_classes)
         """
-        logits = self.classifier(encoder_out)  # (N, T, num_classes)
+        
         if frame_level:
+            logits = self.frame_classifier(encoder_out)  # (N, T, num_classes)
             return logits
+        
+        logits = self.classifier(encoder_out)
+            
         padding_mask = make_pad_mask(encoder_out_lens)
         logits[padding_mask] = 0
         logits = logits.sum(dim=1)  # mask the padding frames
