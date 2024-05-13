@@ -183,15 +183,16 @@ class AudioPretrainingModel(nn.Module):
             reduction="none"
         ) # (N, T, C)
 
+        # mask the loss on the padding positions
+        l2_loss.masked_fill_(decoder_src_key_padding_mask.unsqueeze(-1), 0.0)
+
         # only compute reconstruction loss on masked frames
         mask_indices = nn.functional.max_pool1d(mask_indices.float(), 2)
         if mask_indices.size(1) < decoder_src_key_padding_mask.size(1):
             diff = decoder_src_key_padding_mask.size(1) - mask_indices.size(1)
             mask_indices = torch.cat([mask_indices, torch.zeros(N, diff).to(device)], dim=1)
         assert decoder_src_key_padding_mask.shape == mask_indices.shape, (decoder_src_key_padding_mask.shape, mask_indices.shape)
-        # mask the loss on the padding positions and
-        loss_mask = torch.logical_or(mask_indices.bool(), decoder_src_key_padding_mask)
-        l2_loss.masked_fill_(loss_mask.unsqueeze(-1), 0.0)
+        l2_loss *= mask_indices.unsqueeze(-1)
         
         # normalize the mse loss by the feature dimension 
         l2_loss = l2_loss.sum() / decoder_out.size(-1)
