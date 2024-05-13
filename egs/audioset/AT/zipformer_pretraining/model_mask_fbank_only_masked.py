@@ -85,7 +85,7 @@ class AudioPretrainingModel(nn.Module):
             decoder_dim, fbank_dim * 4, bias=True,
         )
 
-        self.mask_emb = nn.Parameter(torch.FloatTensor(encoder_input_dim).uniform_())
+        self.mask_emb = nn.Parameter(torch.FloatTensor(fbank_dim).uniform_())
         self.mask_prob = mask_prob
         self.mask_length = mask_length
         self.mask_selection = mask_selection
@@ -139,7 +139,7 @@ class AudioPretrainingModel(nn.Module):
             A 1-D tensor of shape (N,). It contains the number of frames in `x`
             before padding.
           target:
-            The ground truth label of audio events, could be many hot (N, num_classes)
+            The reconstruction target
         Returns:
           Return the binary crossentropy loss
         """
@@ -147,17 +147,19 @@ class AudioPretrainingModel(nn.Module):
         assert x_lens.ndim == 1, x_lens.shape
         N, T, C = x.shape
 
-        x, x_lens = self.encoder_embed(x, x_lens) # (N,T,C)
+        padding_mask = make_pad_mask(x_lens)
 
+        # apply masking to the fbank features
+        x, mask_indices = self.apply_mask(
+            x.clone(),
+            padding_mask=padding_mask
+        ) # (N,T,C), (N,T)
+        
+        x, x_lens = self.encoder_embed(x, x_lens) # (N,T,C)
         src_key_padding_mask = make_pad_mask(x_lens)
 
-        x_masked, mask_indices = self.apply_mask(
-            x.clone(),
-            padding_mask=src_key_padding_mask,
-        ) # (N,T,C), (N,T)
-
-        x_masked = x_masked.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-        encoder_out, encoder_out_lens = self.encoder(x_masked, x_lens, src_key_padding_mask)
+        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
         
         # Add noise
         normalize_factor = (encoder_out.detach() ** 2).mean(dim=-1, keepdim=True).sqrt()
@@ -182,12 +184,15 @@ class AudioPretrainingModel(nn.Module):
             reduction="none"
         ) # (N, T, C)
 
+        # mask the loss on the padding positions
+        l2_loss.masked_fill_(decoder_src_key_padding_mask.unsqueeze(-1), 0.0)
+        
         # only compute reconstruction loss on masked frames
-        mask_indices = nn.functional.max_pool1d(mask_indices.float(), 2)
-        assert decoder_src_key_padding_mask.shape == mask_indices.shape, (decoder_src_key_padding_mask.shape, mask_indices.shape)
-        # mask the loss on the padding positions and
-        loss_mask = torch.logical_or(mask_indices.bool(), decoder_src_key_padding_mask)
-        l2_loss.masked_fill_(loss_mask.unsqueeze(-1), 0.0)
+        mask_indices = nn.functional.max_pool1d(mask_indices.float(), 4)
+        assert mask_indices.size(1) >= decoder_src_key_padding_mask.size(1)
+        if mask_indices.size(1) > decoder_src_key_padding_mask.size(1):
+            mask_indices = mask_indices[:, :decoder_src_key_padding_mask.size(1)]
+        l2_loss *= mask_indices.unsqueeze(-1)
         
         # normalize the mse loss by the feature dimension 
         l2_loss = l2_loss.sum() / decoder_out.size(-1)
