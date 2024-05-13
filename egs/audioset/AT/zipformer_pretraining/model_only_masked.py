@@ -146,6 +146,7 @@ class AudioPretrainingModel(nn.Module):
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         N, T, C = x.shape
+        device = x.device
 
         x, x_lens = self.encoder_embed(x, x_lens) # (N,T,C)
 
@@ -184,6 +185,9 @@ class AudioPretrainingModel(nn.Module):
 
         # only compute reconstruction loss on masked frames
         mask_indices = nn.functional.max_pool1d(mask_indices.float(), 2)
+        if mask_indices.size(1) < decoder_src_key_padding_mask.size(1):
+            diff = decoder_src_key_padding_mask.size(1) - mask_indices.size(1)
+            mask_indices = torch.cat([mask_indices, torch.zeros(N, diff).to(device)], dim=1)
         assert decoder_src_key_padding_mask.shape == mask_indices.shape, (decoder_src_key_padding_mask.shape, mask_indices.shape)
         # mask the loss on the padding positions and
         loss_mask = torch.logical_or(mask_indices.bool(), decoder_src_key_padding_mask)
