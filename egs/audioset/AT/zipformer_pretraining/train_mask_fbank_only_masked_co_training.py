@@ -601,6 +601,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_prob=params.mask_prob,
         mask_length=params.mask_length,
         mask_selection=params.mask_selection,
+        noise_scale=params.noise_scale,
     )
     return model
 
