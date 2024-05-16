@@ -85,6 +85,9 @@ class AudioPretrainingModel(nn.Module):
             decoder_dim, fbank_dim * 4, bias=True,
         )
 
+        # co-training proj
+        self.co_training_proj = nn.Linear(encoder_dim, encoder_dim, bias=False)
+
         self.mask_emb = nn.Parameter(torch.FloatTensor(fbank_dim).uniform_())
         self.mask_prob = mask_prob
         self.mask_length = mask_length
@@ -148,36 +151,56 @@ class AudioPretrainingModel(nn.Module):
         N, T, C = x.shape
 
         padding_mask = make_pad_mask(x_lens)
+        target = target.repeat(2,1,1)
 
-        # apply masking to the fbank features
-        x, mask_indices = self.apply_mask(
+        # apply masking to two copies of fbank features
+        x1, mask_indices1 = self.apply_mask(
             x.clone(),
             padding_mask=padding_mask
         ) # (N,T,C), (N,T)
-        
-        x, x_lens = self.encoder_embed(x, x_lens) # (N,T,C)
+
+        x2, mask_indices2 = self.apply_mask(
+            x.clone(),
+            padding_mask=padding_mask
+        ) # (N,T,C), (N,T)
+        x_lens = x_lens.repeat(2)
+
+        x, x_lens = self.encoder_embed(torch.cat([x1, x2], dim=0), x_lens) # (2*N,T,C)
         src_key_padding_mask = make_pad_mask(x_lens)
 
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
-        
-        # Add noise
+
+        # Normalize encoder features
         normalize_factor = (encoder_out.detach() ** 2).mean(dim=-1, keepdim=True).sqrt()
         encoder_out = encoder_out / normalize_factor
+
+        # calculate the co-training loss
+        if self.training:
+            co_training_loss = self.forward_co_training_loss(
+                encoder_out=encoder_out, 
+                encoder_out_lens=encoder_out_lens,
+                mask_indices1=mask_indices1,
+                mask_indices2=mask_indices2,
+            )
+        else:
+            co_training_loss = 0.0
+
+        # add noise to the encoder_out
         noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
         encoder_out += noise
 
         # perform the reconstruction
         decoder_src_key_padding_mask = make_pad_mask(encoder_out_lens)
-        encoder_out = self.decoder_embed(encoder_out)
-        decoder_out, decoder_out_lens = self.decoder(encoder_out, encoder_out_lens, decoder_src_key_padding_mask)
+        decoder_in = self.decoder_embed(encoder_out) # project to decoder_dim
+        decoder_out, decoder_out_lens = self.decoder(decoder_in, encoder_out_lens, decoder_src_key_padding_mask)
         decoder_out = self.decoder_pred(decoder_out) 
         decoder_out = decoder_out.permute(1, 0, 2) # (T, N, C) -> (N, T, C)
 
         # compute the reconstruction loss
         assert target.size(1) >= 4 * decoder_out.size(1), (target.size(1), decoder_out.size(1))
         target = target[:, : 4 * decoder_out.size(1), :].reshape(N, -1, 4, self.fbank_dim) 
-        target = target.reshape(N, -1, 4 * self.fbank_dim)
+        target = target.reshape(2 * N, -1, 4 * self.fbank_dim)
         l2_loss = nn.functional.mse_loss(
             decoder_out,
             target,
@@ -188,6 +211,7 @@ class AudioPretrainingModel(nn.Module):
         l2_loss.masked_fill_(decoder_src_key_padding_mask.unsqueeze(-1), 0.0)
         
         # only compute reconstruction loss on masked frames
+        mask_indices = torch.cat([mask_indices1, mask_indices2], dim=0)
         mask_indices = nn.functional.max_pool1d(mask_indices.float(), 4)
         assert mask_indices.size(1) >= decoder_src_key_padding_mask.size(1)
         if mask_indices.size(1) > decoder_src_key_padding_mask.size(1):
@@ -197,8 +221,50 @@ class AudioPretrainingModel(nn.Module):
         # normalize the mse loss by the feature dimension 
         l2_loss = l2_loss.sum() / decoder_out.size(-1)
 
-        return l2_loss
+        return l2_loss / 2.0, co_training_loss / 2.0
 
+    def forward_co_training_loss(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+        mask_indices1: torch.Tensor,
+        mask_indices2: torch.Tensor,
+    ):
+        # compute the co-training loss
+        encoder_out = encoder_out.permute(1, 0, 2)
+        N, T, C = encoder_out.shape
+        padding_mask = make_pad_mask(encoder_out_lens)
+
+        # construct the co-training target
+        co_training_target = torch.cat(
+            [encoder_out.detach()[N:], encoder_out.detach()[:N]], dim=0
+        )
+        pred_encoder_out = self.co_training_proj(encoder_out)
+
+        co_training_loss = nn.functional.mse_loss(
+            pred_encoder_out,
+            co_training_target,
+            reduction="none"
+        ) # (2 * N, T, C)
+
+        # Only compute the co-training loss on masked positions, where the target is not masked
+        valid_mask1 = mask_indices1 * (1 - mask_indices2) # (N,T)
+        valid_mask2 = mask_indices2 * (1 - mask_indices1) # (N,T)
+        valid_co_training_mask = torch.cat(
+            [valid_mask1, valid_mask2], dim=0
+        ) # (2 * N， T)
+
+        # downsample the mask
+        valid_co_training_mask = nn.functional.max_pool1d(valid_co_training_mask, 4)
+        valid_co_training_mask = valid_co_training_mask[:, :co_training_loss.size(1)]
+        if random.random() > 0.97:
+            logging.info(f"Computing co-training loss on {valid_co_training_mask.sum()}/{valid_co_training_mask.numel()} positions.")
+
+        co_training_loss *= valid_co_training_mask.unsqueeze(dim=-1)
+        co_training_loss = co_training_loss.sum() / C
+        
+        return co_training_loss
+    
     def apply_mask(
         self,
         x: torch.Tensor,
@@ -223,6 +289,7 @@ class AudioPretrainingModel(nn.Module):
             )
             mask_indices = torch.from_numpy(mask_indices).to(x.device)
             x = index_put(x, mask_indices, self.mask_emb)
+            mask_indices = mask_indices.float()
             if random.random() > 0.97:
                 logging.info(f"A proportion of {mask_indices.sum()/mask_indices.numel():.2f} frames are masked")
         else:
