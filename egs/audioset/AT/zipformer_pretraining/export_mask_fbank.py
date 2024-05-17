@@ -286,8 +286,6 @@ def main():
                     device=device,
                 )
             )
-        elif params.avg == 1:
-            load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
         else:
             assert params.avg > 0, params.avg
             start = params.epoch - params.avg
