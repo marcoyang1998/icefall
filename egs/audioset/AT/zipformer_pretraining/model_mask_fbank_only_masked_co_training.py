@@ -187,8 +187,9 @@ class AudioPretrainingModel(nn.Module):
             co_training_loss = 0.0
 
         # add noise to the encoder_out
-        noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
-        encoder_out += noise
+        if self.training:
+            noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+            encoder_out += noise
 
         # perform the reconstruction
         decoder_src_key_padding_mask = make_pad_mask(encoder_out_lens)
