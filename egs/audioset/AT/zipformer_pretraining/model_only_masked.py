@@ -65,7 +65,7 @@ class AudioPretrainingModel(nn.Module):
         """
         super().__init__()
 
-        assert isinstance(encoder, EncoderInterface), type(encoder)
+        # assert isinstance(encoder, EncoderInterface), type(encoder)
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
@@ -428,3 +428,31 @@ def compute_mask_indices(
             mask[i, to_drop] = False
 
     return mask
+
+
+if __name__=="__main__":
+    mask_prob = 0.85
+    mask_len = 10
+
+    for mask_prob in [0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]:
+        proportions = []
+        for i in range(50):
+            model = AudioPretrainingModel(
+                encoder=None,
+                encoder_embed=None,
+                decoder=None,
+                encoder_dim=512,
+                encoder_input_dim=192,
+                fbank_dim=80,
+                mask_prob=mask_prob,
+                mask_length=mask_len,
+            )
+
+            x = torch.rand(5, 400, 192)
+            x_lens = torch.tensor([400] * 5)
+            padding_mask = make_pad_mask(x_lens)
+            x_masked, mask_indices = model.apply_mask(x, padding_mask=padding_mask)
+            p = mask_indices.sum()/mask_indices.numel()
+            proportions.append(p.item())
+        print(f"mask_prob: {mask_prob}, mask_len: {mask_len}")
+        print(f"A proportion of {sum(proportions)/len(proportions)} frames are masked")
