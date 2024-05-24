@@ -144,7 +144,7 @@ def inference_one_batch(
         return (x ** 2).mean().sqrt()
     
     encoder_out = encoder_out - encoder_out.mean()
-    correlation_factor = rms(encoder_out.mean(dim=(-1, -2))) / rms(encoder_out.mean(dim=-1))
+    correlation_factor = rms(encoder_out.mean(dim=1)) / rms(encoder_out)
 
     return correlation_factor
 
