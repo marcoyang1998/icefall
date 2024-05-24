@@ -170,7 +170,7 @@ class AudioPretrainingModel(nn.Module):
 
         if self.training:
             # add noise to the encoder_out
-            noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+            noise = torch.randn_like(encoder_out, device=encoder_out.device) * self.noise_scale
             encoder_out += noise
 
         # replace the masked encoder_out with a mask_emb

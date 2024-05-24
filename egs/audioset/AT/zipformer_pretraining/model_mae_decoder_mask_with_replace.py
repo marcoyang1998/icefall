@@ -173,14 +173,14 @@ class AudioPretrainingModel(nn.Module):
             noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
             encoder_out += noise
 
-        # replace the masked encoder_out with a mask_emb
-        decoder_mask_indices = nn.functional.max_pool1d(mask_indices, 4)
-        assert decoder_mask_indices.size(1) >= encoder_out.size(0)
-        if decoder_mask_indices.size(1) > encoder_out.size(0):
-            decoder_mask_indices = decoder_mask_indices[:, :encoder_out.size(0)]
+            # replace the masked encoder_out with a mask_emb
+            decoder_mask_indices = nn.functional.max_pool1d(mask_indices, 4)
+            assert decoder_mask_indices.size(1) >= encoder_out.size(0)
+            if decoder_mask_indices.size(1) > encoder_out.size(0):
+                decoder_mask_indices = decoder_mask_indices[:, :encoder_out.size(0)]
 
-        decoder_mask_indices = decoder_mask_indices.bool().T
-        encoder_out[decoder_mask_indices] = self.decoder_mask_emb
+            decoder_mask_indices = decoder_mask_indices.bool().T
+            encoder_out[decoder_mask_indices] = self.decoder_mask_emb
             
         # perform the reconstruction
         decoder_src_key_padding_mask = make_pad_mask(encoder_out_lens)
