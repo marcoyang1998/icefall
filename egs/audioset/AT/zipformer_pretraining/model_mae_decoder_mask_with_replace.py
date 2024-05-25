@@ -45,6 +45,7 @@ class AudioPretrainingModel(nn.Module):
         mask_length: int = 10,
         mask_selection: str = "static",
         mask_other: float = 0.0,
+        fbank_replace_prob: float = 0.25,
     ):
         """An audio pretraining model
 
@@ -85,6 +86,10 @@ class AudioPretrainingModel(nn.Module):
             decoder_dim, fbank_dim * 4, bias=True,
         )
 
+        self.fbank_proj = nn.Linear(
+            fbank_dim, decoder_input_dim // 4, bias=False,
+        )
+
         # mask embeddings
         self.mask_emb = nn.Parameter(torch.FloatTensor(fbank_dim).uniform_())
         self.decoder_mask_emb = nn.Parameter(torch.FloatTensor(encoder_dim).normal_())
@@ -95,6 +100,7 @@ class AudioPretrainingModel(nn.Module):
         self.mask_other = mask_other
 
         self.noise_scale = noise_scale
+        self.fbank_replace_prob = fbank_replace_prob
 
     def forward_encoder(
         self,
@@ -151,6 +157,7 @@ class AudioPretrainingModel(nn.Module):
         N, T, C = x.shape
 
         padding_mask = make_pad_mask(x_lens)
+        fbank = x.clone() # save a copy of fbank
 
         # apply masking to the fbank features
         x, mask_indices = self.apply_mask_facebook(
@@ -170,21 +177,34 @@ class AudioPretrainingModel(nn.Module):
 
         if self.training:
             # add noise to the encoder_out
-            noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+            noise = torch.randn_like(encoder_out, device=encoder_out.device) * self.noise_scale
             encoder_out += noise
 
-            # replace the masked encoder_out with a mask_emb
-            decoder_mask_indices = nn.functional.max_pool1d(mask_indices, 4)
-            assert decoder_mask_indices.size(1) >= encoder_out.size(0)
-            if decoder_mask_indices.size(1) > encoder_out.size(0):
-                decoder_mask_indices = decoder_mask_indices[:, :encoder_out.size(0)]
+        # replace the masked encoder_out with a mask_emb
+        decoder_mask_indices = nn.functional.max_pool1d(mask_indices, 4)
+        assert decoder_mask_indices.size(1) >= encoder_out.size(0)
+        if decoder_mask_indices.size(1) > encoder_out.size(0):
+            decoder_mask_indices = decoder_mask_indices[:, :encoder_out.size(0)]
 
-            decoder_mask_indices = decoder_mask_indices.bool().T
-            encoder_out[decoder_mask_indices] = self.decoder_mask_emb
-            
+        decoder_mask_indices = decoder_mask_indices.bool().T
+        encoder_out[decoder_mask_indices] = self.decoder_mask_emb
+        
         # perform the reconstruction
         decoder_src_key_padding_mask = make_pad_mask(encoder_out_lens)
         decoder_in = self.decoder_embed(encoder_out) # project to decoder_dim
+
+        # replace the un-masked decoder_in with the fbank_emb
+        if self.training:
+            fbank = self.fbank_proj(fbank)
+            fbank = fbank[:, :decoder_in.size(0)*4, :]
+            fbank = fbank.reshape(N, decoder_in.size(0), decoder_in.size(-1))
+            fbank = fbank.permute(1,0,2) # (T,N,C) -> (N,T,C)
+            non_masked_indices = decoder_mask_indices == False 
+            replace_mask = torch.rand(decoder_mask_indices.shape, device=x.device) <= self.fbank_replace_prob
+            replace_mask = torch.logical_and(replace_mask, non_masked_indices)
+
+            decoder_in[replace_mask] = fbank[replace_mask]
+
         decoder_out, decoder_out_lens = self.decoder(decoder_in, encoder_out_lens, decoder_src_key_padding_mask)
 
         decoder_out = self.decoder_pred(decoder_out) 

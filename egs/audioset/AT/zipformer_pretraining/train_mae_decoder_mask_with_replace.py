@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright    2023  Xiaomi Corp.        (authors: Xiaoyu Yang)
+# Copyright    2024  Xiaomi Corp.        (authors: Xiaoyu Yang)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
 #
@@ -49,7 +49,7 @@ from pretraining_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_mae_decoder_mask import AudioPretrainingModel
+from model_mae_decoder_mask_with_replace import AudioPretrainingModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -279,6 +279,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.1,
         help="The scale of the co-training loss"
+    )
+
+    parser.add_argument(
+        "--fbank-replace-prob",
+        type=float,
+        default=0.25,
+        help="The proportion of replacing the un-masked decoder input with fbank"
     )
 
 
@@ -602,6 +609,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_length=params.mask_length,
         mask_selection=params.mask_selection,
         noise_scale=params.noise_scale,
+        fbank_replace_prob=params.fbank_replace_prob,
     )
     return model
 
