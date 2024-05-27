@@ -219,13 +219,16 @@ class AudioPretrainingModel(nn.Module):
         self,
         x: torch.Tensor,
         padding_mask: torch.Tensor,
+        min_mask: int = 2,
     ):
-        """A simpler way of applying mask to the features. It also enables
-        a larger masking ratio
+        """A simpler way of applying mask to the features. It enables
+        a larger masking ratio. The masking does not allow overlap, so the mask length is
+        always a multiple of mask_length (when multiple masks are continuous).
 
         Args:
             x (torch.Tensor): the input feature to be masked
             padding_mask (torch.Tensor): the padding mask of x, True on padding positions
+            min_mask (int): minimum number of mask for each sample
         """
         B,T,C = x.shape
         assert self.mask_prob > 0.0
@@ -234,6 +237,8 @@ class AudioPretrainingModel(nn.Module):
         for i in range(B):
             num_segments = (T - padding_mask[i].sum()) // self.mask_length # discard the last few frames
             segment_mask = torch.rand(num_segments) < self.mask_prob 
+            while sum(segment_mask) < min_mask:
+                segment_mask = torch.rand(num_segments) < self.mask_prob
             segment_mask_expanded = segment_mask.unsqueeze(-1).expand(num_segments, self.mask_length)
             segment_mask_expanded = segment_mask_expanded.reshape(-1).float()
             if segment_mask_expanded.size(0) < T:
