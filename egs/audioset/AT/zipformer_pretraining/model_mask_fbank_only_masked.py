@@ -166,7 +166,7 @@ class AudioPretrainingModel(nn.Module):
         
         # Add noise
         if self.training:
-            noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+            noise = torch.randn_like(encoder_out, device=encoder_out.device) * self.noise_scale
             encoder_out += noise
 
         # perform the reconstruction
