@@ -49,7 +49,7 @@ from pretraining_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_mae_decoder_mask import AudioPretrainingModel
+from model_mae_decoder_mask_own_mask import AudioPretrainingModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -272,6 +272,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.1,
         help="The scale of the noise to be added"
+    )
+
+    parser.add_argument(
+        "--mask-approach",
+        type=str,
+        default="wav2vec2",
+        choices=["wav2vec2", "custom"],
+        help="The masking strategy.",
     )
 
     parser.add_argument(
@@ -601,6 +609,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_prob=params.mask_prob,
         mask_length=params.mask_length,
         mask_selection=params.mask_selection,
+        mask_approach=params.mask_approach,
         noise_scale=params.noise_scale,
     )
     return model
