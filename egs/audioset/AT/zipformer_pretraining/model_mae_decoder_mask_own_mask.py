@@ -45,6 +45,7 @@ class AudioPretrainingModel(nn.Module):
         mask_length: int = 10,
         mask_selection: str = "static",
         mask_other: float = 0.0,
+        mask_approach: str = "wav2vec2",
     ):
         """An audio pretraining model
 
@@ -62,6 +63,8 @@ class AudioPretrainingModel(nn.Module):
             Dimension of the encoder.
           noise_scale:
             The scale of the gaussia noise.
+          mask_approach:
+            Which approach to take when applying mask, available choices: [wav2vec2, custom]
         """
         super().__init__()
 
@@ -88,6 +91,14 @@ class AudioPretrainingModel(nn.Module):
         # mask embeddings
         self.mask_emb = nn.Parameter(torch.FloatTensor(fbank_dim).uniform_())
         self.decoder_mask_emb = nn.Parameter(torch.FloatTensor(encoder_dim).normal_())
+
+        self.mask_approach = mask_approach
+        if mask_approach == "wav2vec2":
+            self.apply_mask = self.apply_mask_facebook
+        elif mask_approach == "custom":
+            self.apply_mask = self.apply_mask_custom
+        else:
+            raise ValueError()
 
         self.mask_prob = mask_prob
         self.mask_length = mask_length
@@ -153,9 +164,9 @@ class AudioPretrainingModel(nn.Module):
         padding_mask = make_pad_mask(x_lens)
 
         # apply masking to the fbank features
-        x, mask_indices = self.apply_mask_facebook(
+        x, mask_indices = self.apply_mask(
             x.clone(),
-            padding_mask=padding_mask
+            padding_mask=padding_mask,
         ) # (N,T,C), (N,T)
 
         x, x_lens = self.encoder_embed(x, x_lens) # (N,T,C)
@@ -210,7 +221,8 @@ class AudioPretrainingModel(nn.Module):
             mask_indices = mask_indices[:, :decoder_src_key_padding_mask.size(1)]
         l2_loss *= mask_indices.unsqueeze(-1)
         
-        # normalize the mse loss by the feature dimension 
+        # clamp and normalize the mse loss by the feature dimension 
+        l2_loss.clamp_(min=-30, max=-30)
         l2_loss = l2_loss.sum() / decoder_out.size(-1)
 
         return l2_loss
@@ -249,14 +261,15 @@ class AudioPretrainingModel(nn.Module):
         mask_indices = torch.stack(mask_indices).to(x.device)
         x = index_put(x, mask_indices.bool(), self.mask_emb)
         if random.random() > 0.97:
-            logging.info(f"A proportion of {mask_indices.sum()/mask_indices.numel():.2f} frames are masked")
+            logging.info(f"Apply own random masking. A proportion of {mask_indices.sum()/mask_indices.numel():.2f} frames are masked")
 
         return x, mask_indices
     
     def apply_mask_facebook(
         self,
         x: torch.Tensor,
-        padding_mask,
+        padding_mask: torch.Tensor,
+        min_masks: int = 2,
     ):
         # this function is modified from fairseq: https://github.com/facebookresearch/fairseq/blob/bedb259bf34a9fc22073c13a1cee23192fa70ef3/fairseq/models/wav2vec/wav2vec2.py#L429
         # The masked indices have value 1
@@ -270,7 +283,7 @@ class AudioPretrainingModel(nn.Module):
                 self.mask_length,
                 mask_type=self.mask_selection,
                 mask_other=self.mask_other,
-                min_masks=2,
+                min_masks=min_masks,
                 no_overlap=False,  # False
                 min_space=1,  # 1
                 require_same_masks=False,
@@ -279,7 +292,7 @@ class AudioPretrainingModel(nn.Module):
             x = index_put(x, mask_indices, self.mask_emb)
             mask_indices = mask_indices.float()
             if random.random() > 0.97:
-                logging.info(f"A proportion of {mask_indices.sum()/mask_indices.numel():.2f} frames are masked")
+                logging.info(f"Applying wav2vec2 masking. A proportion of {mask_indices.sum()/mask_indices.numel():.2f} frames are masked")
         else:
             mask_indices = None
 
