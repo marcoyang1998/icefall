@@ -456,7 +456,6 @@ class AudioSetATDatamodule:
     def audioset_sampling_weights(self):
         logging.info("About to get the sampling weight for every cut in AudioSet")
         weights = []
-        import pdb; pdb.set_trace()
         with open(self.args.manifest_dir / f"sample_weights_{self.args.audioset_subset}.txt", "r") as f:
             while True:
                 line = f.readline()
