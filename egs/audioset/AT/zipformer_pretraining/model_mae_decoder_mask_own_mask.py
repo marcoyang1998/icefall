@@ -222,7 +222,7 @@ class AudioPretrainingModel(nn.Module):
         l2_loss *= mask_indices.unsqueeze(-1)
         
         # clamp and normalize the mse loss by the feature dimension 
-        l2_loss.clamp_(min=-30, max=-30)
+        l2_loss.clamp_(min=-30, max=30)
         l2_loss = l2_loss.sum() / decoder_out.size(-1)
 
         return l2_loss
