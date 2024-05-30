@@ -108,6 +108,13 @@ class AudioSetATDatamodule:
             "It cannot be used together with bucketing sampler"
         )
         group.add_argument(
+            "--num-samples",
+            type=int,
+            default=200000,
+            help="The number of samples to be drawn in each epoch. Only be used"
+            "for weighed sampler"
+        )
+        group.add_argument(
             "--bucketing-sampler",
             type=str2bool,
             default=True,
@@ -319,7 +326,8 @@ class AudioSetATDatamodule:
                 weights = self.audioset_sampling_weights()
                 train_sampler = WeightedSimpleCutSampler(
                     cuts_train,
-                    cuts_weight=weights,
+                    weights,
+                    num_samples=self.args.num_samples,
                     max_duration=self.args.max_duration,
                     shuffle=False, # do not support shuffle
                     drop_last=self.args.drop_last,
@@ -442,6 +450,7 @@ class AudioSetATDatamodule:
                 cuts = load_manifest(
                     self.args.manifest_dir / "cuts_audioset_full.jsonl.gz"
                 )
+            logging.info(f"Get {len(cuts)} cuts in total.")
 
         return cuts
 
@@ -454,7 +463,7 @@ class AudioSetATDatamodule:
 
     @lru_cache()
     def audioset_sampling_weights(self):
-        logging.info("About to get the sampling weight for every cut in AudioSet")
+        logging.info(f"About to get the sampling weight for {self.args.audioset_subset} in AudioSet")
         weights = []
         with open(self.args.manifest_dir / f"sample_weights_{self.args.audioset_subset}.txt", "r") as f:
             while True:
@@ -463,5 +472,6 @@ class AudioSetATDatamodule:
                     break
                 weight = float(line.split()[1])
                 weights.append(weight)
+        logging.info(f"Get the sampling weight for {len(weights)} cuts")
         return weights
 

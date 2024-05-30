@@ -1045,7 +1045,7 @@ def train_one_epoch(
                     tb_writer, "train/valid_", params.batch_idx_train
                 )
 
-        if num_samples > 200000:
+        if num_samples > params.num_samples:
             logging.info("Number of training samples exceed 200,000 in this epoch, move to next epoch")
             break
 
@@ -1198,7 +1198,7 @@ def run(rank, world_size, args):
 
         return True
 
-    train_cuts = train_cuts.filter(remove_short_and_long_utt)
+    # train_cuts = train_cuts.filter(remove_short_and_long_utt)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
