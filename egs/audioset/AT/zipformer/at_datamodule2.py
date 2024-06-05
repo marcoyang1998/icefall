@@ -310,7 +310,7 @@ class AudioSetATDatamodule:
             )
 
         if self.args.bucketing_sampler:
-            assert self.args.weighted_sampler == False
+            assert self.args.weighted_sampler == False, "weighted sampling is not supported in bucket sampler"
             logging.info("Using DynamicBucketingSampler.")
             train_sampler = DynamicBucketingSampler(
                 cuts_train,

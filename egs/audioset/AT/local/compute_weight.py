@@ -8,6 +8,8 @@ audioset_unbalanced_cuts = load_manifest(audioset_unbalanced_cuts)
 
 cuts = lhotse.combine(audioset_balanced_cuts, audioset_unbalanced_cuts)
 
+print(f"A total of {len(cuts)} cuts.")
+
 label_count = [0] * 527 # a total of 527 classes
 for c in cuts:
     audio_event = c.supervisions[0].audio_event
@@ -16,9 +18,8 @@ for c in cuts:
         label_count[label] += 1
 
 print([(i, label_count[i]) for i in range(527)])
-import pdb; pdb.set_trace()
 
-with open("data/fbank/sample_weights_eval.txt", "w") as f:
+with open("data/fbank/sample_weights_full.txt", "w") as f:
     for c in cuts:
         audio_event = c.supervisions[0].audio_event
         labels = list(map(int, audio_event.split(";")))
