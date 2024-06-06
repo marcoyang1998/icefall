@@ -82,7 +82,7 @@ from typing import Tuple
 import torch
 from scaling_converter import convert_scaled_to_non_scaled
 from torch import Tensor, nn
-from train_mae_decoder_mask_with_replace import add_model_arguments, get_model, get_params
+from train_mae_decoder_mask_with_replace_co_training import add_model_arguments, get_model, get_params
 
 from icefall.checkpoint import (
     average_checkpoints,
