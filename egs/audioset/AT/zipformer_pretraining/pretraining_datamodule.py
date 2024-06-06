@@ -87,6 +87,13 @@ class AudioSetATDatamodule:
         )
 
         group.add_argument(
+            "--full-libri",
+            type=str2bool,
+            default=False,
+            help="If using the full librispeech data",
+        )
+
+        group.add_argument(
             "--manifest-dir",
             type=Path,
             default=Path("data/fbank"),

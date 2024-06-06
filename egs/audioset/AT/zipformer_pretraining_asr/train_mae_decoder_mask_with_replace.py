@@ -1110,9 +1110,14 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
+    def add_audio_event(c: Cut):
+        c.supervisions[0].audio_event = "0"
+        return c
+
     audioset = AudioSetATDatamodule(args)
     train_cuts = audioset.librispeech_train_all_shuf_cuts()
-
+    train_cuts = train_cuts.map(add_audio_event)
+    
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
         #
@@ -1142,6 +1147,7 @@ def run(rank, world_size, args):
 
     valid_cuts = audioset.librispeech_dev_clean_cuts()
     valid_cuts += audioset.librispeech_dev_other_cuts()
+    valid_cuts = valid_cuts.map(add_audio_event)
     valid_dl = audioset.valid_dataloaders(valid_cuts)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
