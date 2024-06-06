@@ -1111,7 +1111,7 @@ def run(rank, world_size, args):
         register_inf_check_hooks(model)
 
     audioset = AudioSetATDatamodule(args)
-    train_cuts = audioset.audioset_train_cuts()
+    train_cuts = audioset.librispeech_train_all_shuf_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1122,7 +1122,7 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
-        if c.duration < 1.0 or c.duration > 30.0:
+        if c.duration < 1.0 or c.duration > 20.0:
             return False
 
         return True
@@ -1140,7 +1140,8 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = audioset.audioset_eval_cuts()
+    valid_cuts = audioset.librispeech_dev_clean_cuts()
+    valid_cuts += audioset.librispeech_dev_other_cuts()
     valid_dl = audioset.valid_dataloaders(valid_cuts)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
