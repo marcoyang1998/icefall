@@ -49,7 +49,7 @@ from pretraining_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_mae_decoder_mask import AudioPretrainingModel
+from model_mae_decoder_mask_fix_rand_no_detach import AudioPretrainingModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
