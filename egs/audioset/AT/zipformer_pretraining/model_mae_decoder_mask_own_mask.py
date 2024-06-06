@@ -176,12 +176,12 @@ class AudioPretrainingModel(nn.Module):
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask) # (T,N,C)
 
         # Normalize encoder features
-        normalize_factor = (encoder_out.detach() ** 2).mean(dim=-1, keepdim=True).sqrt()
+        normalize_factor = (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
         encoder_out = encoder_out / normalize_factor
 
         if self.training:
             # add noise to the encoder_out
-            noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+            noise = torch.randn_like(encoder_out, device=encoder_out.device) * self.noise_scale
             encoder_out += noise
 
         # replace the masked encoder_out with a mask_emb
@@ -223,6 +223,8 @@ class AudioPretrainingModel(nn.Module):
         
         # clamp and normalize the mse loss by the feature dimension 
         l2_loss.clamp_(min=-30, max=30)
+        nan_mask = l2_loss == torch.nan
+        l2_loss[nan_mask] = 0.0
         l2_loss = l2_loss.sum() / decoder_out.size(-1)
 
         return l2_loss

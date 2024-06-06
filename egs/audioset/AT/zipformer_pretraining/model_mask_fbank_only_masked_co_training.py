@@ -172,7 +172,7 @@ class AudioPretrainingModel(nn.Module):
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
 
         # Normalize encoder features
-        normalize_factor = (encoder_out.detach() ** 2).mean(dim=-1, keepdim=True).sqrt()
+        normalize_factor = (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
         encoder_out = encoder_out / normalize_factor
 
         # calculate the co-training loss
@@ -188,7 +188,7 @@ class AudioPretrainingModel(nn.Module):
 
         # add noise to the encoder_out
         if self.training:
-            noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+            noise = torch.randn_like(encoder_out, device=encoder_out.device) * self.noise_scale
             encoder_out += noise
 
         # perform the reconstruction

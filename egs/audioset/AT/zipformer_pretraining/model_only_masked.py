@@ -160,12 +160,12 @@ class AudioPretrainingModel(nn.Module):
         x_masked = x_masked.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
         encoder_out, encoder_out_lens = self.encoder(x_masked, x_lens, src_key_padding_mask)
         
-        normalize_factor = (encoder_out.detach() ** 2).mean(dim=-1, keepdim=True).sqrt()
+        normalize_factor = (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
         encoder_out = encoder_out / normalize_factor
 
         # Add noise
         if self.training:
-            noise = torch.rand_like(encoder_out, device=encoder_out.device) * self.noise_scale
+            noise = torch.randn_like(encoder_out, device=encoder_out.device) * self.noise_scale
             encoder_out += noise
 
         # perform the reconstruction

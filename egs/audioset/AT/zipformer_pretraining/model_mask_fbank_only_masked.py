@@ -161,7 +161,7 @@ class AudioPretrainingModel(nn.Module):
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
         
-        normalize_factor = (encoder_out.detach() ** 2).mean(dim=-1, keepdim=True).sqrt()
+        normalize_factor = (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
         encoder_out = encoder_out / normalize_factor
         
         # Add noise
