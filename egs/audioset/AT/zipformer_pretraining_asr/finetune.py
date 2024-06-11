@@ -303,6 +303,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="If True, use CTC head.",
     )
 
+    parser.add_argument(
+        "--decoder-lr-scale",
+        type=float,
+        default=1.0,
+        help="The lr scale for the ASR decoder",
+    )
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -1254,6 +1261,16 @@ def run(rank, world_size, args):
             params=params, model=model, model_avg=model_avg
         )
 
+    if params.decoder_lr_scale != 1.0:
+        logging.info(f"Setting the lr_scale of the ASR decoder to {params.decoder_lr_scale}")
+        if params.use_ctc:
+            model.ctc_output.lr_scale = params.decoder_lr_scale
+        if params.use_transducer:
+            model.decoder.lr_scale = params.decoder_lr_scale
+            model.joiner.lr_scale = params.decoder_lr_scale
+            model.simple_am_proj.lr_scale = params.decoder_lr_scale
+            model.simple_lm_proj.lr_scale = params.decoder_lr_scale
+
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
@@ -1290,17 +1307,11 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args)
 
-    gigaspeech_cuts = librispeech.gigaspeech_subset_small_cuts()
-    if params.use_mux:
-        librispeech_cuts = librispeech.train_all_shuf_cuts()
-        train_cuts = CutSet.mux(
-            gigaspeech_cuts,  # num cuts = 688182
-            librispeech_cuts,  # num cuts = 843723
-            weights=[688182, 843723],
-            stop_early=True,
-        )
+    if params.full_libri:
+        train_cuts = librispeech.train_all_shuf_cuts()
     else:
-        train_cuts = gigaspeech_cuts
+        train_cuts = librispeech.train_clean_100_cuts()
+
     logging.info(train_cuts)
 
     def remove_short_and_long_utt(c: Cut):
@@ -1355,22 +1366,20 @@ def run(rank, world_size, args):
 
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
-    gigaspeech_dev_cuts = librispeech.gigaspeech_dev_cuts()
 
-    valid_sets = ["librispeech", "gigaspeech"]
+    valid_sets = ["librispeech"]
     valid_dls = [
         librispeech.valid_dataloaders(valid_cuts),
-        librispeech.valid_dataloaders(gigaspeech_dev_cuts),
     ]
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
