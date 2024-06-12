@@ -215,7 +215,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--decoder-downsampling-factor",
         type=str,
-        default="1,2,4,8,4,1",
+        default="1,2,4,8,4,2",
         help="Downsampling factor for each stack of encoder layers.",
     )
 
