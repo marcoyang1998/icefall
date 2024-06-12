@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import math
 import random
 from typing import List, Optional, Tuple
 
@@ -40,7 +41,6 @@ class AudioPretrainingModel(nn.Module):
         encoder_input_dim: int = 192,
         decoder_dim: int = 384,
         decoder_input_dim: int = 192,
-        noise_scale: float = 0.1,
         mask_prob: float = 0.65,
         mask_length: int = 10,
         mask_selection: str = "static",
@@ -78,23 +78,22 @@ class AudioPretrainingModel(nn.Module):
         
         # decoder embed
         self.decoder_embed = nn.Linear(
-            encoder_dim, decoder_input_dim, bias=True,
+            fbank_dim, decoder_input_dim, bias=True,
         )
-        # decoder pred to 4 * fbank dim (we concatenate every 4 frames)
+        # decoder pred
         self.decoder_pred = nn.Linear(
-            decoder_dim, fbank_dim * 4, bias=True,
+            decoder_dim, fbank_dim, bias=True,
         )
+        # fbank norm
+        self.fbank_norm = nn.BatchNorm1d(fbank_dim)
 
         # mask embeddings
         self.mask_emb = nn.Parameter(torch.FloatTensor(fbank_dim).uniform_())
-        self.decoder_mask_emb = nn.Parameter(torch.FloatTensor(encoder_dim).normal_())
 
         self.mask_prob = mask_prob
         self.mask_length = mask_length
         self.mask_selection = mask_selection
         self.mask_other = mask_other
-
-        self.noise_scale = noise_scale
 
     def forward_encoder(
         self,
@@ -151,6 +150,7 @@ class AudioPretrainingModel(nn.Module):
         N, T, C = x.shape
 
         padding_mask = make_pad_mask(x_lens)
+        fbank = x.clone()
 
         # apply masking to the fbank features
         x, mask_indices = self.apply_mask_facebook(
@@ -162,58 +162,54 @@ class AudioPretrainingModel(nn.Module):
         src_key_padding_mask = make_pad_mask(x_lens)
 
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask) # (T,N,C)
-
-        # Normalize encoder features
-        normalize_factor = (encoder_out ** 2).mean(dim=-1, keepdim=True).sqrt()
-        encoder_out = encoder_out / normalize_factor
-
-        if self.training:
-            # add noise to the encoder_out
-            noise = torch.randn_like(encoder_out, device=encoder_out.device) * self.noise_scale
-            encoder_out += noise
+        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask) # (T,N,C)        
 
         # replace the masked encoder_out with a mask_emb
-        decoder_mask_indices = nn.functional.max_pool1d(mask_indices, 4)
-        assert decoder_mask_indices.size(1) >= encoder_out.size(0)
-        if decoder_mask_indices.size(1) > encoder_out.size(0):
-            decoder_mask_indices = decoder_mask_indices[:, :encoder_out.size(0)]
+        mask_indices = nn.functional.max_pool1d(mask_indices, 4)
+        assert mask_indices.size(1) >= encoder_out.size(0)
+        if mask_indices.size(1) > encoder_out.size(0):
+            mask_indices = mask_indices[:, :encoder_out.size(0)]
 
-        decoder_mask_indices = decoder_mask_indices.bool().T
-        encoder_out[decoder_mask_indices] = self.decoder_mask_emb
+        mask_indices = mask_indices.bool().T
+        encoder_out[mask_indices] = 0.0
+
+        # expand the encoder_out to match the fbank length, also replace the mask embedding with zeros
+        encoder_out = torch.repeat_interleave(encoder_out, 4, dim=0)
+        diff = T - encoder_out.size(0)
+        padding = torch.zeros([diff, N, encoder_out.size(2)], device=x.device)
+        left = padding[:diff//2]
+        right = padding[diff//2:]
+        encoder_out = torch.cat([left, encoder_out, right], dim=0) # same length as fbank
+        
+        # Get the time embedding
+        timestamps = 0.1 * torch.ones(N, device=x.device) # currently use a fixed t=0.1
+        t_embed = timestep_embedding(timesteps=timestamps, dim=encoder_out.size(2)) 
+        conditional_embedding = encoder_out + t_embed
+
+        # flow
+        fbank = fbank.permute(0,2,1) # (N,C,T)
+        fbank = self.fbank_norm(fbank) # normalize the fbank
+        fbank = fbank.permute(0,2,1) # (N,T,C)
+        noise = torch.randn_like(fbank)
+        decoder_in = (1-timestamps[:, None, None]) * noise + timestamps[:, None, None] * fbank
+        u_t = decoder_in - noise # (N,T,C), the flow training target 
             
         # perform the reconstruction
-        decoder_src_key_padding_mask = make_pad_mask(encoder_out_lens)
-        decoder_in = self.decoder_embed(encoder_out) # project to decoder_dim
-        decoder_out, decoder_out_lens = self.decoder(decoder_in, encoder_out_lens, decoder_src_key_padding_mask)
+        decoder_in = self.decoder_embed(decoder_in) # project to decoder_dim
+        decoder_in = decoder_in.permute(1,0,2)
+        decoder_out, decoder_out_lens = self.decoder(
+            x=decoder_in,
+            x_lens=encoder_out_lens, 
+            src_key_padding_mask=padding_mask,
+            emb=conditional_embedding,
+        )
 
         decoder_out = self.decoder_pred(decoder_out) 
         decoder_out = decoder_out.permute(1, 0, 2) # (T, N, C) -> (N, T, C)
 
-        # compute the reconstruction loss
-        assert target.size(1) >= 4 * decoder_out.size(1), (target.size(1), decoder_out.size(1))
-        target = target[:, : 4 * decoder_out.size(1), :].reshape(N, -1, 4, self.fbank_dim) 
-        target = target.reshape(N, -1, 4 * self.fbank_dim)
-        l2_loss = nn.functional.mse_loss(
-            decoder_out,
-            target,
-            reduction="none"
-        ) # (N, T, C)
+        loss = ((decoder_out - u_t)**2).sum() / fbank.size(2)
 
-        # mask the loss on the padding positions
-        l2_loss.masked_fill_(decoder_src_key_padding_mask.unsqueeze(-1), 0.0)
-        
-        # only compute reconstruction loss on masked frames
-        mask_indices = nn.functional.max_pool1d(mask_indices.float(), 4)
-        assert mask_indices.size(1) >= decoder_src_key_padding_mask.size(1)
-        if mask_indices.size(1) > decoder_src_key_padding_mask.size(1):
-            mask_indices = mask_indices[:, :decoder_src_key_padding_mask.size(1)]
-        l2_loss *= mask_indices.unsqueeze(-1)
-        
-        # normalize the mse loss by the feature dimension 
-        l2_loss = l2_loss.sum() / decoder_out.size(-1)
-
-        return l2_loss
+        return loss
     
     def apply_mask_facebook(
         self,
@@ -246,6 +242,26 @@ class AudioPretrainingModel(nn.Module):
             mask_indices = None
 
         return x, mask_indices
+
+def timestep_embedding(timesteps, dim, max_period=10000):
+    """Create sinusoidal timestep embeddings.
+
+    :param timesteps: a 1-D Tensor of N indices, one per batch element. These may be fractional.
+    :param dim: the dimension of the output.
+    :param max_period: controls the minimum frequency of the embeddings.
+    :return: an [N x dim] Tensor of positional embeddings.
+    """
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device)
+        / half
+    )
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
 
 
 def index_put(tensor, indices, value):

@@ -39,6 +39,7 @@ from scaling import (
     Dropout2,
     FloatLike,
     ScheduledFloat,
+    SwooshR,
     Whiten,
     convert_num_channels,
     limit_param_value,
@@ -116,8 +117,9 @@ class Zipformer2Flow(EncoderInterface):
         causal: bool = False,
         chunk_size: Tuple[int] = [-1],
         left_context_frames: Tuple[int] = [-1],
+        condition_embed_dim: int = 0,
     ) -> None:
-        super(Zipformer2, self).__init__()
+        super(Zipformer2Flow, self).__init__()
 
         if dropout is None:
             dropout = ScheduledFloat((0.0, 0.3), (20000.0, 0.1))
@@ -151,6 +153,7 @@ class Zipformer2Flow(EncoderInterface):
         self.causal = causal
         self.chunk_size = chunk_size
         self.left_context_frames = left_context_frames
+        self.condition_embed_dim = condition_embed_dim
 
         for u, d in zip(encoder_unmasked_dim, encoder_dim):
             assert u <= d
@@ -180,6 +183,7 @@ class Zipformer2Flow(EncoderInterface):
                 num_encoder_layers[i],
                 pos_dim=pos_dim,
                 dropout=dropout,
+                embed_dim=condition_embed_dim if downsampling_factor[i] == 1 else 0,
                 warmup_begin=warmup_batches * (i + 1) / (num_encoders + 1),
                 warmup_end=warmup_batches * (i + 2) / (num_encoders + 1),
                 final_layerdrop_rate=0.035 * (downsampling_factor[i] ** 0.5),
@@ -191,12 +195,13 @@ class Zipformer2Flow(EncoderInterface):
                     dim=encoder_dim[i],
                     downsample=downsampling_factor[i],
                     dropout=dropout,
+                    embed_dim=condition_embed_dim,
                 )
 
             encoders.append(encoder)
 
         self.encoders = nn.ModuleList(encoders)
-
+        
         if output_downsampling_factor > 1:
             self.downsample_output = SimpleDownsample(
                 max(encoder_dim), downsample=output_downsampling_factor, dropout=dropout
@@ -299,6 +304,7 @@ class Zipformer2Flow(EncoderInterface):
         x: Tensor,
         x_lens: Tensor,
         src_key_padding_mask: Optional[Tensor] = None,
+        emb: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
         """
         Args:
@@ -344,6 +350,7 @@ class Zipformer2Flow(EncoderInterface):
                     else src_key_padding_mask[..., ::ds]
                 ),
                 attn_mask=attn_mask,
+                emb=emb,
             )
             outputs.append(x)
 
@@ -1003,6 +1010,7 @@ class Zipformer2Encoder(nn.Module):
 
     Args:
         encoder_layer: an instance of the Zipformer2EncoderLayer() class (required).
+        embed_dim: the dimension of the conditional embeddings
         num_layers: the number of sub-encoder-layers in the encoder (required).
        pos_dim: the dimension for the relative positional encoding
 
@@ -1021,13 +1029,23 @@ class Zipformer2Encoder(nn.Module):
         dropout: float,
         warmup_begin: float,
         warmup_end: float,
+        embed_dim: int = 0,
         initial_layerdrop_rate: float = 0.5,
         final_layerdrop_rate: float = 0.05,
     ) -> None:
         super().__init__()
+        layer_dim = encoder_layer.embed_dim
+
         self.encoder_pos = CompactRelPositionalEncoding(
             pos_dim, dropout_rate=0.15, length_factor=1.0
         )
+        
+        if embed_dim > 0:
+            self.embed_layer = nn.Sequential(
+                nn.Linear(embed_dim, layer_dim),
+            )
+        else:
+            self.embed_layer = None
 
         self.layers = nn.ModuleList(
             [copy.deepcopy(encoder_layer) for i in range(num_layers)]
@@ -1050,6 +1068,7 @@ class Zipformer2Encoder(nn.Module):
     def forward(
         self,
         src: Tensor,
+        emb: Tensor = None,
         chunk_size: int = -1,
         feature_mask: Union[Tensor, float] = 1.0,
         attn_mask: Optional[Tensor] = None,
@@ -1059,6 +1078,7 @@ class Zipformer2Encoder(nn.Module):
 
         Args:
             src: the sequence to the encoder (required): shape (seq_len, batch_size, embedding_dim).
+            emb: the conditional embedding, shape (seq_len, batch_size, emb_size)
             chunk_size: the number of frames per chunk, of >= 0; if -1, no chunking.
             feature_mask: something that broadcasts with src, that we'll multiply `src`
                by at every layer: if a Tensor, likely of shape (seq_len, batch_size, embedding_dim)
@@ -1075,6 +1095,10 @@ class Zipformer2Encoder(nn.Module):
 
         if not torch.jit.is_scripting() and not torch.jit.is_tracing():
             output = output * feature_mask
+        
+        if emb is not None and self.embed_layer is not None:
+            emb = self.embed_layer(emb)
+            output = output + emb
 
         for i, mod in enumerate(self.layers):
             output = mod(
@@ -1223,7 +1247,7 @@ class DownsampledZipformer2Encoder(nn.Module):
     """
 
     def __init__(
-        self, encoder: nn.Module, dim: int, downsample: int, dropout: FloatLike
+        self, encoder: nn.Module, dim: int, downsample: int, dropout: FloatLike, embed_dim: int
     ):
         super(DownsampledZipformer2Encoder, self).__init__()
         self.downsample_factor = downsample
@@ -1233,6 +1257,13 @@ class DownsampledZipformer2Encoder(nn.Module):
         self.upsample = SimpleUpsample(dim, downsample)
         self.out_combiner = BypassModule(dim, straight_through_rate=0)
 
+        if embed_dim > 0:
+            self.embed_layer = nn.Sequential(
+                nn.Linear(embed_dim, dim),
+            )
+        else:
+            self.embed_layer = None
+
     def forward(
         self,
         src: Tensor,
@@ -1240,6 +1271,7 @@ class DownsampledZipformer2Encoder(nn.Module):
         feature_mask: Union[Tensor, float] = 1.0,
         attn_mask: Optional[Tensor] = None,
         src_key_padding_mask: Optional[Tensor] = None,
+        emb: Optional[Tensor] = None,
     ) -> Tensor:
         r"""Downsample, go through encoder, upsample.
 
@@ -1252,10 +1284,16 @@ class DownsampledZipformer2Encoder(nn.Module):
                  True means masked position. May be None.
             src_key_padding_mask:  the mask for padding, of shape (batch_size, seq_len); True means
                  masked position.  May be None.
+            emb: the conditional embedding, May be None
 
         Returns: a Tensor with the same shape as src.
         """
         src_orig = src
+
+        if emb is not None and self.embed_layer is not None:
+            emb = self.embed_layer(emb)
+            src = src + emb
+
         src = self.downsample(src)
         ds = self.downsample_factor
         if attn_mask is not None:
@@ -1267,6 +1305,7 @@ class DownsampledZipformer2Encoder(nn.Module):
             feature_mask=feature_mask,
             attn_mask=attn_mask,
             src_key_padding_mask=src_key_padding_mask,
+            emb=emb,
         )
         src = self.upsample(src)
         # remove any extra frames that are not a multiple of downsample_factor
@@ -1280,6 +1319,7 @@ class DownsampledZipformer2Encoder(nn.Module):
         states: List[Tensor],
         left_context_len: int,
         src_key_padding_mask: Tensor,
+        emb: Tensor = None,
     ) -> Tuple[Tensor, List[Tensor]]:
         r"""Downsample, go through encoder, upsample, in streaming forward mode.
 
@@ -1303,6 +1343,7 @@ class DownsampledZipformer2Encoder(nn.Module):
             states=states,
             left_context_len=left_context_len,
             src_key_padding_mask=src_key_padding_mask,
+            emb=emb,
         )
         src = self.upsample(src)
         # remove any extra frames that are not a multiple of downsample_factor
