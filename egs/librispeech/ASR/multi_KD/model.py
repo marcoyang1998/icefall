@@ -243,13 +243,8 @@ class MultiKDModel(nn.Module):
         # beats loss
         if self.use_beats and teacher_beats_embeddings is not None:
             beats_logits = self.forward_beats(encoder_out, encoder_out_lens)
-            
-            # normalize the teacher probabilities
-            # teacher_beats_embeddings = teacher_beats_embeddings / teacher_beats_embeddings.sum(dim=-1).unsqueeze(-1).expand_as(teacher_beats_embeddings)
             teacher_beats_embeddings = teacher_beats_embeddings.squeeze(dim=1) # (N, num_events)
-            
             beats_loss = F.binary_cross_entropy_with_logits(beats_logits, teacher_beats_embeddings, reduction=reduction)
-            # beats_loss = F.kl_div(beats_logits, teacher_beats_embeddings, reduction="sum")
         else:
             beats_loss = None
         
