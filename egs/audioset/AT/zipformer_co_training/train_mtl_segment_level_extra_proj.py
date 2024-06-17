@@ -423,6 +423,27 @@ def get_parser():
         help="Whether to use half precision training.",
     )
 
+    parser.add_argument(
+        "--num-frame-masks",
+        type=int,
+        default=10,
+        help="The number of time masks"
+    )
+
+    parser.add_argument(
+        "--frames-mask-size",
+        type=int,
+        default=100,
+        help="The span of each time mask",
+    )
+
+    parser.add_argument(
+        "--max-frames-mask-fraction",
+        type=float,
+        default=0.25,
+        help="The maxixmum ratio of time stamps to be masked"
+    )
+
     add_model_arguments(parser)
 
     return parser
@@ -734,6 +755,8 @@ def compute_loss(
     else:
         supervision_segments = None
 
+    max_frames_mask_fraction = params.max_frames_mask_fraction if batch_idx_train > warm_step else 0.15
+
     with torch.set_grad_enabled(is_training):
         at_loss, segment_level_at_loss, segment_level_co_training_loss, clip_level_co_training_loss = model(
             x=feature,
@@ -746,6 +769,8 @@ def compute_loss(
             time_warp_factor=params.spec_aug_time_warp_factor,
             num_frame_masks=params.num_frame_masks,
             supervision_segments=supervision_segments,
+            frames_mask_size=params.frames_mask_size,
+            max_frames_mask_fraction=params.max_frames_mask_fraction,
         )
         loss = (
             at_loss * (1 - co_training_loss_scale)
@@ -1137,7 +1162,8 @@ def run(rank, world_size, args):
 
         return True
 
-    train_cuts = train_cuts.filter(remove_short_and_long_utt)
+    if not params.weighted_sampler:
+        train_cuts = train_cuts.filter(remove_short_and_long_utt)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint

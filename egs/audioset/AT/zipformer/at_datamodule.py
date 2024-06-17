@@ -451,9 +451,9 @@ class AudioSetATDatamodule:
 
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
-        logging.info("About to get audioset eval cuts")
+        logging.info("About to get audioset eval all cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_audioset_eval.jsonl.gz"
+            self.args.manifest_dir / "cuts_audioset_eval_all.jsonl.gz"
         )
 
     @lru_cache()

@@ -401,8 +401,8 @@ def mask_along_axis_optimized(
     features = features.unsqueeze(0)
     features = features.reshape([-1] + list(features.size()[-2:]))
 
-    values = torch.randint(int(0), int(mask_size), (1, mask_times))
-    min_values = torch.rand(1, mask_times) * (features.size(axis) - values)
+    values = torch.randint(int(0), int(mask_size), (1, mask_times)) # the length of each mask
+    min_values = torch.rand(1, mask_times) * (features.size(axis) - values) # the start index of each mask
     mask_starts = (min_values.long()).squeeze()
     mask_ends = (min_values.long() + values.long()).squeeze()
 
