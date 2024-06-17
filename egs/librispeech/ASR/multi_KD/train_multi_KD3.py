@@ -71,7 +71,7 @@ from lhotse import load_manifest_lazy, CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model import MultiKDModel
+from model_shift import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -302,6 +302,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=True,
         help="If use the last subsampled output"
+    )
+
+    parser.add_argument(
+        "--delta-t",
+        type=int,
+        default=0,
+        help="The delta when computing whisper KD loss, only be used for causal model"
     )
 
 
@@ -658,6 +665,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         speaker_input_idx=params.speaker_input_idx,
         mvq_KD=False,
         use_subsampled_output=params.use_subsampled_output,
+        delta_t=params.delta_t if params.causal else 0,
     )
     return model
 

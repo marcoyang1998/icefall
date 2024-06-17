@@ -30,7 +30,7 @@ from icefall.utils import add_sos, make_pad_mask, AttributeDict
 from scaling import ScaledLinear
 
 from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
-from multi_quantization.prediction import JointCodebookLoss
+# from multi_quantization.prediction import JointCodebookLoss
 
 
 class MultiKDModel(nn.Module):
@@ -294,8 +294,8 @@ class MultiKDModel(nn.Module):
             mask = make_pad_mask(encoder_out_lens)
             if self.delta_t > 0:
                 whisper_embeddings = whisper_embeddings[:, self.delta_t:, :] 
-                teacher_whisper_embeddings[:, :-self.delta_t, :]
-                mask = mask[:, self.delta_t:, :]
+                teacher_whisper_embeddings = teacher_whisper_embeddings[:, :-self.delta_t, :]
+                mask = mask[:, self.delta_t:]
                 
             whisper_loss = F.l1_loss(whisper_embeddings, teacher_whisper_embeddings, reduction="none")
             whisper_loss.masked_fill_(mask.unsqueeze(-1), 0.0)
