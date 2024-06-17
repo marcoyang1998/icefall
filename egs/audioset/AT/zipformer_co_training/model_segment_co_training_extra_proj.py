@@ -214,9 +214,16 @@ class AudioTaggingModel(nn.Module):
         num_segments = logits.size(1) // segment_length
         segment_level_logits = logits[:, :num_segments * segment_length, :]
         segment_level_logits = segment_level_logits.reshape(2 * N, num_segments, segment_length, -1)
-        segment_level_logits = segment_level_logits.sum(dim=2) # (2 * N, T//4, 527)
+        segment_level_logits = segment_level_logits.sum(dim=2) # (2 * N, T//segment_length, 527)
 
-        segment_level_at_loss = self.criterion(segment_level_logits, target.unsqueeze(dim=1).repeat(2, num_segments, 1)) 
+        segment_level_at_loss = self.criterion(segment_level_logits, target.unsqueeze(dim=1).repeat(2, num_segments, 1))
+        if self.training:
+            segment_mask1 = nn.functional.avg_pool1d(mask_indexes1[:, 2::4], segment_length) > 0.5
+            segment_mask2 = nn.functional.avg_pool1d(mask_indexes2[:, 2::4], segment_length) > 0.5
+
+            segment_mask = torch.cat([segment_mask1, segment_mask2], dim=0)
+            segment_mask = segment_mask[:, :num_segments]
+            segment_level_at_loss = segment_level_at_loss.masked_fill(segment_mask.unsqueeze(-1), 0.0)
         segment_level_at_loss = segment_level_at_loss.sum() / num_segments
         
         # 4. compute the segment-level co-training loss
@@ -234,6 +241,11 @@ class AudioTaggingModel(nn.Module):
             segment_padding_mask = nn.functional.max_pool1d(padding_mask.float(), segment_length)
             segment_padding_mask = segment_padding_mask[:, :num_segments]
             segment_level_co_training_loss.masked_fill_(segment_padding_mask.bool().unsqueeze(dim=-1), 0.0)
+
+            # avoid using masked target
+            valid_co_training_mask = torch.cat([segment_mask2, segment_mask1], dim=0).bool()
+            valid_co_training_mask = valid_co_training_mask[:, :num_segments]
+            segment_level_co_training_loss.masked_fill_(valid_co_training_mask.unsqueeze(-1), 0.0)
 
             # normalize the co-training loss
             segment_level_co_training_loss = segment_level_co_training_loss.sum() / num_segments

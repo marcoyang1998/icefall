@@ -440,7 +440,7 @@ def get_parser():
     parser.add_argument(
         "--max-frames-mask-fraction",
         type=float,
-        default=0.25,
+        default=0.15,
         help="The maxixmum ratio of time stamps to be masked"
     )
 
@@ -1085,13 +1085,14 @@ def run(rank, world_size, args):
     if params.use_spec_aug:
         assert params.enable_spec_aug == False, "Specaug should be done inside model forward"
     
-    num_frame_masks = 10
-    num_frame_masks_parameter = inspect.signature(SpecAugment.__init__).parameters[
-        "num_frame_masks"
-    ]
-    if num_frame_masks_parameter.default == 1:
-        num_frame_masks = 2
-    params.num_frame_masks = num_frame_masks
+    # num_frame_masks = 10
+    # num_frame_masks_parameter = inspect.signature(SpecAugment.__init__).parameters[
+    #     "num_frame_masks"
+    # ]
+    # if num_frame_masks_parameter.default == 1:
+    #     num_frame_masks = 2
+    # params.num_frame_masks = num_frame_masks
+    assert params.num_frame_masks >= 0
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
