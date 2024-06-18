@@ -85,7 +85,9 @@ class AudioPretrainingModel(nn.Module):
             decoder_dim, fbank_dim, bias=True,
         )
         # fbank norm
-        self.fbank_norm = nn.BatchNorm1d(fbank_dim)
+        # self.fbank_norm = nn.BatchNorm1d(fbank_dim)
+        self.fbank_norm_mean = -4.149941921234131
+        self.fbank_norm_std = 4.47724723815918
 
         # mask embeddings
         self.mask_emb = nn.Parameter(torch.FloatTensor(fbank_dim).uniform_())
@@ -187,12 +189,13 @@ class AudioPretrainingModel(nn.Module):
         conditional_embedding = encoder_out + t_embed
 
         # flow
-        fbank = fbank.permute(0,2,1) # (N,C,T)
-        fbank = self.fbank_norm(fbank) # normalize the fbank
-        fbank = fbank.permute(0,2,1) # (N,T,C)
+        # fbank = fbank.permute(0,2,1) # (N,C,T)
+        # fbank = self.fbank_norm(fbank) # normalize the fbank
+        # fbank = fbank.permute(0,2,1) # (N,T,C)
+        fbank = (fbank - self.fbank_norm_mean) / self.fbank_norm_std
         noise = torch.randn_like(fbank)
         decoder_in = (1-timestamps[:, None, None]) * noise + timestamps[:, None, None] * fbank
-        u_t = decoder_in - noise # (N,T,C), the flow training target 
+        u_t = fbank - noise # (N,T,C), the flow training target 
             
         # perform the reconstruction
         decoder_in = self.decoder_embed(decoder_in) # project to decoder_dim
