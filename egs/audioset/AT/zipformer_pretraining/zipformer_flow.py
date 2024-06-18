@@ -1043,7 +1043,6 @@ class Zipformer2Encoder(nn.Module):
         if embed_dim > 0:
             self.embed_layer = nn.Sequential(
                 nn.Linear(embed_dim, layer_dim),
-                SwooshR(),
             )
         else:
             self.embed_layer = None
@@ -1261,7 +1260,6 @@ class DownsampledZipformer2Encoder(nn.Module):
         if embed_dim > 0:
             self.embed_layer = nn.Sequential(
                 nn.Linear(embed_dim, dim),
-                SwooshR(),
             )
         else:
             self.embed_layer = None
