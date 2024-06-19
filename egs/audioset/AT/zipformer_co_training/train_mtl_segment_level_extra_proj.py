@@ -770,7 +770,7 @@ def compute_loss(
             num_frame_masks=params.num_frame_masks,
             supervision_segments=supervision_segments,
             frames_mask_size=params.frames_mask_size,
-            max_frames_mask_fraction=params.max_frames_mask_fraction,
+            max_frames_mask_fraction=max_frames_mask_fraction,
         )
         loss = (
             at_loss * (1 - co_training_loss_scale)
