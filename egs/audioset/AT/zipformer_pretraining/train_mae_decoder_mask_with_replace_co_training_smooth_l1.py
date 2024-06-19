@@ -49,7 +49,7 @@ from pretraining_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_mae_decoder_mask_with_replace_own_mask import AudioPretrainingModel
+from model_co_training_decoder_with_replace_smooth_l1 import AudioPretrainingModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -215,7 +215,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--decoder-downsampling-factor",
         type=str,
-        default="1,2,4,8,4,1",
+        default="1,2,4,8,4,2",
         help="Downsampling factor for each stack of encoder layers.",
     )
 
@@ -272,14 +272,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.1,
         help="The scale of the noise to be added"
-    )
-
-    parser.add_argument(
-        "--mask-approach",
-        type=str,
-        default="wav2vec2",
-        choices=["wav2vec2", "custom"],
-        help="The masking strategy.",
     )
 
     parser.add_argument(
@@ -616,9 +608,8 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_prob=params.mask_prob,
         mask_length=params.mask_length,
         mask_selection=params.mask_selection,
-        mask_approach=params.mask_approach,
-        fbank_replace_prob=params.fbank_replace_prob,
         noise_scale=params.noise_scale,
+        fbank_replace_prob=params.fbank_replace_prob,
     )
     return model
 
@@ -778,11 +769,12 @@ def compute_loss(
     co_training_loss_scale = params.co_training_loss_scale if batch_idx_train > params.warm_step else 0.0
     
     with torch.set_grad_enabled(is_training):
-        loss = model(
+        mse_loss, co_training_loss = model(
             x=feature,
             x_lens=feature_lens,
             target=feature,
         )
+        loss = mse_loss + co_training_loss * co_training_loss_scale
 
     assert loss.requires_grad == is_training
 
@@ -793,7 +785,9 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    info["mse_loss"] = loss.detach().cpu().item()
+    info["mse_loss"] = mse_loss.detach().cpu().item()
+    if is_training:
+        info["co_training_smooth_l1_loss"] = co_training_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1119,13 +1113,8 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    def add_audio_event(c: Cut):
-        c.supervisions[0].audio_event = "0"
-        return c
-
     audioset = AudioSetATDatamodule(args)
-    train_cuts = audioset.librispeech_train_all_shuf_cuts()
-    train_cuts = train_cuts.map(add_audio_event)
+    train_cuts = audioset.audioset_train_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1136,7 +1125,7 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
-        if c.duration < 1.0 or c.duration > 20.0:
+        if c.duration < 1.0 or c.duration > 30.0:
             return False
 
         return True
@@ -1154,9 +1143,7 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = audioset.librispeech_dev_clean_cuts()
-    valid_cuts += audioset.librispeech_dev_other_cuts()
-    valid_cuts = valid_cuts.map(add_audio_event)
+    valid_cuts = audioset.audioset_eval_cuts()
     valid_dl = audioset.valid_dataloaders(valid_cuts)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
