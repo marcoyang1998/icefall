@@ -312,6 +312,9 @@ def main():
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
         
+    if params.causal:
+        params.suffix += f"-chunk-size-{params.chunk_size}-left-context-frames-{params.left_context_frames}"
+        
     setup_logger(f"{params.res_dir}/log-decode-{params.suffix}")
     logging.info("Evaluation started")
     

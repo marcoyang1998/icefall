@@ -15,7 +15,7 @@ import numpy as np
 from lhotse import load_manifest
 from kd_datamodule import LibriSpeechKDDataModule
 
-from train_multi_KD import add_model_arguments, get_model, get_params
+from train_multi_KD3 import add_model_arguments, get_model, get_params
 from sklearn import metrics
 from utils import get_class_dict
 
@@ -243,6 +243,9 @@ def main():
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
         
+    if params.causal:
+        params.suffix += f"-chunk-size-{params.chunk_size}-left-context-frames-{params.left_context_frames}"
+        
     setup_logger(f"{params.res_dir}/log-decode-{params.suffix}")
     logging.info("Evaluation started")
     
@@ -263,7 +266,7 @@ def main():
         }
         from train_multi_task import get_model
     else:
-        from train_multi_KD import get_model
+        from train_multi_KD3 import get_model
         
     if "voxceleb" in str(params.exp_dir):
         params.num_spkrs = 5994
