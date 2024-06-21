@@ -184,7 +184,7 @@ class AudioPretrainingModel(nn.Module):
         encoder_out = torch.cat([left, encoder_out, right], dim=0) # same length as fbank
         
         # Get the time embedding
-        timestamps = 0.1 * torch.ones(N, device=x.device) # currently use a fixed t=0.1
+        timestamps = 0.0 * torch.ones(N, device=x.device) # currently use a fixed t=0.1
         t_embed = timestep_embedding(timesteps=timestamps, dim=encoder_out.size(2)) 
         conditional_embedding = encoder_out + t_embed
 
