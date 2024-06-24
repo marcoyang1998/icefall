@@ -397,9 +397,6 @@ class MultiKDModel(nn.Module):
         if whisper_embeddings.shape[1] != encoder_out.shape[1]:
             return encoder_out
 
-        # if whisper_embeddings.shape[2] != encoder_out.shape[2]:
-        #     return encoder_out
-
         assert whisper_embeddings.shape[1] == encoder_out.shape[1]
         assert whisper_embeddings.shape[2] == encoder_out.shape[2], f"{N}x{T}x{C} {whisper_embeddings.shape}, {encoder_out.shape}"
 
