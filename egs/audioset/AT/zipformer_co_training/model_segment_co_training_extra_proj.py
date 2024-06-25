@@ -235,6 +235,16 @@ class AudioTaggingModel(nn.Module):
             segment_padding_mask = segment_padding_mask[:, :num_segments]
             segment_level_co_training_loss.masked_fill_(segment_padding_mask.bool().unsqueeze(dim=-1), 0.0)
 
+            # mask the co-training loss at target mask positions
+            d_mask_indexes1 = downsample_mask_indices(mask_indexes1)
+            d_mask_indexes2 = downsample_mask_indices(mask_indexes2)
+            segment_mask1 = nn.functional.avg_pool1d(d_mask_indexes1, segment_length) > 0.6
+            segment_mask2 = nn.functional.avg_pool1d(d_mask_indexes2, segment_length) > 0.6
+            valid_co_training_mask = torch.cat([segment_mask2, segment_mask1], dim=0) # target that are masked is 1
+
+            assert valid_co_training_mask.size(1) == segment_level_co_training_loss.size(1)
+            segment_level_co_training_loss.masked_fill_(valid_co_training_mask.bool().unsqueeze(-1), 0.0)
+
             # normalize the co-training loss
             segment_level_co_training_loss = segment_level_co_training_loss.sum() / num_segments
         else:
@@ -272,6 +282,19 @@ class AudioTaggingModel(nn.Module):
 
         return logits
 
+def downsample_mask_indices(mask, pooling_type: str="avg"):
+    if pooling_type == "avg":
+        # Equivalent to the Conv2dSubsampling
+        mask = nn.functional.avg_pool1d(mask, kernel_size=9, stride=2, padding=0)
+        # Equivalent to the SimpleDownsample
+        mask = nn.functional.pad(mask, (0,1), "replicate", 0)
+        mask = nn.functional.avg_pool1d(mask, kernel_size=2, stride=2, padding=0)
+        mask = mask > 0.5
+        mask = mask.float()
+    elif pooling_type == "max":
+        mask = nn.functional.max_pool1d(mask, 4)
+
+    return mask
 
 def time_warp(
     features: torch.Tensor,
