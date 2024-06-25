@@ -117,7 +117,7 @@ def get_adjusted_batch_count(params: AttributeDict) -> float:
     return (
         params.batch_idx_train
         * (params.max_duration * params.world_size)
-        / params.ref_duration
+        / params.ref_duration + 100000
     )
 
 

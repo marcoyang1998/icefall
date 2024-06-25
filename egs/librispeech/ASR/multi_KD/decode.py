@@ -1049,7 +1049,7 @@ def main():
 
     assert params.use_librispeech or params.use_wenetspeech
     test_sets = []
-    test_dl = []
+    test_dls = []
     if params.use_librispeech:
         test_clean_cuts = librispeech.test_clean_cuts()
         test_other_cuts = librispeech.test_other_cuts()
