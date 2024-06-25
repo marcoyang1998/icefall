@@ -774,9 +774,9 @@ def compute_loss(
         )
         loss = (
             at_loss * (1 - co_training_loss_scale)
-            + segment_level_at_loss * params.segment_level_at_loss_scale * (1 - co_training_loss_scale)
-            + segment_level_co_training_loss * co_training_loss_scale * params.segment_level_co_training_loss_scale
             + clip_level_co_training_loss * co_training_loss_scale
+            + segment_level_at_loss * params.segment_level_at_loss_scale * (1 - co_training_loss_scale)
+            + segment_level_co_training_loss * params.segment_level_co_training_loss_scale * co_training_loss_scale
         )
 
     assert loss.requires_grad == is_training
