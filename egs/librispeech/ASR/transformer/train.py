@@ -840,14 +840,14 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
-                loss, loss_info = compute_loss(
-                    params=params,
-                    model=model,
-                    sp=sp,
-                    batch=batch,
-                    is_training=True,
-                )
+            # with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            loss, loss_info = compute_loss(
+                params=params,
+                model=model,
+                sp=sp,
+                batch=batch,
+                is_training=True,
+            )
             # summary stats
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
@@ -1046,11 +1046,12 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    optimizer = ScaledAdam(
-        get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
-        lr=params.base_lr,  # should have no effect
-        clipping_scale=2.0,
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    # optimizer = ScaledAdam(
+    #     get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
+    #     lr=params.base_lr,  # should have no effect
+    #     clipping_scale=2.0,
+    # )
 
     scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
 
