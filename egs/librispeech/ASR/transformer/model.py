@@ -31,7 +31,6 @@ from scaling import ScaledLinear
 class AsrModel(nn.Module):
     def __init__(
         self,
-        encoder_embed: nn.Module,
         encoder: EncoderInterface,
         decoder: Optional[nn.Module] = None,
         joiner: Optional[nn.Module] = None,
@@ -80,7 +79,6 @@ class AsrModel(nn.Module):
 
         assert isinstance(encoder, EncoderInterface), type(encoder)
 
-        self.encoder_embed = encoder_embed
         self.encoder = encoder
 
         self.use_transducer = use_transducer
@@ -129,16 +127,7 @@ class AsrModel(nn.Module):
           encoder_out_lens:
             Encoder output lengths, of shape (N,).
         """
-        # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
-        x, x_lens = self.encoder_embed(x, x_lens)
-        # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
-
-        src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
-
-        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
+        encoder_out, encoder_out_lens = self.encoder(x, x_lens)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
         return encoder_out, encoder_out_lens

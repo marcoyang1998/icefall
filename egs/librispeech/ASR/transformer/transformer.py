@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from encoder_interface import EncoderInterface
+
 from transformers.utils import is_flash_attn_2_available
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.whisper.modeling_whisper import WhisperEncoderLayer, WhisperPreTrainedModel
 from transformers.models.whisper.configuration_whisper import WhisperConfig
 
-class TransformerEncoder(WhisperPreTrainedModel):
+class TransformerEncoder(WhisperPreTrainedModel, EncoderInterface):
     def __init__(
         self,
         config: WhisperConfig
@@ -104,7 +106,6 @@ class TransformerEncoder(WhisperPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
         inputs_embeds, embed_lens = self.forward_conv2d(input_features, input_features_lens)
-        import pdb; pdb.set_trace()
         attn_mask = self._get_attn_mask(inputs_embeds, embed_lens)
         # inputs_embeds = inputs_embeds.permute(0, 2, 1) # (B,T,C)
         embed_pos = self.embed_positions.weight
@@ -159,11 +160,12 @@ class TransformerEncoder(WhisperPreTrainedModel):
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-        if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
-        )
+        return hidden_states, embed_lens
+        # if not return_dict:
+        #     return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
+        # return BaseModelOutput(
+        #     last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
+        # )
 
 class Conv2dSubsampling(nn.Module):
     """Convolutional 2D subsampling (to 1/4 length).
@@ -248,3 +250,32 @@ class Conv2dSubsampling(nn.Module):
         # Now x is of shape (N, ((T-1)//2 - 1))//2, odim)
         return x
 
+def make_pad_mask(lengths: torch.Tensor, max_len: int = 0, reverse: bool=False) -> torch.Tensor:
+    """
+    Args:
+      lengths:
+        A 1-D tensor containing sentence lengths.
+      max_len:
+        The length of masks.
+    Returns:
+      Return a 2-D bool tensor, where masked positions
+      are filled with `True` and non-masked positions are
+      filled with `False`.
+
+    >>> lengths = torch.tensor([1, 3, 2, 5])
+    >>> make_pad_mask(lengths)
+    tensor([[False,  True,  True,  True,  True],
+            [False, False, False,  True,  True],
+            [False, False,  True,  True,  True],
+            [False, False, False, False, False]])
+    """
+    assert lengths.ndim == 1, lengths.ndim
+    max_len = max(max_len, lengths.max())
+    n = lengths.size(0)
+    seq_range = torch.arange(0, max_len, device=lengths.device)
+    expaned_lengths = seq_range.unsqueeze(0).expand(n, max_len)
+
+    if reverse:
+        return expaned_lengths < lengths.unsqueeze(-1)
+    else:
+        return expaned_lengths >= lengths.unsqueeze(-1)
