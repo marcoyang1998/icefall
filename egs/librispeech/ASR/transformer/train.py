@@ -73,13 +73,12 @@ from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import AsrModel
 from optim import Eden, ScaledAdam
-from scaling import ScheduledFloat
-from subsampling import Conv2dSubsampling
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-from zipformer import Zipformer2
+from transformer import TransformerEncoder
+from transformers.models.whisper.configuration_whisper import WhisperConfig
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -102,105 +101,40 @@ from icefall.utils import (
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
 
-def get_adjusted_batch_count(params: AttributeDict) -> float:
-    # returns the number of batches we would have used so far if we had used the reference
-    # duration.  This is for purposes of set_batch_count().
-    return (
-        params.batch_idx_train
-        * (params.max_duration * params.world_size)
-        / params.ref_duration
-    )
-
-
-def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
-    if isinstance(model, DDP):
-        # get underlying nn.Module
-        model = model.module
-    for name, module in model.named_modules():
-        if hasattr(module, "batch_count"):
-            module.batch_count = batch_count
-        if hasattr(module, "name"):
-            module.name = name
-
-
 def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--num-encoder-layers",
-        type=str,
-        default="2,2,3,4,3,2",
-        help="Number of zipformer encoder layers per stack, comma separated.",
-    )
-
-    parser.add_argument(
-        "--downsampling-factor",
-        type=str,
-        default="1,2,4,8,4,2",
-        help="Downsampling factor for each stack of encoder layers.",
+        type=int,
+        default=12,
+        help="Number of transformer encoder layers",
     )
 
     parser.add_argument(
         "--feedforward-dim",
-        type=str,
-        default="512,768,1024,1536,1024,768",
-        help="Feedforward dimension of the zipformer encoder layers, per stack, comma separated.",
+        type=int,
+        default=3072,
+        help="Feedforward dimension of the transformer encoder layers, per stack, comma separated.",
     )
 
     parser.add_argument(
         "--num-heads",
-        type=str,
-        default="4,4,4,8,4,4",
-        help="Number of attention heads in the zipformer encoder layers: a single int or comma-separated list.",
+        type=int,
+        default=12,
+        help="Number of attention heads in the transformer encoder layers: a single int or comma-separated list.",
     )
 
     parser.add_argument(
         "--encoder-dim",
-        type=str,
-        default="192,256,384,512,384,256",
+        type=int,
+        default=768,
         help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
     )
 
     parser.add_argument(
-        "--query-head-dim",
-        type=str,
-        default="32",
-        help="Query/key dimension per head in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--value-head-dim",
-        type=str,
-        default="12",
-        help="Value dimension per head in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--pos-head-dim",
-        type=str,
-        default="4",
-        help="Positional-encoding dimension per head in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--pos-dim",
+        "--max-input-length",
         type=int,
-        default="48",
-        help="Positional-encoding embedding dimension",
-    )
-
-    parser.add_argument(
-        "--encoder-unmasked-dim",
-        type=str,
-        default="192,192,256,256,256,192",
-        help="Unmasked dimensions in the encoders, relates to augmentation during training.  "
-        "A single int or comma-separated list.  Must be <= each corresponding encoder_dim.",
-    )
-
-    parser.add_argument(
-        "--cnn-module-kernel",
-        type=str,
-        default="31,31,15,15,15,31",
-        help="Sizes of convolutional kernels in convolution modules in each encoder stack: "
-        "a single int or comma-separated list.",
+        default=1500,
+        help="The maximum allowed input length (in frames) to the encoder"
     )
 
     parser.add_argument(
@@ -539,47 +473,8 @@ def get_params() -> AttributeDict:
     return params
 
 
-def _to_int_tuple(s: str):
-    return tuple(map(int, s.split(",")))
-
-
-def get_encoder_embed(params: AttributeDict) -> nn.Module:
-    # encoder_embed converts the input of shape (N, T, num_features)
-    # to the shape (N, (T - 7) // 2, encoder_dims).
-    # That is, it does two things simultaneously:
-    #   (1) subsampling: T -> (T - 7) // 2
-    #   (2) embedding: num_features -> encoder_dims
-    # In the normal configuration, we will downsample once more at the end
-    # by a factor of 2, and most of the encoder stacks will run at a lower
-    # sampling rate.
-    encoder_embed = Conv2dSubsampling(
-        in_channels=params.feature_dim,
-        out_channels=_to_int_tuple(params.encoder_dim)[0],
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
-    )
-    return encoder_embed
-
-
 def get_encoder_model(params: AttributeDict) -> nn.Module:
-    encoder = Zipformer2(
-        output_downsampling_factor=2,
-        downsampling_factor=_to_int_tuple(params.downsampling_factor),
-        num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
-        encoder_dim=_to_int_tuple(params.encoder_dim),
-        encoder_unmasked_dim=_to_int_tuple(params.encoder_unmasked_dim),
-        query_head_dim=_to_int_tuple(params.query_head_dim),
-        pos_head_dim=_to_int_tuple(params.pos_head_dim),
-        value_head_dim=_to_int_tuple(params.value_head_dim),
-        pos_dim=params.pos_dim,
-        num_heads=_to_int_tuple(params.num_heads),
-        feedforward_dim=_to_int_tuple(params.feedforward_dim),
-        cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
-        warmup_batches=4000.0,
-        causal=params.causal,
-        chunk_size=_to_int_tuple(params.chunk_size),
-        left_context_frames=_to_int_tuple(params.left_context_frames),
-    )
+    encoder = TransformerEncoder(params.config)
     return encoder
 
 
@@ -595,7 +490,7 @@ def get_decoder_model(params: AttributeDict) -> nn.Module:
 
 def get_joiner_model(params: AttributeDict) -> nn.Module:
     joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_dim=params.encoder_dim,
         decoder_dim=params.decoder_dim,
         joiner_dim=params.joiner_dim,
         vocab_size=params.vocab_size,
@@ -610,7 +505,6 @@ def get_model(params: AttributeDict) -> nn.Module:
         f"params.use_ctc={params.use_ctc}"
     )
 
-    encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
     if params.use_transducer:
@@ -621,16 +515,17 @@ def get_model(params: AttributeDict) -> nn.Module:
         joiner = None
 
     model = AsrModel(
-        encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
         joiner=joiner,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_dim=params.encoder_dim,
         decoder_dim=params.decoder_dim,
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
     )
+    if params.use_fp16:
+        model.to(torch.float16)
     return model
 
 
@@ -780,6 +675,8 @@ def compute_loss(
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
+    if params.use_fp16:
+        feature = feature.to(torch.float16)
 
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
@@ -939,9 +836,6 @@ def train_one_epoch(
         )
 
     for batch_idx, batch in enumerate(train_dl):
-        if batch_idx % 10 == 0:
-            set_batch_count(model, get_adjusted_batch_count(params))
-
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
 
@@ -959,11 +853,9 @@ def train_one_epoch(
 
             # NOTE: We use reduction==sum and loss is computed over utterances
             # in the batch and there is no normalization to it so far.
-            scaler.scale(loss).backward()
+            loss.backward()
             scheduler.step_batch(params.batch_idx_train)
-
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             optimizer.zero_grad()
         except:  # noqa
             save_bad_model()
@@ -1006,35 +898,33 @@ def train_one_epoch(
                 rank=rank,
             )
 
-        if batch_idx % 100 == 0 and params.use_fp16:
-            # If the grad scale was less than 1, try increasing it.    The _growth_interval
-            # of the grad scaler is configurable, but we can't configure it to have different
-            # behavior depending on the current grad scale.
-            cur_grad_scale = scaler._scale.item()
+        # if batch_idx % 100 == 0 and params.use_fp16:
+        #     # If the grad scale was less than 1, try increasing it.    The _growth_interval
+        #     # of the grad scaler is configurable, but we can't configure it to have different
+        #     # behavior depending on the current grad scale.
+        #     cur_grad_scale = scaler._scale.item()
 
-            if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
-                scaler.update(cur_grad_scale * 2.0)
-            if cur_grad_scale < 0.01:
-                if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
-                    saved_bad_model = True
-                logging.warning(f"Grad scale is small: {cur_grad_scale}")
-            if cur_grad_scale < 1.0e-05:
-                save_bad_model()
-                raise RuntimeError(
-                    f"grad_scale is too small, exiting: {cur_grad_scale}"
-                )
+        #     if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
+        #         scaler.update(cur_grad_scale * 2.0)
+        #     if cur_grad_scale < 0.01:
+        #         if not saved_bad_model:
+        #             save_bad_model(suffix="-first-warning")
+        #             saved_bad_model = True
+        #         logging.warning(f"Grad scale is small: {cur_grad_scale}")
+        #     if cur_grad_scale < 1.0e-05:
+        #         save_bad_model()
+        #         raise RuntimeError(
+        #             f"grad_scale is too small, exiting: {cur_grad_scale}"
+        #         )
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, "
                 f"batch {batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
             )
 
             if tb_writer is not None:
@@ -1046,10 +936,6 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
-                if params.use_fp16:
-                    tb_writer.add_scalar(
-                        "train/grad_scale", cur_grad_scale, params.batch_idx_train
-                    )
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
@@ -1121,6 +1007,23 @@ def run(rank, world_size, args):
 
     logging.info(params)
 
+    config = WhisperConfig.from_pretrained("openai/whisper-small.en")
+    from transformers.utils import is_flash_attn_2_available
+    if is_flash_attn_2_available():
+        config._attn_implementation = "flash_attention_2"
+    if params.use_fp16:
+        config.torch_dtype = torch.float16
+    
+    # overwrite the origin WhisperConfig
+    config.d_model = params.encoder_dim
+    config.encoder_layers = params.num_encoder_layers
+    config.encoder_attention_heads = params.num_heads
+    config.encoder_ffn_dim = params.feedforward_dim
+    config.num_mel_bins = params.feature_dim
+    config.max_source_positions = params.max_input_length
+    
+    params.config = config
+
     logging.info("About to create model")
     model = get_model(params)
 
@@ -1174,10 +1077,10 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args)
 
-    train_cuts = librispeech.train_clean_100_cuts()
     if params.full_libri:
-        train_cuts += librispeech.train_clean_360_cuts()
-        train_cuts += librispeech.train_other_500_cuts()
+        train_cuts = librispeech.train_all_shuf_cuts()
+    else:
+        train_cuts = librispeech.train_clean_100_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1200,7 +1103,7 @@ def run(rank, world_size, args):
 
         # In ./zipformer.py, the conv module uses the following expression
         # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
+        T = ((c.num_frames - 1) // 2 - 1) // 2
         tokens = sp.encode(c.supervisions[0].text, out_type=str)
 
         if T < len(tokens):
@@ -1233,14 +1136,14 @@ def run(rank, world_size, args):
     valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
