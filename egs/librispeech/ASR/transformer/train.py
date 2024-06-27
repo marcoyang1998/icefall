@@ -401,6 +401,13 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="Whether to use bf16 during half precision training.",
+    )
 
     add_model_arguments(parser)
 
@@ -524,10 +531,38 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
     )
-    if params.use_fp16:
-        model.to(torch.float16)
+    # if params.use_fp16:
+    #     model.to(torch.float16)
     return model
 
+def get_config(params):
+    config = WhisperConfig.from_pretrained("openai/whisper-small.en")
+    
+    from transformers.utils import is_flash_attn_2_available
+    if is_flash_attn_2_available() and params.use_fp16:
+        config._attn_implementation = "flash_attention_2"
+        logging.info(f"Using flash attention to reduce memory!")
+    
+    dtype=torch.float32
+    if params.use_fp16:
+        if params.use_bf16:
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float16
+    params.dtype = dtype
+    config.torch_dtype = dtype
+    logging.info(f"Using data type: {params.dtype}")
+    
+    # overwrite the origin WhisperConfig
+    config.d_model = params.encoder_dim
+    config.encoder_layers = params.num_encoder_layers
+    config.encoder_attention_heads = params.num_heads
+    config.encoder_ffn_dim = params.feedforward_dim
+    config.num_mel_bins = params.feature_dim
+    config.max_source_positions = params.max_input_length
+    
+    params.config = config
+    return params
 
 def load_checkpoint_if_available(
     params: AttributeDict,
@@ -675,8 +710,8 @@ def compute_loss(
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
-    if params.use_fp16:
-        feature = feature.to(torch.float16)
+    # if params.use_fp16:
+    #     feature = feature.to(torch.float16)
 
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
@@ -840,22 +875,24 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            # with torch.cuda.amp.autocast(enabled=params.use_fp16):
-            loss, loss_info = compute_loss(
-                params=params,
-                model=model,
-                sp=sp,
-                batch=batch,
-                is_training=True,
-            )
+            with torch.cuda.amp.autocast(enabled=params.use_fp16, dtype=params.dtype):
+                loss, loss_info = compute_loss(
+                    params=params,
+                    model=model,
+                    sp=sp,
+                    batch=batch,
+                    is_training=True,
+                )
             # summary stats
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
             # NOTE: We use reduction==sum and loss is computed over utterances
             # in the batch and there is no normalization to it so far.
-            loss.backward()
+            scaler.scale(loss).backward()
             scheduler.step_batch(params.batch_idx_train)
-            optimizer.step()
+            
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
         except:  # noqa
             save_bad_model()
@@ -898,33 +935,35 @@ def train_one_epoch(
                 rank=rank,
             )
 
-        # if batch_idx % 100 == 0 and params.use_fp16:
-        #     # If the grad scale was less than 1, try increasing it.    The _growth_interval
-        #     # of the grad scaler is configurable, but we can't configure it to have different
-        #     # behavior depending on the current grad scale.
-        #     cur_grad_scale = scaler._scale.item()
+        if batch_idx % 100 == 0 and params.use_fp16:
+            # If the grad scale was less than 1, try increasing it.    The _growth_interval
+            # of the grad scaler is configurable, but we can't configure it to have different
+            # behavior depending on the current grad scale.
+            cur_grad_scale = scaler._scale.item()
 
-        #     if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
-        #         scaler.update(cur_grad_scale * 2.0)
-        #     if cur_grad_scale < 0.01:
-        #         if not saved_bad_model:
-        #             save_bad_model(suffix="-first-warning")
-        #             saved_bad_model = True
-        #         logging.warning(f"Grad scale is small: {cur_grad_scale}")
-        #     if cur_grad_scale < 1.0e-05:
-        #         save_bad_model()
-        #         raise RuntimeError(
-        #             f"grad_scale is too small, exiting: {cur_grad_scale}"
-        #         )
+            if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
+                scaler.update(cur_grad_scale * 2.0)
+            if cur_grad_scale < 0.01:
+                if not saved_bad_model:
+                    save_bad_model(suffix="-first-warning")
+                    saved_bad_model = True
+                logging.warning(f"Grad scale is small: {cur_grad_scale}")
+            if cur_grad_scale < 1.0e-05:
+                save_bad_model()
+                raise RuntimeError(
+                    f"grad_scale is too small, exiting: {cur_grad_scale}"
+                )
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
+            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, "
                 f"batch {batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
+                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
             )
 
             if tb_writer is not None:
@@ -936,16 +975,21 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
+                if params.use_fp16:
+                    tb_writer.add_scalar(
+                        "train/grad_scale", cur_grad_scale, params.batch_idx_train
+                    )
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
-            valid_info = compute_validation_loss(
-                params=params,
-                model=model,
-                sp=sp,
-                valid_dl=valid_dl,
-                world_size=world_size,
-            )
+            with torch.cuda.amp.autocast(enabled=params.use_fp16, dtype=params.dtype):
+                valid_info = compute_validation_loss(
+                    params=params,
+                    model=model,
+                    sp=sp,
+                    valid_dl=valid_dl,
+                    world_size=world_size,
+                )
             model.train()
             logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
             logging.info(
@@ -1007,22 +1051,7 @@ def run(rank, world_size, args):
 
     logging.info(params)
 
-    config = WhisperConfig.from_pretrained("openai/whisper-small.en")
-    from transformers.utils import is_flash_attn_2_available
-    if is_flash_attn_2_available():
-        config._attn_implementation = "flash_attention_2"
-    if params.use_fp16:
-        config.torch_dtype = torch.float16
-    
-    # overwrite the origin WhisperConfig
-    config.d_model = params.encoder_dim
-    config.encoder_layers = params.num_encoder_layers
-    config.encoder_attention_heads = params.num_heads
-    config.encoder_ffn_dim = params.feedforward_dim
-    config.num_mel_bins = params.feature_dim
-    config.max_source_positions = params.max_input_length
-    
-    params.config = config
+    params = get_config(params)
 
     logging.info("About to create model")
     model = get_model(params)
@@ -1046,12 +1075,12 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    # optimizer = ScaledAdam(
-    #     get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
-    #     lr=params.base_lr,  # should have no effect
-    #     clipping_scale=2.0,
-    # )
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = ScaledAdam(
+        get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
+        lr=params.base_lr,  # should have no effect
+        clipping_scale=2.0,
+    )
 
     scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
 
@@ -1246,7 +1275,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_fp16, dtype=params.dtype):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
