@@ -1,10 +1,15 @@
 import logging
+from typing import List
 
 import torch
 import torch.nn.functional as F
 import whisper
-from icefall.utils import make_pad_mask
 from whisper.audio import log_mel_spectrogram, pad_or_trim, N_FRAMES
+import numpy as np
+import torchaudio.transforms as T
+
+from icefall.utils import make_pad_mask
+
 
 class Teacher(torch.nn.Module):
     def __init__(
@@ -132,7 +137,49 @@ class WhisperTeacher(Teacher):
         
         return features, feature_lens
         
+class MertTeacher(Teacher):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        processor: torch.nn.Module,
+    ):
+        super().__init__(model)
+        self.processor = processor
+        self.resample_rate = processor.sampling_rate
+
+    def forward_processor(
+        self, audio: np.array, sampling_rate: int,
+    ):
+        # Here we assume the audio is in the correct sampling rate
+        inputs = self.processor(audio, sampling_rate=sampling_rate, return_tensors="pt")
+        return inputs
     
+    @torch.no_grad()
+    def get_embeddings(
+        self,
+        audio: np.array,
+        sampling_rate: int,
+        level: str="clip",
+        layer_idx: int=-1,
+    ):
+        device = next(self.model.parameters()).device
+        inputs = self.forward_processor(audio, sampling_rate=sampling_rate)
+        inputs = inputs.to(device)
+        outputs = self.model(**inputs, output_hidden_states=True)
+
+        # (num_layers, B, T, feature_dim)
+        all_layer_hidden_states = torch.stack(outputs.hidden_states)
+        
+        if level == "clip":
+            features = all_layer_hidden_states.mean(-2) # (num_layers, B, feature_dim)
+        elif level == "frame":
+            features = all_layer_hidden_states
+        else:
+            raise NotImplementedError()
+
+        return features[layer_idx, ...]
+
+
     
 if __name__=="__main__":
     import torchaudio
