@@ -49,7 +49,7 @@ from pretraining_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_flow_decoder import AudioPretrainingModel
+from model_flow_decoder_add_input import AudioPretrainingModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -58,7 +58,6 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from zipformer import Zipformer2
-from zipformer_flow import Zipformer2Flow
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -231,7 +230,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--decoder-feedforward-dim",
         type=str,
-        default="512,768,768,1024,1024,768",
+        default="512,768,1024,1024,1024,768",
         help="Feedforward dimension of the zipformer decoder layers, per stack, comma separated.",
     )
 
@@ -245,7 +244,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--decoder-dim",
         type=str,
-        default="192,256,256,384,384,256",
+        default="192,256,384,384,384,256",
         help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
     )
 
@@ -276,9 +275,10 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--condition-embed-dim",
-        type=int,
-        default=192,
+        "--noise-skip-connection",
+        type=str2bool,
+        default=False,
+        help="The skip connection passing the noise to the prediction in decoder"
     )
 
 
@@ -560,7 +560,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
 
 def get_decoder_model(params: AttributeDict) -> nn.Module:
     # get a zipformer decoder (actually an encoder)
-    decoder = Zipformer2Flow(
+    decoder = Zipformer2(
         output_downsampling_factor=1, # we do not downsample at the end
         downsampling_factor=_to_int_tuple(params.decoder_downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_decoder_layers),
@@ -578,7 +578,6 @@ def get_decoder_model(params: AttributeDict) -> nn.Module:
         causal=params.causal,
         chunk_size=_to_int_tuple(params.chunk_size),
         left_context_frames=_to_int_tuple(params.left_context_frames),
-        condition_embed_dim=params.condition_embed_dim,
     )
     return decoder
 
@@ -602,6 +601,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_prob=params.mask_prob,
         mask_length=params.mask_length,
         mask_selection=params.mask_selection,
+        noise_skip_connection=params.noise_skip_connection
     )
     return model
 

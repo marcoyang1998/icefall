@@ -27,6 +27,8 @@ import torch.nn.functional as F
 from encoder_interface import EncoderInterface
 from lhotse.dataset import SpecAugment
 
+from scaling import ScheduledFloat
+
 from icefall.utils import AttributeDict, make_pad_mask
 
 
@@ -45,6 +47,7 @@ class AudioPretrainingModel(nn.Module):
         mask_length: int = 10,
         mask_selection: str = "static",
         mask_other: float = 0.0,
+        noise_skip_connection: bool=False,
     ):
         """An audio pretraining model
 
@@ -76,10 +79,27 @@ class AudioPretrainingModel(nn.Module):
         self.decoder_input_dim = decoder_input_dim
         self.decoder_dim = decoder_dim
         
+        # proj the encoder features to decoder dim
+        self.encoder_out_proj = nn.Linear(
+            encoder_dim, decoder_input_dim, bias=True
+        )
+        self.dropout = ScheduledFloat((0.0, 0.9), (3000.0, 0.1))
+        
         # decoder embed
         self.decoder_embed = nn.Linear(
             fbank_dim, decoder_input_dim, bias=True,
         )
+
+        # For the noise skip-connection
+        self.noise_skip_connection = noise_skip_connection
+        if noise_skip_connection:
+            logging.info("Adding a skip connection to pass by the noise")
+            self.noise_embed = nn.Linear(
+                fbank_dim, decoder_dim, bias=True,
+            )
+        else:
+            self.noise_embed = None
+
         # decoder pred
         self.decoder_pred = nn.Linear(
             decoder_dim, fbank_dim, bias=True,
@@ -152,6 +172,7 @@ class AudioPretrainingModel(nn.Module):
 
         padding_mask = make_pad_mask(x_lens)
         fbank = x.clone()
+        fbank_lens = x_lens.clone()
 
         # apply masking to the fbank features
         x, mask_indices = self.apply_mask_facebook(
@@ -185,24 +206,29 @@ class AudioPretrainingModel(nn.Module):
         # Get the time embedding
         timestamps = 0.0 * torch.ones(N, device=x.device) # currently use a fixed t=0.1
         t_embed = timestep_embedding(timesteps=timestamps, dim=encoder_out.size(2)) 
-        conditional_embedding = encoder_out + t_embed
+        encoder_out = encoder_out + t_embed
+        encoder_out = encoder_out.permute(1,0,2) # (N,T,C)
 
-        # flow
+        # flow target
         fbank = (fbank - self.fbank_norm_mean) / self.fbank_norm_std
         noise = torch.randn_like(fbank)
         decoder_in = (1-timestamps[:, None, None]) * noise + timestamps[:, None, None] * fbank
         u_t = fbank - noise # (N,T,C), the flow training target 
             
         # perform the reconstruction
-        decoder_in = self.decoder_embed(decoder_in) # project to decoder_dim
+        decoder_in = self.decoder_embed(decoder_in) # project to decoder_dim, (N,T,C)
+        decoder_in = nn.functional.dropout(decoder_in, p=float(self.dropout), training=self.training)
+        decoder_in = decoder_in + self.encoder_out_proj(encoder_out) # add the condition embedding
         decoder_in = decoder_in.permute(1,0,2)
         decoder_out, decoder_out_lens = self.decoder(
             x=decoder_in,
-            x_lens=encoder_out_lens, 
+            x_lens=fbank_lens, 
             src_key_padding_mask=padding_mask,
-            emb=conditional_embedding,
         )
-        decoder_out = decoder_out + self.decoder_embed(noise) # pass the 
+
+        # pass the noise by
+        if self.noise_skip_connection:
+            decoder_out = decoder_out + self.noise_embed(noise.permute(1,0,2)) 
 
         decoder_out = self.decoder_pred(decoder_out) 
         decoder_out = decoder_out.permute(1, 0, 2) # (T, N, C) -> (N, T, C)
