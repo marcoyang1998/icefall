@@ -62,7 +62,7 @@ def load_csv(filepath):
 
         return tracks
 
-def get_audio_path(audio_dir, track_id):
+def get_audio_path(audio_dir, track_id, extension: str="mp3"):
     """
     Return the path to the mp3 given the directory where the audio is stored
     and the track ID.
@@ -76,7 +76,7 @@ def get_audio_path(audio_dir, track_id):
 
     """
     tid_str = '{:06d}'.format(track_id)
-    return os.path.join(audio_dir, tid_str[:3], tid_str + '.mp3')
+    return os.path.join(audio_dir, tid_str[:3], tid_str + f'.{extension}')
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
@@ -104,6 +104,22 @@ def get_parser():
         type=str,
         default="data/fbank_fma",
     )
+
+    parser.add_argument(
+        "--compute-fbank",
+        type=str2bool,
+        default=True,
+        help="If False, only store the manfiest without features",
+    )
+
+    parser.add_argument(
+        "--extension",
+        type=str,
+        default="mp3",
+        choices=["mp3", "wav"],
+        help="Which audio extension to use. The original audio is mp3 format, the wav file is converted from"
+        "the original mp3 and resampled to 16kHz"
+    )
     
     return parser
 
@@ -114,6 +130,7 @@ def main():
     dataset_dir = args.dataset_dir
     split = args.split
     feat_output_dir = args.feat_output_dir
+    extension = args.extension
     
     num_jobs = 15
     num_mel_bins = 80
@@ -126,7 +143,7 @@ def main():
 
     new_cuts = []
     for i, (track_id, track) in enumerate(subset.iterrows()):
-        audio = get_audio_path(audio_folder, track_id)
+        audio = get_audio_path(audio_folder, track_id, extension=extension)
         genres = track["track", "genres"]
         genres_all = track["track", "genres_all"]
         
@@ -159,25 +176,34 @@ def main():
             logging.info(f"Processed {i} cuts until now.")
 
     logging.info(f"Processed a total of {len(new_cuts)} cuts.")
+
     cuts = CutSet.from_cuts(new_cuts)
-    cuts = cuts.resample(16000)
+    if not args.compute_fbank:
+        manifest_output_dir = feat_output_dir + "/" + f"cuts_fma_{split}_no_feat.jsonl.gz"
 
-    extractor = Fbank(FbankConfig(num_mel_bins=num_mel_bins))
+        logging.info(f"Storing the manifest to {manifest_output_dir}")
+        cuts.to_jsonl(manifest_output_dir)
 
-    logging.info(f"Computing fbank features for {split}")
-    with get_executor() as ex:
-        cuts = cuts.compute_and_store_features(
-            extractor=extractor,
-            storage_path=f"{feat_output_dir}/fma_{args.split}_feats",
-            num_jobs=num_jobs if ex is None else 80,
-            executor=ex,
-            storage_type=LilcomChunkyWriter,
-        )
+    else:
+        if cuts[0].sampling_rate != 16000:
+            cuts = cuts.resample(16000)
 
-    manifest_output_dir = feat_output_dir + "/" + f"cuts_fma_{split}.jsonl.gz"
+        extractor = Fbank(FbankConfig(num_mel_bins=num_mel_bins))
 
-    logging.info(f"Storing the manifest to {manifest_output_dir}")
-    cuts.to_jsonl(manifest_output_dir)
+        logging.info(f"Computing fbank features for {split}")
+        with get_executor() as ex:
+            cuts = cuts.compute_and_store_features(
+                extractor=extractor,
+                storage_path=f"{feat_output_dir}/fma_{args.split}_feats",
+                num_jobs=num_jobs if ex is None else 80,
+                executor=ex,
+                storage_type=LilcomChunkyWriter,
+            )
+
+        manifest_output_dir = feat_output_dir + "/" + f"cuts_fma_{split}.jsonl.gz"
+
+        logging.info(f"Storing the manifest to {manifest_output_dir}")
+        cuts.to_jsonl(manifest_output_dir)
 
 if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"

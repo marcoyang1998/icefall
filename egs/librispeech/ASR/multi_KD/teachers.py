@@ -18,9 +18,6 @@ class Teacher(torch.nn.Module):
     ):
         super().__init__()
         self.model = model
-        device = next(model.parameters()).device
-        logging.info(f"The teacher model is on device: {device}")
-        
         
     def get_embeddings(self):
         raise NotImplementedError()
@@ -151,7 +148,7 @@ class MertTeacher(Teacher):
         self, audio: np.array, sampling_rate: int,
     ):
         # Here we assume the audio is in the correct sampling rate
-        inputs = self.processor(audio, sampling_rate=sampling_rate, return_tensors="pt")
+        inputs = self.processor(audio, padding=True, sampling_rate=sampling_rate, return_tensors="pt")
         return inputs
     
     @torch.no_grad()
