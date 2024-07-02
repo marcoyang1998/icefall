@@ -17,6 +17,7 @@ from lhotse import load_manifest, CutSet
 from lhotse.cut import MonoCut
 from lhotse.dataset import SimpleCutSampler, UnsupervisedWaveformDataset, DynamicBucketingSampler
 from lhotse.features.io import NumpyHdf5Writer, LilcomChunkyWriter
+from lhotse.audio.utils import AudioLoadingError
 
 from typing import Union, Optional
 
@@ -158,7 +159,6 @@ def extract_embeddings(
                 new_cut = MonoCut(
                     id=cut.id,
                     start=cut.start,
-                    recording=cut.recording,
                     duration=cut.duration,
                     channel=cut.channel,
                 )
@@ -187,17 +187,45 @@ def join_manifests(
     # Combine the teacher embedding manifest with the original manifest for ASR
     embedding_cuts = load_manifest(embedding_manifest)
     
+    if len(embedding_cuts) != len(input_cuts):
+        logging.info("The number of cuts are different, some cuts might be broken")
+        logging.info("Will skip those cuts when joining the manifest")
+
+        valid_cut_ids = set(embedding_cuts.ids)
+        def _filter_cut(c):
+            if c.id not in valid_cut_ids:
+                logging.info(f"Skipping {c}")
+                return False
+            return True
+        input_cuts = input_cuts.filter(_filter_cut)
+
     assert len(embedding_cuts) == len(input_cuts)
     assert set(input_cuts.ids) == set(embedding_cuts.ids)
     
     embedding_cuts = embedding_cuts.sort_like(input_cuts)
     for cut_idx, (ori_cut, embed_cut) in enumerate(zip(input_cuts, embedding_cuts)):
         assert ori_cut.id == embed_cut.id
-        ori_cut.whisper_embedding = embed_cut.whisper_embedding
+        ori_cut.mert_embedding = embed_cut.mert_embedding
     
     input_cuts.to_jsonl(output_dir)
     print(f"Saved the joined manifest to {output_dir}")
     
+def valid_manifest(
+    cuts: CutSet
+):
+    # The original MP3 file may contain incorrect meta info
+    logging.info("This may take a long time, only do this if you are unsure if your data is valid")
+    new_cuts = []
+    for c in enumerate(cuts):
+        try:
+            audio = c.load_audio()
+            new_cuts.append(c)
+        except AudioLoadingError:
+            logging.info(f"Skipping: {c.id}")
+            continue
+    return CutSet.from_cuts(new_cuts)
+
+
 def remove_short_and_long_utt(c):
     if c.duration < 1.0 or c.duration > 31.0:
         return False
@@ -215,9 +243,10 @@ if __name__=="__main__":
     
     nj = params.num_jobs
     cuts = load_manifest(params.input_manifest)
+    # cuts = valid_manifest(cuts)
     print(f"Finished loading manifest")
     
-    target_manifest = params.embedding_dir / f"MERT-{params.mert_version}-layer-{params.embedding_layer}-{params.output_manifest}.jsonl.gz"
+    target_manifest = params.embedding_dir / f"mert-{params.mert_version}-layer-{params.embedding_layer}-{params.output_manifest}.jsonl.gz"
     
     if not target_manifest.exists():
         if nj == 1:
@@ -230,12 +259,12 @@ if __name__=="__main__":
             splitted_cuts = cuts.split(num_splits=nj)
             print(f"Finished splitting manifest")
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
-            manifests =  f"{str(params.embedding_dir)}/MERT-{params.mert_version}-layer-{params.embedding_layer}-{params.output_manifest}-*.jsonl.gz"
+            manifests =  f"{str(params.embedding_dir)}/mert-{params.mert_version}-layer-{params.embedding_layer}-{params.output_manifest}-*.jsonl.gz"
             os.system(f"lhotse combine {manifests} {target_manifest}")
     else:
         print(f"Skip embedding extraction: the manifest is already generated.")
     
-    output_manifest = params.input_manifest.replace(".jsonl.gz", f"-with-MERT-{params.mert_version}-layer-{params.embedding_layer}-embeddings.jsonl.gz")
+    output_manifest = params.input_manifest.replace(".jsonl.gz", f"-with-mert-{params.mert_version}-layer-{params.embedding_layer}-embeddings.jsonl.gz")
     if not os.path.exists(output_manifest):
         join_manifests(
             input_cuts=cuts,
