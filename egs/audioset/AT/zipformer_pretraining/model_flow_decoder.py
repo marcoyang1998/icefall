@@ -27,6 +27,8 @@ import torch.nn.functional as F
 from encoder_interface import EncoderInterface
 from lhotse.dataset import SpecAugment
 
+from scaling import ScheduledFloat
+
 from icefall.utils import AttributeDict, make_pad_mask
 
 
@@ -76,6 +78,7 @@ class AudioPretrainingModel(nn.Module):
         self.decoder_input_dim = decoder_input_dim
         self.decoder_dim = decoder_dim
         
+        self.dropout = ScheduledFloat((0.0, 0.9), (3000.0, 0.1))
         # decoder embed
         self.decoder_embed = nn.Linear(
             fbank_dim, decoder_input_dim, bias=True,
@@ -84,8 +87,7 @@ class AudioPretrainingModel(nn.Module):
         self.decoder_pred = nn.Linear(
             decoder_dim, fbank_dim, bias=True,
         )
-        # fbank norm
-        # self.fbank_norm = nn.BatchNorm1d(fbank_dim)
+        
         self.fbank_norm_mean = -4.149941921234131
         self.fbank_norm_std = 4.47724723815918
 
@@ -134,6 +136,7 @@ class AudioPretrainingModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         target: torch.Tensor,
+        t: float = 0.0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -144,6 +147,8 @@ class AudioPretrainingModel(nn.Module):
             before padding.
           target:
             The reconstruction target
+          t:
+            The t for mixing image and noise
         Returns:
           Return the binary crossentropy loss
         """
@@ -153,6 +158,7 @@ class AudioPretrainingModel(nn.Module):
 
         padding_mask = make_pad_mask(x_lens)
         fbank = x.clone()
+        fbank_lens = x_lens.clone()
 
         # apply masking to the fbank features
         x, mask_indices = self.apply_mask_facebook(
@@ -167,7 +173,7 @@ class AudioPretrainingModel(nn.Module):
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask) # (T,N,C)        
 
         # replace the masked encoder_out with a mask_emb
-        mask_indices = nn.functional.max_pool1d(mask_indices, 4)
+        mask_indices = downsample_mask_indices(mask_indices)
         assert mask_indices.size(1) >= encoder_out.size(0)
         if mask_indices.size(1) > encoder_out.size(0):
             mask_indices = mask_indices[:, :encoder_out.size(0)]
@@ -184,14 +190,11 @@ class AudioPretrainingModel(nn.Module):
         encoder_out = torch.cat([left, encoder_out, right], dim=0) # same length as fbank
         
         # Get the time embedding
-        timestamps = 0.0 * torch.ones(N, device=x.device) # currently use a fixed t=0.1
+        timestamps = t * torch.ones(N, device=x.device) # currently use a fixed t
         t_embed = timestep_embedding(timesteps=timestamps, dim=encoder_out.size(2)) 
         conditional_embedding = encoder_out + t_embed
 
         # flow
-        # fbank = fbank.permute(0,2,1) # (N,C,T)
-        # fbank = self.fbank_norm(fbank) # normalize the fbank
-        # fbank = fbank.permute(0,2,1) # (N,T,C)
         fbank = (fbank - self.fbank_norm_mean) / self.fbank_norm_std
         noise = torch.randn_like(fbank)
         decoder_in = (1-timestamps[:, None, None]) * noise + timestamps[:, None, None] * fbank
@@ -199,10 +202,11 @@ class AudioPretrainingModel(nn.Module):
             
         # perform the reconstruction
         decoder_in = self.decoder_embed(decoder_in) # project to decoder_dim
+        decoder_in = nn.functional.dropout(decoder_in, p=float(self.dropout), training=self.training)
         decoder_in = decoder_in.permute(1,0,2)
         decoder_out, decoder_out_lens = self.decoder(
             x=decoder_in,
-            x_lens=encoder_out_lens, 
+            x_lens=fbank_lens, 
             src_key_padding_mask=padding_mask,
             emb=conditional_embedding,
         )
@@ -265,6 +269,21 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     if dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
+
+
+def downsample_mask_indices(mask, pooling_type: str="avg"):
+    if pooling_type == "avg":
+        # Equivalent to the Conv2dSubsampling
+        mask = nn.functional.avg_pool1d(mask, kernel_size=9, stride=2, padding=0)
+        # Equivalent to the SimpleDownsample
+        mask = nn.functional.pad(mask, (0,1), "replicate", 0)
+        mask = nn.functional.avg_pool1d(mask, kernel_size=2, stride=2, padding=0)
+        mask = mask > 0.5
+        mask = mask.float()
+    elif pooling_type == "max":
+        mask = nn.functional.max_pool1d(mask, 4)
+
+    return mask
 
 
 def index_put(tensor, indices, value):

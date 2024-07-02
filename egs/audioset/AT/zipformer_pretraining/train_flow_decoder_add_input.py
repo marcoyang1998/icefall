@@ -437,6 +437,13 @@ def get_parser():
         help="Whether to use half precision training.",
     )
 
+    parser.add_argument(
+        "--flow-t",
+        type=float,
+        default=0.0,
+        help="The t in flow",
+    )
+
     add_model_arguments(parser)
 
     return parser
@@ -763,6 +770,7 @@ def compute_loss(
             x=feature,
             x_lens=feature_lens,
             target=feature,
+            t=params.flow_t,
         )
 
     assert loss.requires_grad == is_training

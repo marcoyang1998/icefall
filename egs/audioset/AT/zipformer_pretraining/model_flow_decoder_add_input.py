@@ -153,6 +153,7 @@ class AudioPretrainingModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         target: torch.Tensor,
+        t: float = 0.0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -163,6 +164,8 @@ class AudioPretrainingModel(nn.Module):
             before padding.
           target:
             The reconstruction target
+          t:
+            The t for mixing image and noise
         Returns:
           Return the binary crossentropy loss
         """
@@ -204,7 +207,7 @@ class AudioPretrainingModel(nn.Module):
         encoder_out = torch.cat([left, encoder_out, right], dim=0) # same length as fbank
         
         # Get the time embedding
-        timestamps = 0.0 * torch.ones(N, device=x.device) # currently use a fixed t=0.1
+        timestamps = t * torch.ones(N, device=x.device) # currently use a fixed t=0.1
         t_embed = timestep_embedding(timesteps=timestamps, dim=encoder_out.size(2)) 
         encoder_out = encoder_out + t_embed
         encoder_out = encoder_out.permute(1,0,2) # (N,T,C)

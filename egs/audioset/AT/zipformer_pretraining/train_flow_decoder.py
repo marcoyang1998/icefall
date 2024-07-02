@@ -231,7 +231,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--decoder-feedforward-dim",
         type=str,
-        default="512,768,768,1024,1024,768",
+        default="512,768,1024,1024,1024,768",
         help="Feedforward dimension of the zipformer decoder layers, per stack, comma separated.",
     )
 
@@ -245,7 +245,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--decoder-dim",
         type=str,
-        default="192,256,256,384,384,256",
+        default="192,256,384,384,384,256",
         help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
     )
 
@@ -435,6 +435,13 @@ def get_parser():
         type=str2bool,
         default=False,
         help="Whether to use half precision training.",
+    )
+
+    parser.add_argument(
+        "--flow-t",
+        type=float,
+        default=0.0,
+        help="The t in flow",
     )
 
     add_model_arguments(parser)
@@ -763,6 +770,7 @@ def compute_loss(
             x=feature,
             x_lens=feature_lens,
             target=feature,
+            t=params.flow_t,
         )
 
     assert loss.requires_grad == is_training
