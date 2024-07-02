@@ -91,13 +91,45 @@ class PatchEmbed3D_new(nn.Module):
         x = x.transpose(1, 2) # 32, 768, 1568 -> 32, 1568, 768
         return x
 
+class PatchEmbed_own(nn.Module):
+    """A patch embed module for fbank, each patch is a rectangular (n_mels, patch_width)
+    """
+    def __init__(self, n_mels=int, patch_width=4, in_chans=1, embed_dim=768, stride=4):
+        super().__init__()
+        self.n_mels = n_mels
+        self.patch_width = patch_width
+        self.stride = stride
+
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=(patch_width, n_mels), stride=stride)
+
+    def forward(self, x):
+        B, in_chans, T, n_mels = x.shape
+        x = self.proj(x) # (B,1,T,n_mels) -> (B,C,T//4,1) 
+        x = x.flatten(2) # (B,C,T//4)
+        x = x.transpose(1,2) # (B,T//4,C)
+        return x
+    
+    def get_output_shape(self, num_frames):
+        return num_frames // stride 
+
 if __name__ == '__main__':
     #patch_emb = PatchEmbed_new(img_size=224, patch_size=16, in_chans=1, embed_dim=64, stride=(16,16))
     #input = torch.rand(8,1,1024,128)
     #output = patch_emb(input)
     #print(output.shape) # (8,512,64)
 
-    patch_emb = PatchEmbed3D_new(video_size=(6,224,224), patch_size=(2,16,16), in_chans=3, embed_dim=768, stride=(2,16,16))
-    input = torch.rand(8,3,6,224,224)
+    # patch_emb = PatchEmbed3D_new(video_size=(6,224,224), patch_size=(2,16,16), in_chans=3, embed_dim=768, stride=(2,16,16))
+    # input = torch.rand(8,3,6,224,224)
+    # output = patch_emb(input)
+    # print(output.shape) # (8,64)
+
+    patch_emb = PatchEmbed_own(
+        n_mels=80,
+        patch_width=4,
+        in_chans=1,
+        embed_dim=512,
+        stride=4
+    )
+    input = torch.rand(4, 1, 1002, 80)
     output = patch_emb(input)
-    print(output.shape) # (8,64)
+    print(output.shape)
