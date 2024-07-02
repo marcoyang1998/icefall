@@ -431,12 +431,12 @@ def compute_mask_indices(
 
 
 if __name__=="__main__":
-    mask_prob = 0.85
+    mask_prob = 0.5
     mask_len = 10
 
-    for mask_prob in [0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]:
+    for mask_prob in [0.5, 0.55, 0.6, 0.65]:
         proportions = []
-        for i in range(50):
+        for i in range(1000):
             model = AudioPretrainingModel(
                 encoder=None,
                 encoder_embed=None,
