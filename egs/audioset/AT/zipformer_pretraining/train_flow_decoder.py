@@ -281,6 +281,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=192,
     )
 
+    parser.add_argument(
+        "--use-fbank-target",
+        type=str2bool,
+        help="Which target as the decoder loss",
+        default=False,
+    )
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -771,6 +778,7 @@ def compute_loss(
             x_lens=feature_lens,
             target=feature,
             t=params.flow_t,
+            fbank_as_target=params.use_fbank_target,
         )
 
     assert loss.requires_grad == is_training

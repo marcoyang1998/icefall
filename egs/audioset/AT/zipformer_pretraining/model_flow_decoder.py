@@ -137,6 +137,7 @@ class AudioPretrainingModel(nn.Module):
         x_lens: torch.Tensor,
         target: torch.Tensor,
         t: float = 0.0,
+        fbank_as_target: bool=False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -214,7 +215,10 @@ class AudioPretrainingModel(nn.Module):
         decoder_out = self.decoder_pred(decoder_out) 
         decoder_out = decoder_out.permute(1, 0, 2) # (T, N, C) -> (N, T, C)
 
-        loss = ((decoder_out - u_t)**2).sum() / fbank.size(2)
+        if fbank_as_target:
+            loss = ((decoder_out - fbank)**2).sum() / fbank.size(2)
+        else:
+            loss = ((decoder_out - u_t)**2).sum() / fbank.size(2)
 
         return loss
     
