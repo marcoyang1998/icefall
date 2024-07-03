@@ -179,7 +179,7 @@ class AudioMAEModel(nn.Module):
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1) # (B, L)
 
-        loss = (loss * mask_indices).sum() / mask.sum() # mean loss on the removed patches
+        loss = (loss * mask_indices).sum() # / mask.sum() # mean loss on the removed patches
 
         return loss
 
