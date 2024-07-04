@@ -1,5 +1,6 @@
 from functools import partial
 import logging
+import math
 from typing import List, Optional, Tuple
 import random
 
@@ -74,13 +75,19 @@ class AudioFlowModel(nn.Module):
         )
 
         self.decoder_dim = decoder_dim
-        self.decoder_embed = nn.Linear(encoder_dim, decoder_dim, bias=True)
+        self.decoder_patch_embed = PatchEmbed_own(
+            n_mels=input_dim,
+            patch_width=patch_width,
+            in_chans=1,
+            embed_dim=decoder_dim,
+            stride=patch_width,
+        )
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, max_num_patches, decoder_dim))  
         self.decoder_pred = nn.Linear(decoder_dim, patch_width * input_dim, bias=True)
         self.decoder_norm = norm_layer(decoder_dim)
 
-        # mask token embedding
-        self.mask_token = nn.Parameter(torch.FloatTensor(1, 1, decoder_dim).normal_())
+        # projection layer of the conditon embedding
+        self.condition_proj = nn.Linear(encoder_dim, decoder_dim, bias=True)
 
         # mask related
         self.mask_prob = mask_prob
@@ -139,20 +146,32 @@ class AudioFlowModel(nn.Module):
 
     def forward_decoder(
         self,
-        x: torch.Tensor,
-        x_lens: torch.Tensor,
+        fbank: torch.Tensor,
+        encoder_out: torch.Tensor,
         mask_indices: torch.Tensor,
-        ids_restore: torch.Tensor
+        ids_restore: torch.Tensor,
+        flow_t: float=0.1,
     ):
-        # embed tokens
-        x = self.decoder_embed(x)
-
-        d_T = x.size(1)
+        d_T = encoder_out.size(1)
         B, T = ids_restore.shape
+        
+        # add the time embedding
+        timestamps = flow_t * torch.ones(B, device=encoder_out.device) # currently use a fixed t=0.1
+        t_embed = timestep_embedding(timesteps=timestamps, dim=encoder_out.size(2)) 
+        encoder_out = encoder_out + t_embed.unsqueeze(dim=1) # (B,L,C)
 
-        x_ = torch.cat([x, torch.zeros(B,(T-d_T), self.decoder_dim, device=x.device)], dim=1)
-        x = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1,1,x.size(2)))
-        x[mask_indices] = self.mask_token
+        # re-arange encoder_out
+        encoder_out = torch.cat([encoder_out, torch.zeros(B,(T-d_T), self.encoder_dim, device=encoder_out.device)], dim=1)
+        encoder_out = torch.gather(encoder_out, dim=1, index=ids_restore.unsqueeze(-1).repeat(1,1,encoder_out.size(2)))
+        encoder_out[mask_indices] = 0.0
+
+        # use a noisy fbank as input
+        noise = torch.randn_like(fbank)
+        decoder_in = (1-timestamps[:, None, None]) * noise + timestamps[:, None, None] * fbank
+        decoder_in = decoder_in.unsqueeze(dim=1)
+        decoder_in = self.decoder_patch_embed(decoder_in)
+
+        x = decoder_in + self.condition_proj(encoder_out)
 
         x = x + self.decoder_pos_embed[:, :T,]
 
@@ -164,9 +183,15 @@ class AudioFlowModel(nn.Module):
 
         return pred
 
-    def forward(self, x: torch.Tensor, x_lens: torch.Tensor):
+    def forward(self, x: torch.Tensor, x_lens: torch.Tensor, flow_t: float=0.1):
         encoder_out, encoder_out_lens, mask_indices, ids_restore = self.forward_encoder(x, x_lens)
-        pred = self.forward_decoder(encoder_out, encoder_out_lens, mask_indices, ids_restore)
+        pred = self.forward_decoder(
+            fbank=x,
+            encoder_out=encoder_out,
+            mask_indices=mask_indices,
+            ids_restore=ids_restore,
+            flow_t=flow_t
+        )
         loss = self.forward_loss(pred=pred, target=x, mask_indices=mask_indices)
 
         return loss
@@ -176,6 +201,7 @@ class AudioFlowModel(nn.Module):
         num_patches = T//4
         target = target[:, :4 *num_patches].reshape(B, num_patches, 4 * n_mels) # (B, L, C)
 
+        # this is equal to the MSE loss
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1) # (B, L)
 
@@ -226,6 +252,27 @@ class AudioFlowModel(nn.Module):
         x_out = nn.utils.rnn.pad_sequence(x_out, batch_first=True, padding_value=0.0)
 
         return x_out, mask_indices
+
+def timestep_embedding(timesteps, dim, max_period=10000):
+    """Create sinusoidal timestep embeddings.
+
+    :param timesteps: a 1-D Tensor of N indices, one per batch element. These may be fractional.
+    :param dim: the dimension of the output.
+    :param max_period: controls the minimum frequency of the embeddings.
+    :return: an [N x dim] Tensor of positional embeddings.
+    """
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device)
+        / half
+    )
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
+
 
 if __name__=="__main__":
     model = AudioMAEModel(encoder_dim=768, num_encoder_layers=12, num_decoder_layers=8, decoder_dim=512)
