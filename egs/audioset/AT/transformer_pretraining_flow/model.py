@@ -111,7 +111,7 @@ class AudioMAEModel(nn.Module):
         if len(x.shape) == 3:
             x = x.unsqueeze(dim=1)
         x = self.patch_embed(x) # (B,L,C)
-        x_lens = x_lens // 4
+        x_lens = x_lens // self.patch_width
 
         # add pos embed
         L = x_lens.max()
