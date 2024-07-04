@@ -21,7 +21,7 @@ class AudioTaggingTransformer(nn.Module):
         input_dim: int=80,
         patch_width: int=4,
         max_num_patches: int = 1500,
-        num_classes: int = 527,
+        num_events: int = 527,
     ):
         super().__init__()
 
@@ -54,7 +54,7 @@ class AudioTaggingTransformer(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, max_num_patches, encoder_dim)) 
         self.norm = norm_layer(encoder_dim)
 
-        self.pred = nn.Linear(encoder_dim, num_classes, bias=True)
+        self.pred = nn.Linear(encoder_dim, num_events, bias=True)
 
     def initialize_weights(self):
         self.apply(self._init_weights)
@@ -96,7 +96,6 @@ class AudioTaggingTransformer(nn.Module):
         return logits
 
     def forward(self, x, x_lens, target):
-        import pdb; pdb.set_trace()
         x, x_lens = self.forward_encoder(x, x_lens)
         logits = self.forward_audio_tagging(x, x_lens)
         loss = nn.functional.binary_cross_entropy_with_logits(logits, target, reduction="sum")
