@@ -437,6 +437,13 @@ def get_parser():
         help="Whether to use half precision training.",
     )
 
+    parser.add_argument(
+        "--normalize-target",
+        type=str2bool,
+        default=False,
+        help="If normalize the fbank training target"
+    )
+
     add_model_arguments(parser)
 
     return parser
@@ -509,6 +516,9 @@ def get_params() -> AttributeDict:
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
+            # parameters for fbank
+            "fbank_norm_mean": -4.149941921234131,
+            "fbank_norm_std": 4.47724723815918,
         }
     )
 
@@ -751,6 +761,10 @@ def compute_loss(
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
+    if params.normalize_target:
+        target = (feature - params.fbank_norm_mean) / params.fbank_norm_std
+    else:
+        target = feature
 
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
@@ -764,7 +778,7 @@ def compute_loss(
         loss = model(
             x=feature,
             x_lens=feature_lens,
-            target=feature,
+            target=target,
         )
 
     assert loss.requires_grad == is_training
