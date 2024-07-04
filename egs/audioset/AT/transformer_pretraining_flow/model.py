@@ -132,7 +132,7 @@ class AudioMAEModel(nn.Module):
             x = blk(x)
         x = self.norm(x)
 
-        ids_restore = torch.argsort(mask_indices, dim=1, stable=True)
+        ids_restore = torch.argsort(mask_indices.float(), dim=1, stable=True)
         ids_restore = torch.argsort(ids_restore, dim=1, stable=True)
 
         return x, x_lens, mask_indices, ids_restore
@@ -150,7 +150,7 @@ class AudioMAEModel(nn.Module):
         d_T = x.size(1)
         B, T = ids_restore.shape
 
-        x_ = torch.cat([x, torch.zeros(B,(T-d_T), self.decoder_dim)], dim=1)
+        x_ = torch.cat([x, torch.zeros(B,(T-d_T), self.decoder_dim, device=x.device)], dim=1)
         x = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1,1,x.size(2)))
         x[mask_indices] = self.mask_token
 
@@ -228,7 +228,9 @@ class AudioMAEModel(nn.Module):
         return x_out, mask_indices
 
 if __name__=="__main__":
-    model = AudioMAEModel()
+    model = AudioMAEModel(encoder_dim=768, num_encoder_layers=12, num_decoder_layers=8, decoder_dim=512)
+    import pdb; pdb.set_trace()
+    print(sum([p.numel() for p in model.parameters()]))
     x = torch.rand(2, 200, 80)
     x_lens = torch.tensor([200, 160])
     import pdb; pdb.set_trace()
