@@ -210,8 +210,8 @@ class AudioPretrainingModel(nn.Module):
             mask_indices = mask_indices[:, :decoder_src_key_padding_mask.size(1)]
         l2_loss *= mask_indices.unsqueeze(-1)
         
-        # normalize the mse loss by the feature dimension 
-        l2_loss = l2_loss.sum() / decoder_out.size(-1)
+        # normalize the mse loss by the fbank dimension 
+        l2_loss = l2_loss.sum() / self.fbank_dim 
 
         return l2_loss
     
