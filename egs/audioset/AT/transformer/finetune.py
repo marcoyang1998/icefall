@@ -76,6 +76,71 @@ from icefall.utils import (
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
+def set_eval(model, modules):
+    if isinstance(model, DDP):
+        for freeze_mod in modules:
+            for name, m in model.named_modules():
+                if name.startswith(freeze_mod + '.'):
+                    m.eval()
+    else:
+        for freeze_mod in modules:
+            for name, m in model.named_modules():
+                if name.startswith("module" + freeze_mod + '.'):
+                    m.eval()
+
+
+def add_finetune_arguments(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--do-finetune",
+        type=str2bool,
+        default=True,
+        help="If true, finetune from a pre-trained checkpoint",
+    )
+    parser.add_argument(
+        "--use-mux",
+        type=str2bool,
+        default=False,
+        help="""
+        Whether to adapt. If true, we will mix 5% of the new data
+        with 95% of the original data to fine-tune. This is useful
+        if you want to maintain the performance on the original domain
+        """,
+    )
+
+    parser.add_argument(
+        "--init-modules",
+        type=str,
+        default=None,
+        help="""
+        Modules to be initialized. It matches all parameters starting with
+        a specific key. The keys are given with Comma seperated. If None,
+        all modules will be initialised. For example, if you only want to
+        initialise all parameters staring with "encoder", use "encoder";
+        if you want to initialise parameters starting with encoder or decoder,
+        use "encoder,joiner".
+        """,
+    )
+
+    parser.add_argument(
+        "--freeze-modules",
+        type=str,
+        default=None,
+        help="Modules to be frozen. Comma separated"
+    )
+
+    parser.add_argument(
+        "--classifier-lr-scale",
+        type=float,
+        default=1.0,
+        help="The lr-scale of the classifier. Could be greater than 1.0."
+    )
+
+    parser.add_argument(
+        "--finetune-ckpt",
+        type=str,
+        default=None,
+        help="Fine-tuning from which checkpoint (path to a .pt file)",
+    )
 
 def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
@@ -115,7 +180,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=4,
         help="The width of the patch"
     )
-
 
 
 def get_parser():
@@ -181,13 +245,20 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--base-lr", type=float, default=0.045, help="The base learning rate."
+        "--base-lr", type=float, default=0.0045, help="The base learning rate."
+    )
+
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
+        help="""Number of warmup batches""",
     )
 
     parser.add_argument(
         "--lr-batches",
         type=float,
-        default=7500,
+        default=100000,
         help="""Number of steps that affects how rapidly the learning rate
         decreases. We suggest not to change this.""",
     )
@@ -195,9 +266,17 @@ def get_parser():
     parser.add_argument(
         "--lr-epochs",
         type=float,
-        default=3.5,
+        default=100,
         help="""Number of epochs that affects how rapidly the learning rate decreases.
         """,
+    )
+
+    parser.add_argument(
+        "--ref-duration",
+        type=float,
+        default=600,
+        help="Reference batch duration for purposes of adjusting batch counts for setting various "
+        "schedules inside the model",
     )
 
     parser.add_argument(
@@ -266,6 +345,7 @@ def get_parser():
     )
 
     add_model_arguments(parser)
+    add_finetune_arguments(parser)
 
     return parser
 
@@ -419,6 +499,52 @@ def load_checkpoint_if_available(
 
     return saved_params
 
+def load_model_params(
+    ckpt: str, model: nn.Module, init_modules: List[str] = None, strict: bool = True
+):
+    """Load model params from checkpoint
+
+    Args:
+        ckpt (str): Path to the checkpoint
+        model (nn.Module): model to be loaded
+        init_modules (list[str]): List of modules to be initialized
+
+    """
+    logging.info(f"Loading checkpoint from {ckpt}")
+    checkpoint = torch.load(ckpt, map_location="cpu")
+
+    # if module list is empty, load the whole model from ckpt
+    if not init_modules:
+        if next(iter(checkpoint["model"])).startswith("module."):
+            logging.info("Loading checkpoint saved by DDP")
+
+            dst_state_dict = model.state_dict()
+            src_state_dict = checkpoint["model"]
+            for key in dst_state_dict.keys():
+                src_key = "{}.{}".format("module", key)
+                dst_state_dict[key] = src_state_dict.pop(src_key)
+            assert len(src_state_dict) == 0
+            model.load_state_dict(dst_state_dict, strict=strict)
+        else:
+            model.load_state_dict(checkpoint["model"], strict=strict)
+    else:
+        src_state_dict = checkpoint["model"]
+        dst_state_dict = model.state_dict()
+        for module in init_modules:
+            logging.info(f"Loading parameters starting with prefix {module}")
+            src_keys = [
+                k for k in src_state_dict.keys() if k.startswith(module.strip() + ".")
+            ]
+            dst_keys = [
+                k for k in dst_state_dict.keys() if k.startswith(module.strip() + ".")
+            ]
+            assert set(src_keys) == set(dst_keys)  # two sets should match exactly
+            for key in src_keys:
+                dst_state_dict[key] = src_state_dict.pop(key)
+
+        model.load_state_dict(dst_state_dict, strict=strict)
+
+    return None
 
 def save_checkpoint(
     params: AttributeDict,
@@ -627,6 +753,9 @@ def train_one_epoch(
     """
     model.train()
 
+    if params.freeze_modules is not None:
+        set_eval(model, params.freeze_modules)
+
     tot_loss = MetricsTracker()
 
     saved_bad_model = False
@@ -644,9 +773,12 @@ def train_one_epoch(
             rank=0,
         )
 
+    num_samples = 0
     for batch_idx, batch in enumerate(train_dl):
+
         params.batch_idx_train += 1
         batch_size = batch["inputs"].size(0)
+        num_samples += batch_size
 
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
@@ -762,6 +894,8 @@ def train_one_epoch(
                 world_size=world_size,
             )
             model.train()
+            if params.freeze_modules is not None:
+                set_eval(model, params.freeze_modules)
             logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
             logging.info(
                 f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
@@ -770,6 +904,10 @@ def train_one_epoch(
                 valid_info.write_summary(
                     tb_writer, "train/valid_", params.batch_idx_train
                 )
+
+        if num_samples > params.num_samples:
+            logging.info("Number of training samples exceed 200,000 in this epoch, move to next epoch")
+            break
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -825,14 +963,42 @@ def run(rank, world_size, args):
         model_avg = copy.deepcopy(model).to(torch.float64)
 
     assert params.start_epoch > 0, params.start_epoch
-    checkpoints = load_checkpoint_if_available(
-        params=params, model=model, model_avg=model_avg
-    )
+
+    # load model parameters for model fine-tuning
+    if params.do_finetune:
+        assert params.start_epoch == 1, "Fine-tune must start from epoch 1"
+        modules = params.init_modules.split(",") if params.init_modules else None
+        checkpoints = load_model_params(
+            ckpt=params.finetune_ckpt, model=model, init_modules=modules
+        )
+
+        logging.info(f"Setting the lr-scale of the classifier to {params.classifier_lr_scale}")
+        model.pred.lr_scale = params.classifier_lr_scale
+        # Need to update the model_avg if use initialisation
+        if rank == 0:
+            # model_avg is only used with rank 0
+            model_avg = copy.deepcopy(model).to(torch.float64)
+    else:
+        # resuming training
+        assert params.start_epoch > 1, params.start_epoch
+        checkpoints = load_checkpoint_if_available(
+            params=params, model=model, model_avg=model_avg
+        )
+
+    params.freeze_modules = params.freeze_modules.split(",") if params.freeze_modules else None
+    if params.do_finetune and params.freeze_modules is not None:
+        logging.info(f"Freezing the following modules: {params.freeze_modules}")
+        for freeze_mod in params.freeze_modules:
+            for name, p in model.named_parameters():
+                if name.startswith(freeze_mod + "."):
+                    p.requires_grad = False
+    else:
+        logging.info("Not freezing any modules.")
 
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
 
     optimizer = ScaledAdam(
         get_parameter_groups_with_lrs(
@@ -844,7 +1010,12 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
+    scheduler = Eden(
+        optimizer,
+        params.lr_batches,
+        params.lr_epochs,
+        warmup_batches=params.warmup_batches,
+    )
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")

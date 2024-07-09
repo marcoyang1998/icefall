@@ -26,6 +26,7 @@ class AudioTaggingTransformer(nn.Module):
         super().__init__()
 
         norm_layer = nn.LayerNorm
+        self.encoder_dim = encoder_dim
         self.input_dim = input_dim
         self.patch_width = patch_width
         
@@ -50,7 +51,6 @@ class AudioTaggingTransformer(nn.Module):
                 for i in range(num_encoder_layers)
             ]
         )
-        self.encoder_dim = encoder_dim
         self.pos_embed = nn.Parameter(torch.zeros(1, max_num_patches, encoder_dim)) 
         self.norm = norm_layer(encoder_dim)
 

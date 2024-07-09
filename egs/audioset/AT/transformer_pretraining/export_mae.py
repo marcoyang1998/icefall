@@ -80,7 +80,6 @@ from pathlib import Path
 from typing import Tuple
 
 import torch
-from scaling_converter import convert_scaled_to_non_scaled
 from torch import Tensor, nn
 from train import add_model_arguments, get_model, get_params
 
@@ -306,6 +305,7 @@ def main():
 
     model.eval()
 
+    assert params.jit == False
     if params.jit is True:
         convert_scaled_to_non_scaled(model, inplace=True)
         # We won't use the forward() method of the model in C++, so just ignore
