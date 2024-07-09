@@ -78,14 +78,16 @@ class AudioPretrainingModel(nn.Module):
         self.decoder_input_dim = decoder_input_dim
         self.decoder_dim = decoder_dim
         
+        # proj the encoder features to decoder dim
+        self.encoder_out_proj = nn.Linear(
+            encoder_dim, decoder_input_dim, bias=True
+        )
         self.dropout = ScheduledFloat((0.0, 0.9), (3000.0, 0.1))
         # decoder embed
-        self.decoder_embed = nn.Linear(
-            fbank_dim, decoder_input_dim, bias=True,
-        )
+        self.decoder_embed = Conv2dSubsampling(fbank_dim, decoder_input_dim)
         # decoder pred
         self.decoder_pred = nn.Linear(
-            decoder_dim, fbank_dim, bias=True,
+            decoder_dim, fbank_dim * 4, bias=True,
         )
         
         self.fbank_norm_mean = -4.149941921234131
@@ -137,7 +139,7 @@ class AudioPretrainingModel(nn.Module):
         x_lens: torch.Tensor,
         target: torch.Tensor,
         t: float = 0.0,
-        fbank_as_target: bool=False,
+        fbank_as_target: bool=True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -173,47 +175,47 @@ class AudioPretrainingModel(nn.Module):
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask) # (T,N,C)        
 
-        # replace the masked encoder_out with a mask_emb
+        # replace the masked encoder_out with 0.0, as we only want the info from the un-masked regions
         mask_indices = downsample_mask_indices(mask_indices)
         assert mask_indices.size(1) >= encoder_out.size(0)
         if mask_indices.size(1) > encoder_out.size(0):
             mask_indices = mask_indices[:, :encoder_out.size(0)]
-
         mask_indices = mask_indices.bool().T
         encoder_out[mask_indices] = 0.0
-
-        # expand the encoder_out to match the fbank length, also replace the mask embedding with zeros
-        encoder_out = torch.repeat_interleave(encoder_out, 4, dim=0)
-        diff = T - encoder_out.size(0)
-        padding = torch.zeros([diff, N, encoder_out.size(2)], device=x.device)
-        left = padding[:diff//2]
-        right = padding[diff//2:]
-        encoder_out = torch.cat([left, encoder_out, right], dim=0) # same length as fbank
         
         # Get the time embedding
         timestamps = t * torch.ones(N, device=x.device) # currently use a fixed t
         t_embed = timestep_embedding(timesteps=timestamps, dim=encoder_out.size(2)) 
-        conditional_embedding = encoder_out + t_embed
+        encoder_out = encoder_out + t_embed
+        encoder_out = encoder_out.permute(1,0,2) # (N,T,C)
 
-        # flow
+        # we will use the normalized fbank as the target
         fbank = (fbank - self.fbank_norm_mean) / self.fbank_norm_std
         noise = torch.randn_like(fbank)
         decoder_in = (1-timestamps[:, None, None]) * noise + timestamps[:, None, None] * fbank
-        u_t = fbank - noise # (N,T,C), the flow training target 
             
         # perform the reconstruction
-        decoder_in = self.decoder_embed(decoder_in) # project to decoder_dim
+        decoder_in, decoder_in_lens = self.decoder_embed(decoder_in, fbank_lens) # project to decoder_dim & downsample to the encoder_out length, (N,T,C)
         decoder_in = nn.functional.dropout(decoder_in, p=float(self.dropout), training=self.training)
+        if encoder_out.size(1) < decoder_in.size(1):
+            diff = decoder_in.size(1) - encoder_out.size(1) 
+            encoder_out = torch.cat([encoder_out, torch.zeros(N, diff, encoder_out.size(2), device=encoder_out.device)], dim=1)
+
+        decoder_in = decoder_in + self.encoder_out_proj(encoder_out) # add the condition embedding
         decoder_in = decoder_in.permute(1,0,2)
+        decoder_padding_mask = make_pad_mask(decoder_in_lens)
         decoder_out, decoder_out_lens = self.decoder(
             x=decoder_in,
-            x_lens=fbank_lens, 
-            src_key_padding_mask=padding_mask,
-            emb=conditional_embedding,
+            x_lens=decoder_in_lens, 
+            src_key_padding_mask=decoder_padding_mask,
+            emb=encoder_out.permute(1, 0, 2),
         )
 
         decoder_out = self.decoder_pred(decoder_out) 
         decoder_out = decoder_out.permute(1, 0, 2) # (T, N, C) -> (N, T, C)
+
+        fbank = fbank[:, :decoder_out.size(1)*4, :]
+        fbank = fbank.reshape(decoder_out.shape)
 
         if fbank_as_target:
             loss = ((decoder_out - fbank)**2).sum() / fbank.size(2)
@@ -254,6 +256,90 @@ class AudioPretrainingModel(nn.Module):
 
         return x, mask_indices
 
+
+class Conv2dSubsampling(nn.Module):
+    """Convolutional 2D subsampling (to 1/4 length).
+
+    Convert an input of shape (N, T, idim) to an output
+    with shape (N, T', odim), where
+    T' = ((T-1)//2 - 1)//2, which approximates T' == T//4
+
+    It is based on
+    https://github.com/espnet/espnet/blob/master/espnet/nets/pytorch_backend/transformer/subsampling.py  # noqa
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        layer1_channels: int = 8,
+        layer2_channels: int = 32,
+        layer3_channels: int = 128,
+    ) -> None:
+        """
+        Args:
+          in_channels:
+            Number of channels in. The input shape is (N, T, in_channels).
+            Caution: It requires: T >=7, in_channels >=7
+          out_channels
+            Output dim. The output shape is (N, ((T-1)//2 - 1)//2, out_channels)
+          layer1_channels:
+            Number of channels in layer1
+          layer1_channels:
+            Number of channels in layer2
+        """
+        assert in_channels >= 7
+        super().__init__()
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(
+                in_channels=1,
+                out_channels=layer1_channels,
+                kernel_size=3,
+                padding=1,
+            ),
+            nn.GELU(),
+            nn.Conv2d(
+                in_channels=layer1_channels,
+                out_channels=layer2_channels,
+                kernel_size=3,
+                stride=2,
+            ),
+            nn.GELU(),
+            nn.Conv2d(
+                in_channels=layer2_channels,
+                out_channels=layer3_channels,
+                kernel_size=3,
+                stride=2,
+            ),
+            nn.GELU(),
+        )
+        self.out = nn.Linear(
+            layer3_channels * (((in_channels - 1) // 2 - 1) // 2), out_channels
+        )
+        # set learn_eps=False because out_norm is preceded by `out`, and `out`
+        # itself has learned scale, so the extra degree of freedom is not
+        # needed.
+
+    def forward(self, x: torch.Tensor, x_lens: torch.Tensor) -> torch.Tensor:
+        """Subsample x.
+
+        Args:
+          x:
+            Its shape is (N, T, idim).
+
+        Returns:
+          Return a tensor of shape (N, ((T-1)//2 - 1)//2, odim)
+        """
+        # On entry, x is (N, T, idim)
+        x = x.unsqueeze(1)  # (N, T, idim) -> (N, 1, T, idim) i.e., (N, C, H, W)
+        x = self.conv(x)
+        # Now x is of shape (N, odim, ((T-1)//2 - 1)//2, ((idim-1)//2 - 1)//2)
+        b, c, t, f = x.size()
+        x = self.out(x.transpose(1, 2).contiguous().view(b, t, c * f))
+        # Now x is of shape (N, ((T-1)//2 - 1))//2, odim)
+        x_lens = ((x_lens-1)//2 -1)//2
+        return x, x_lens
 def timestep_embedding(timesteps, dim, max_period=10000):
     """Create sinusoidal timestep embeddings.
 

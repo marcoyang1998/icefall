@@ -49,7 +49,7 @@ from pretraining_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_flow_decoder import AudioPretrainingModel
+from model_flow_decoder_downsample import AudioPretrainingModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -285,7 +285,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "--use-fbank-target",
         type=str2bool,
         help="Which target as the decoder loss",
-        default=False,
+        default=True,
     )
 
 
