@@ -57,7 +57,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.encoder_depth = depth
         self.contextual_depth = contextual_depth
         self.blocks = nn.ModuleList([
-            Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
+            Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
 
@@ -110,11 +110,16 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             # Transfomer
             self.decoder_blocks = nn.ModuleList([
-                Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
+                Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
                 for i in range(decoder_depth)])
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
-        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
+        if isinstance(patch_size, tuple):
+            patch_area = patch_size[0] * patch_size[1]
+        else:
+            patch_area = patch_size ** 2
+
+        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_area * in_chans, bias=True) # decoder to patch
 
         # --------------------------------------------------------------------------
 
@@ -188,12 +193,16 @@ class MaskedAutoencoderViT(nn.Module):
         if self.audio_exp:
             if self.use_custom_patch: # overlapped patch
                 h,w = self.patch_embed.patch_hw
-                # todo: fixed h/w patch size and stride size. Make hw custom in the future
-                x = imgs.unfold(2, self.patch_size, self.stride).unfold(3, self.patch_size, self.stride) # n,1,H,W -> n,1,h,w,p,p
-                x = x.reshape(shape=(imgs.shape[0], h*w, p**2 * 1))
+                # # todo: fixed h/w patch size and stride size. Make hw custom in the future
+                # x = imgs.unfold(2, self.patch_size, self.stride).unfold(3, self.patch_size, self.stride) # n,1,H,W -> n,1,h,w,p,p
+                # x = x.reshape(shape=(imgs.shape[0], h*w, p**2 * 1))
                 #x = imgs.reshape(shape=(imgs.shape[0], 1, h, p, w, p))
                 #x = torch.einsum('nchpwq->nhwpqc', x)
                 #x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 1))
+                # NOTE: This only works for rect patch that spans over the whole mel dimension
+                N= imgs.shape[0]
+                x = imgs.reshape(N, h * w, self.patch_embed.patch_size[0] * self.patch_embed.patch_size[1])
+                pass
             else:
                 h = imgs.shape[2] // p
                 w = imgs.shape[3] // p
