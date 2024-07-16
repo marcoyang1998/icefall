@@ -1,6 +1,4 @@
-# Copyright    2021-2023  Xiaomi Corp.        (authors: Fangjun Kuang,
-#                                                       Wei Kang,
-#                                                       Zengwei Yao)
+# Copyright    2023-2024  Xiaomi Corp.        (authors: Xiaoyu Yang)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
 #
@@ -24,20 +22,16 @@ import k2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from encoder_interface import EncoderInterface
 
 from icefall.utils import add_sos, make_pad_mask, AttributeDict
-from scaling import ScaledLinear
-
 from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
-# from multi_quantization.prediction import JointCodebookLoss
 
 
 class MultiKDModel(nn.Module):
     def __init__(
         self,
         encoder_embed: nn.Module,
-        encoder: EncoderInterface,
+        encoder: nn.Module,
         encoder_dim: int = 384,
         whisper_dim: int = 768,
         use_beats: bool = True,
@@ -97,8 +91,6 @@ class MultiKDModel(nn.Module):
         """
         super().__init__()
 
-        assert isinstance(encoder, EncoderInterface), type(encoder)
-
         self.encoder_embed = encoder_embed
         self.encoder = encoder
         self.encoder_dim = encoder_dim
@@ -143,17 +135,10 @@ class MultiKDModel(nn.Module):
             logging.info(f"Delta_t: {delta_t} when computing the distillation loss")
 
         # if use codebook loss
+        assert mvq_KD == False, "Don't use mvq KD"
         self.mvq_KD = mvq_KD
         self.mvq_layer = mvq_kd_layer
-        if mvq_KD:
-            assert num_codebooks > 0
-            self.codebook_loss_net = JointCodebookLoss(
-                predictor_channels=cb_input_dim,
-                num_codebooks=num_codebooks,
-                is_joint=False,
-            )
-        else:
-            self.codebook_loss_net = None
+        self.codebook_loss_net = None
 
 
     def forward_encoder(
@@ -392,6 +377,45 @@ class MultiKDModel(nn.Module):
             )
 
         return codebook_loss
+
+    def get_embeddings(
+        self,
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        extract_spkr_embed: bool = True
+    ):
+        """Get the embeddings of the encoder
+
+        Args:
+            x (torch.Tensor): input audio fbank feature (B,T,C)
+            x_lens (torch.Tensor): The length of each sample (B,T)
+            extract_spkr_embed (bool): Extract the 192-D speaker embedding, otherwise use the encoder
+                out features without passing the speaker-related modules
+        """
+        assert x.ndim == 3, x.shape
+        assert x_lens.ndim == 1, x_lens.shape
+
+        # Compute encoder outputs
+        encoder_out, encoder_out_lens, middle_out = self.forward_encoder(x, x_lens, return_middle_out=True) # (N,T,C)
+
+        # speaker related
+        if self.speaker_input_idx != -1:
+            ecapa_input_embeddings = middle_out[self.speaker_input_idx] # a list of (T,N,C)
+            # ecapa_input_embeddings = torch.mean(torch.stack(ecapa_input_embeddings), dim=0)
+            ecapa_input_embeddings = sum(ecapa_input_embeddings) / len(ecapa_input_embeddings)
+            ecapa_input_embeddings = ecapa_input_embeddings.permute(1,0,2) # (B,T,C)
+        else:
+            ecapa_input_embeddings = encoder_out # (B,1,C)
+        
+        if extract_spkr_embed:
+            spkr_embedding = self.forward_ecapa(
+                ecapa_input_embeddings,
+                encoder_out_lens,
+            )
+        else:
+            spkr_embedding = ecapa_input_embeddings
+
+        return encoder_out, encoder_out_lens, spkr_embedding
     
     @staticmethod
     def concat_successive_whisper_embeddings(encoder_out, whisper_embeddings):
