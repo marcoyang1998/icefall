@@ -415,8 +415,6 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_t_prob=params.mask_t_prob,
         mask_f_prob=params.mask_f_prob,
         audio_exp=True,
-
-
     )
     
     return model
