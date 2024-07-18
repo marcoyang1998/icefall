@@ -178,6 +178,14 @@ def main():
     logging.info(f"Processed a total of {len(new_cuts)} cuts.")
 
     cuts = CutSet.from_cuts(new_cuts)
+    
+    def filter_long(c):
+        if c.duration > 32:
+            print(f"Removing {c.id}: duration {c.duration}")
+            return False
+        return True
+    cuts = cuts.filter(filter_long)
+
     if not args.compute_fbank:
         manifest_output_dir = feat_output_dir + "/" + f"cuts_fma_{split}_no_feat.jsonl.gz"
 
