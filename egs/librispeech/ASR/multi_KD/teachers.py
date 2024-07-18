@@ -156,7 +156,7 @@ class MertTeacher(Teacher):
         self,
         audio: np.array,
         sampling_rate: int,
-        level: str="clip",
+        level: str="frame",
         layer_idx: int=-1,
     ):
         device = next(self.model.parameters()).device

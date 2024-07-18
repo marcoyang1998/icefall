@@ -18,6 +18,7 @@ import random
 from typing import Callable, Dict, List, Optional, Union
 
 from utils import get_class_dict
+from teachers import Teacher
 
 import numpy as np
 import torch
@@ -34,10 +35,8 @@ from lhotse.workarounds import Hdf5MemoryIssueFix
 
 
 class MultiKDDataset(torch.utils.data.Dataset):
-    """This is a dataset for Prompt ASR. It supports the following features:
-    1. Select a tuple of (text, pre_text, style_text) randomly from a
-    list of texts as supervisions.
-
+    """This is a dataset for Multi-KD training. It should yield KD training targets
+    as additional output.
     """
 
     def __init__(
@@ -48,9 +47,10 @@ class MultiKDDataset(torch.utils.data.Dataset):
         return_codebook_indexes: bool = False,
         input_strategy: BatchIO = PrecomputedFeatures(),
         on_the_fly_feats: bool = False,
-        beats: torch.nn.Module = None,
-        ecapa: torch.nn.Module = None,
-        whisper: torch.nn.Module = None,
+        beats: Teacher = None,
+        ecapa: Teacher = None,
+        whisper: Teacher = None,
+        mert: Teacher = None,
     ):
         """
         Icefall MultiKD IterableDataset constructor. See https://github.com/lhotse-speech/lhotse/blob/master/lhotse/dataset/speech_recognition.py
@@ -81,6 +81,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         self.beats = beats
         self.ecapa = ecapa
         self.whisper = whisper
+        self.mert = mert
         
         self.beats_class_dict = get_class_dict()
         
@@ -148,6 +149,10 @@ class MultiKDDataset(torch.utils.data.Dataset):
                 whisper_embedding_lens = torch.tensor(0.)
                 whisper_codebook_indexes = torch.tensor(0.)
                 whisper_codebook_indexes_lens = torch.tensor(0.)
+            
+            # TODO: support on-the-fly MERT embedding extraction
+            mert_embeddings = None
+            mert_embedding_lens = None
 
         else:
             # collate the pre-computed teacher embeddings
@@ -183,6 +188,14 @@ class MultiKDDataset(torch.utils.data.Dataset):
             else:
                 whisper_codebook_indexes = torch.tensor(0.)
                 whisper_codebook_indexes_lens = torch.tensor(0.)
+
+            if hasattr(cuts_pre_mixed[0], "mert_embedding"):
+                mert_embeddings, mert_embedding_lens = collate_custom_field(
+                    cuts_pre_mixed, "mert_embedding", pad_value=-100,
+                )
+            else:
+                mert_embeddings = torch.tensor(0.)
+                mert_embedding_lens = torch.tensor(0.)
         
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
@@ -213,6 +226,9 @@ class MultiKDDataset(torch.utils.data.Dataset):
             "whisper_embedding_lens": whisper_embedding_lens,
             "whisper_codebook_indexes": whisper_codebook_indexes,
             "whisper_codebook_indexes_lens": whisper_codebook_indexes_lens,
+            "mert_embedding": mert_embeddings,
+            "mert_embedding_lens": mert_embedding_lens,
+
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)

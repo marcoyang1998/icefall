@@ -478,6 +478,7 @@ class LibriSpeechKDDataModule:
                 beats=self.beats,
                 ecapa=self.ecapa,
                 whisper=self.whisper,
+                mert=self.mert,
             )
         else:
             train = MultiKDDataset(
