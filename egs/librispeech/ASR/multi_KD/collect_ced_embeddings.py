@@ -47,7 +47,13 @@ def get_parser():
     parser.add_argument(
         "--ced-ckpt",
         type=str,
-        default="pretrained_models/CED/averaged.pt",
+        default="pretrained_models/CED/audiotransformer_base_mAP_4999.pt",
+    )
+
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default="CED-base",
     )
     
     parser.add_argument(
@@ -82,29 +88,28 @@ def extract_embeddings(
     model = getattr(models, "ced_base")(
         pretrained=True,
         pretrained_url=params.ced_ckpt,
-        n_mels=80,
     ).to(device)
     model.eval()
     
-    # dataset = UnsupervisedWaveformDataset(
-    #     manifest
-    # )
+    dataset = UnsupervisedWaveformDataset(
+        manifest
+    )
     
-    # sampler = DynamicBucketingSampler(
-    #     manifest,
-    #     max_duration=params.max_duration,
-    #     shuffle=False,
-    #     drop_last=False,
-    # )
+    sampler = DynamicBucketingSampler(
+        manifest,
+        max_duration=params.max_duration,
+        shuffle=False,
+        drop_last=False,
+    )
     
-    # dl = DataLoader(
-    #     dataset,
-    #     sampler=sampler,
-    #     batch_size=None,
-    #     num_workers=1,
-    #     persistent_workers=False,
-    # )
-    dl = data_module.valid_dataloaders(manifest)
+    dl = DataLoader(
+        dataset,
+        sampler=sampler,
+        batch_size=None,
+        num_workers=1,
+        persistent_workers=False,
+    )
+    # dl = data_module.valid_dataloaders(manifest)
     
     new_cuts = []
     num_cuts = 0
@@ -112,14 +117,14 @@ def extract_embeddings(
     with NumpyHdf5Writer(embedding_path) as writer:
         logging.info(f"Writing CED embeddings to {embedding_path}")
         for i, batch in enumerate(dl):
-            cuts = batch["supervisions"]["cut"]
-            feature = batch["inputs"].to(device)
-            feature = feature.permute(0,2,1)
-            #audio_input_16khz = batch["audio"].to(device)
-            #audio_lens = batch["audio_lens"].to(device)
-            #padding_mask = make_pad_mask(audio_lens)
+            cuts = batch["cuts"]
+            # feature = batch["inputs"].to(device)
+            # feature = feature.permute(0,2,1)
+            audio_input_16khz = batch["audio"].to(device)
+            audio_lens = batch["audio_lens"].to(device)
+            padding_mask = make_pad_mask(audio_lens)
             
-            embeddings = model.forward_spectrogram(feature).detach().to("cpu").numpy() # (N, C)
+            embeddings = model.forward(audio_input_16khz).detach().to("cpu").numpy() # (N, C)
             
             for idx, cut in enumerate(cuts):
                 new_cut = MonoCut(
