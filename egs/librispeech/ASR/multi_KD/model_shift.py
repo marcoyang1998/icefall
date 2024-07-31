@@ -29,8 +29,7 @@ from encoder_interface import EncoderInterface
 from icefall.utils import add_sos, make_pad_mask, AttributeDict
 from scaling import ScaledLinear
 
-from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
-# from multi_quantization.prediction import JointCodebookLoss
+from ecapa_tdnn import AttentiveStatisticsPooling
 
 
 class MultiKDModel(nn.Module):
