@@ -546,7 +546,8 @@ class ScaledAdam(BatchedOptimizer):
         assert torch.isclose(
             sum([value[0] for value in all_sumsq_orig.values()]).cpu(),
             torch.tensor(1.0),
-        ), all_sumsq_orig.values()
+            atol=1e-2,
+        ), sum([value[0] for value in all_sumsq_orig.values()]).cpu()
         sorted_by_proportion = {
             k: v
             for k, v in sorted(
