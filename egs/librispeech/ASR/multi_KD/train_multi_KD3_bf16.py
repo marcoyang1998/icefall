@@ -1264,6 +1264,7 @@ def run(rank, world_size, args):
         get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
         lr=params.base_lr,  # should have no effect
         clipping_scale=2.0,
+        param_max_rms=5.0,
     )
 
     scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
