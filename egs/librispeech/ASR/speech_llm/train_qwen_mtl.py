@@ -1652,6 +1652,7 @@ def run(rank, world_size, args):
         iemocap_valid_cuts = librispeech.iemocap_test_cuts()
         iemocap_valid_cuts = iemocap_valid_cuts.map(partial(_set_task_prompt, "ER", "en", "en"))
         iemocap_valid_cuts = iemocap_valid_cuts.map(emotion2text)
+        iemocap_valid_cuts = iemocap_valid_cuts.filter(remove_short_and_long_utt)
         iemocap_valid_dl = librispeech.valid_dataloaders(iemocap_valid_cuts)
         
         valid_dls.append(iemocap_valid_dl)

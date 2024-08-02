@@ -46,7 +46,7 @@ import torch.nn as nn
 from lhotse.cut import Cut
 from asr_datamodule import LibriSpeechAsrDataModule
 
-from train_qwen_mtl import add_model_arguments, get_model, get_params, get_task_prompt, get_tokenizer
+from train_qwen_mtl import add_model_arguments, get_model, get_params, get_task_prompt, get_tokenizer, emo_dict
 from caption_evaluation_tools.eval_metrics import evaluate_metrics
 import sacrebleu
 
@@ -140,7 +140,7 @@ def get_parser():
         type=str,
         default="ASR",
         required=True,
-        choices=["ASR","AC", "AST"]
+        choices=["ASR","AC", "AST", "ER"]
     )
 
     parser.add_argument(
@@ -429,6 +429,8 @@ def decode_one_batch(
         hyps = [sp.decode(hyp[:-1]).split() for hyp in hyps] # remove the endoftext token
     elif task_type == "AST":
         hyps = [sp.decode(hyp[:-1]) for hyp in hyps]
+    elif task_type == "ER":
+        hyps = [sp.decode(hyp[:-1]) for hyp in hyps]
     else:
         raise ValueError(f"Unknown task type: {task_type}")
     
@@ -522,6 +524,9 @@ def decode_dataset(
                     ref_words = [t.split() for t in ref_text]
                 elif task_type == "AST":
                     ref_words = ref_text # no-op for AST
+                elif task_type == "ER":
+                    ref_words = ref_text.split()[-1].replace(".", "")
+                    hyp_words = hyp_words.split()[-1].replace(".", "")
                 this_batch.append((cut_id, ref_words, hyp_words))
 
             results[name].extend(this_batch)
@@ -639,6 +644,28 @@ def evaluate_translations(
         score = sacrebleu.corpus_bleu(hyps, [refs], tokenize=output_language)
         logging.info(score)
         logging.info(f"BLEU on {test_set_name}: {score.score}")
+
+def evaluate_emotion(
+    params: AttributeDict,
+    test_set_name: str,
+    results_dict: Dict[str, List[Tuple[str, List[str], List[str]]]],
+):
+    for key, results in results_dict.items():
+        recog_path = (
+            params.res_dir / f"emotion-{test_set_name}-{key}-{params.suffix}.txt"
+        )
+        results = sorted(results)
+        
+        gt_emotions = []
+        pred_emotions = []
+        correct = 0
+        for res in results:
+            cut_id, gt_emotion, pred_emotion = res
+            gt_emotions.append(gt_emotion)
+            pred_emotions.append(pred_emotion)
+            if gt_emotion == pred_emotion:
+                correct += 1
+        logging.info(f"Accuracy: {correct/len(results)}")
 
 
 @torch.no_grad()
@@ -889,6 +916,21 @@ def main():
             test_dls.append(audiocaps_test_dl)
             test_sets.append("test_audiocaps")
             gt_captions.append("data/fbank_audiocaps/audiocaps_test_captions.csv")
+            
+    elif params.task_type == "ER":
+        def emotion2text(c):
+            emotion = c.supervisions[0].emotion
+            c.supervisions[0].text = f"The emotion of the person is {emo_dict[emotion]}."
+            return c
+        iemocap_valid_cuts = librispeech.iemocap_test_cuts()
+        iemocap_valid_cuts = iemocap_valid_cuts.map(partial(_set_task_prompt, "ER", "en", "en"))
+        iemocap_valid_cuts = iemocap_valid_cuts.map(emotion2text)
+        iemocap_valid_dl = librispeech.test_dataloaders(iemocap_valid_cuts)
+        
+        test_dls.append(iemocap_valid_dl)
+        test_sets.append("test_iemocap")
+        gt_captions.append("None")
+        
 
     for test_set, test_dl, gt_caption in zip(test_sets, test_dls, gt_captions):
         results_dict = decode_dataset(
@@ -919,6 +961,12 @@ def main():
                 test_set_name=test_set,
                 results_dict=results_dict,
                 output_language=output_language,
+            )
+        elif params.task_type == "ER":
+            evaluate_emotion(
+                params=params,
+                test_set_name=test_set,
+                results_dict=results_dict,
             )
             
         else:

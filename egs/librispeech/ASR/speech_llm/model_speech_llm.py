@@ -77,6 +77,7 @@ class SpeechLLMModel(nn.Module):
         else:
             self.pooling_layer = None
         
+        # a projection layer maps the speech embed to token embed
         self.embed_projection = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(speech_encoder_dim, llm_embed_dim),
@@ -94,7 +95,7 @@ class SpeechLLMModel(nn.Module):
         
         if multitask:
             self.task_prompt_embedding = nn.Embedding(task_related_tokens, llm_embed_dim)
-            self.task_token_start_id = 151850
+            self.task_token_start_id = 151850 # the start index for the task-specific prompt tokens
         else:
             self.task_prompt_embedding = None
         
@@ -281,7 +282,7 @@ class WhisperEncoder(nn.Module):
         x = x.permute(0, 2, 1)
         x_lens = torch.floor((x_lens + 1)/2).int()
         
-        # make the model compatible with any input length
+        # make the model compatible with any input length shorter than 30 sec
         mask = make_pad_mask(x_lens, max_len=1500).to(x.device)
         pos_emb = self.model.positional_embedding.masked_fill(mask.unsqueeze(-1), 0.0)
         x = (x + pos_emb[:,:x_lens.max(),:]).to(x.dtype)
