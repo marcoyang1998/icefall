@@ -18,7 +18,7 @@ from torch.nn.utils.rnn import pad_sequence
 from lhotse import load_manifest
 from asr_datamodule import LibriSpeechAsrDataModule
 
-from train_multi_KD import add_model_arguments, get_model, get_params
+from train_multi_KD3 import add_model_arguments, get_model, get_params
 from utils import get_class_dict
 
 from icefall.checkpoint import (
@@ -222,6 +222,7 @@ def main():
     opts.frame_opts.snip_edges = False
     opts.frame_opts.samp_freq = 16000
     opts.mel_opts.num_bins = params.feature_dim
+    opts.mel_opts.high_freq = -400
 
     fbank = kaldifeat.Fbank(opts)
     
@@ -231,9 +232,22 @@ def main():
     
     sound_files = [
         '/star-xy/data/LibriSpeech/dev-clean/1272/128104/1272-128104-0000.flac',
-        '/star-xy/data/LibriSpeech/dev-clean/1272/128104/1272-128104-0001.flac',
-        '/star-xy/data/LibriSpeech/dev-clean/1462/170138/1462-170138-0000.flac',
+        # '/star-xy/data/LibriSpeech/dev-clean/1272/128104/1272-128104-0001.flac',
+        # '/star-xy/data/LibriSpeech/dev-clean/1462/170138/1462-170138-0000.flac',
     ]
+
+    waves = read_sound_files(
+        filenames=sound_files, expected_sample_rate=16000
+    )
+    waves = [w.to(device) for w in waves]
+
+    features = fbank(waves)
+    feature_lengths = [f.size(0) for f in features]
+    
+    features = pad_sequence(features, batch_first=True, padding_value=math.log(1e-10))
+    feature_lengths = torch.tensor(feature_lengths, device=device)
+
+    encoder_out, encoder_out_lens, middle_out = model.forward_encoder(features, feature_lengths, return_middle_out=True)
     
     import os
     root_dir = "/star-xy/data/LibriSpeech/test-other"
@@ -246,6 +260,7 @@ def main():
         waves = read_sound_files(
             filenames=sound_files, expected_sample_rate=16000
         )
+        waves = waves[:30]
         waves = [w.to(device) for w in waves]
         
         features = fbank(waves)
@@ -255,10 +270,24 @@ def main():
         feature_lengths = torch.tensor(feature_lengths, device=device)
         
         # forward encoder
-        encoder_out, encoder_out_lens = model.forward_encoder(features, feature_lengths)
+        encoder_out, encoder_out_lens, middle_out = model.forward_encoder(features, feature_lengths, return_middle_out=True)
 
         # forward ecapa
-        ecapa_embeddings = model.forward_ecapa(encoder_out, encoder_out_lens)
+        if params.speaker_input_idx == -1:
+            ecapa_embeddings = model.forward_ecapa(
+                encoder_out, # (N,T,C)
+                encoder_out_lens,
+            )
+        else:
+            ecapa_input_embeddings = middle_out[params.speaker_input_idx] # a list of (T,N,C)
+            # ecapa_input_embeddings = torch.mean(torch.stack(ecapa_input_embeddings), dim=0)
+            ecapa_input_embeddings = sum(ecapa_input_embeddings) / len(ecapa_input_embeddings)
+            ecapa_input_embeddings = ecapa_input_embeddings.permute(1,0,2)
+
+            ecapa_embeddings = model.forward_ecapa(
+                ecapa_input_embeddings,
+                encoder_out_lens,
+            )
         
         for i in range(len(waves)):
             for j in range(len(waves)):
