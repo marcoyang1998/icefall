@@ -234,10 +234,7 @@ def inference_one_batch(
     
     encoder_out, encoder_out_lens, _ = model.forward_encoder(feature, feature_lens, return_middle_out=True)
     
-    # speaker
     audio_logits = model.forward_beats(encoder_out, encoder_out_lens)
-    # sample_mean = audio_logits.mean(dim=-1)
-    # audio_logits -= sample_mean.unsqueeze(-1)
     audio_logits = audio_logits.sigmoid().detach().cpu()
     
     return audio_logits, label
