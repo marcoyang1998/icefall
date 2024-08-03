@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from lhotse import load_manifest_lazy, load_manifest, CutSet
 from lhotse.supervision import SupervisionSegment
+from lhotse.array import Array, TemporalArray
 
 from typing import List
 
@@ -189,7 +190,9 @@ def add_dummy_embeddings_and_taskID(input_manifest, output_manifest, whisper_dim
     # ASR: 0
     # SV: 1
     # AT：2
+    # Music: 3
     from lhotse.features.io import NumpyHdf5Writer
+    from lhotse.utils import uuid4
 
     cuts = load_manifest_lazy(input_manifest)
     logging.info(f"Finish loading the manifest")
@@ -199,7 +202,9 @@ def add_dummy_embeddings_and_taskID(input_manifest, output_manifest, whisper_dim
     dummy_ecapa_embedding = np.random.rand(1, 192) # (1, 192)
     dummy_beats_embedding = np.random.rand(527) # (527)
     
-    dummy_whisper_path = f"dummy_whisper_embedding_{T}.h5"
+    dummy_embedding_folder = "data/dummy_embeddings"
+    
+    dummy_whisper_path = f"{dummy_embedding_folder}/dummy_whisper_embedding_{T}_{uuid4()}.h5"
     assert not os.path.exists(dummy_whisper_path)
     with NumpyHdf5Writer(f"dummy_whisper_embedding_{T}.h5") as writer:
         dummy_whisper_embedding = writer.store_array(
@@ -241,6 +246,42 @@ def add_dummy_embeddings_and_taskID(input_manifest, output_manifest, whisper_dim
 
     logging.info(f"Saved manifest to {output_manifest}") 
     cuts.to_jsonl(output_manifest)
+    
+def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
+    whisper_embedding_dict = {
+        'array': {'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_whisper_embedding_1510_63a0d00c-8c49-4587-abbb-ba0e82d28730.h5', 'storage_key': 'dummy_whisper_embedding_{T}', 'shape': [1510, 1280]}, 'temporal_dim': 0, 'frame_shift': 0.02, 'start': 0
+    }
+    whisper_dummy_embedding = TemporalArray.from_dict(whisper_embedding_dict)
+    
+    beats_embedding_dict = {
+        'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_beats_embedding_92f11995-6b96-48a6-af79-0316dafee432.h5', 'storage_key': 'dummy_beats_embedding', 'shape': [527]
+    }
+    beats_dummy_embedding = Array.from_dict(beats_embedding_dict)
+    
+    ecapa_embedding_dict = {
+        'storage_type': 'numpy_hdf5', 'storage_path': 'dummy_ecapa_embedding.h5', 'storage_key': 'dummy_ecapa_embedding', 'shape': [1, 192]
+    }
+    ecapa_dummy_embedding = Array.from_dict(ecapa_embedding_dict)
+    
+    mert_embedding_dict = {
+        'array': {'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_mert_embedding_2260.h5', 'storage_key': 'dummy_mert_embedding', 'shape': [2260, 1024]}, 'temporal_dim': 0, 'frame_shift': 0.013333333333333334, 'start': 0
+    }
+    mert_dummy_embedding = TemporalArray.from_dict(mert_embedding_dict)
+    
+    def add_embeddings(c):
+        if not c.has_custom("whisper_embedding"):
+            c.whisper_embedding = whisper_dummy_embedding
+        if not c.has_custom("ecapa_embedding"):
+            c.ecapa_embedding = ecapa_dummy_embedding
+        if not c.has_custom("beats_embedding"):
+            c.beats_embedding = beats_dummy_embedding
+        if not c.has_custom("mert_embedding"):
+            c.mert_embedding = mert_dummy_embedding
+        c.task_id = task_ID
+        return c
+    
+    c = add_embeddings(c)
+    return c
 
 if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
@@ -285,11 +326,25 @@ if __name__=="__main__":
     
 
     ######## For adding dummy embeddings
-    input_manifest = "data/fbank_vox1/cuts_vox1_test-with-1-embeddings.jsonl.gz"
-    output_manifest = "data/fbank_vox1/cuts_vox1_test-with-3-embeddings.jsonl.gz"
-    add_dummy_embeddings_and_taskID(
-        input_manifest=input_manifest,
-        output_manifest=output_manifest,
-        whisper_dim=1280,
-        task_ID=1,
-    )
+    # input_manifest = "data/fbank_vox1/cuts_vox1_test-with-1-embeddings.jsonl.gz"
+    # output_manifest = "data/fbank_vox1/cuts_vox1_test-with-3-embeddings.jsonl.gz"
+    # add_dummy_embeddings_and_taskID(
+    #     input_manifest=input_manifest,
+    #     output_manifest=output_manifest,
+    #     whisper_dim=1280,
+    #     task_ID=1,
+    # )
+    
+    from lhotse.features.io import NumpyHdf5Writer
+    T = 2260
+    mert_dim = 1024
+    dummy_mert_embedding = np.random.rand(T, mert_dim)
+    with NumpyHdf5Writer(f"data/dummy_embeddings/dummy_mert_embedding_{T}.h5") as writer:
+        dummy_mert_embedding = writer.store_array(
+            key="dummy_mert_embedding",
+            value=dummy_mert_embedding,
+            temporal_dim=0,
+            frame_shift=1/75,
+            start=0,
+        )
+        print(dummy_mert_embedding.to_dict())
