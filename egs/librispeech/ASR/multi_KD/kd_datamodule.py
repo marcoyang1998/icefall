@@ -212,6 +212,21 @@ class LibriSpeechKDDataModule:
             choices=["vox1", "vox2", "only_vox2"],
             help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
         )
+        
+        group.add_argument(
+            "--use-fma",
+            type=str2bool,
+            default=False,
+            help="If use fma as training set.",
+        )
+
+        group.add_argument(
+            "--fma-subset",
+            type=str,
+            default="large",
+            choices=["medium", "large"],
+            help="Which subset of fma to use.",
+        )
 
         group.add_argument(
             "--manifest-dir",
@@ -400,6 +415,12 @@ class LibriSpeechKDDataModule:
             type=str,
             default="small.en",
             help="The version of whisper to be used"
+        )
+        
+        group.add_argument(
+            "--use-mert",
+            type=str2bool,
+            default=False,
         )
 
     def train_dataloaders(
@@ -692,6 +713,12 @@ class LibriSpeechKDDataModule:
     def train_all_shuf_cuts_no_KD(self) -> CutSet:
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
+        )
+
+    @lru_cache()
+    def fma_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_fma_{self.args.fma_subset}-with-mert.jsonl.gz"
         )
 
     @lru_cache()
