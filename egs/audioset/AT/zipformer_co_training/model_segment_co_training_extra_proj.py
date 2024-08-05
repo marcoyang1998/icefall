@@ -282,6 +282,19 @@ class AudioTaggingModel(nn.Module):
 
         return logits
 
+    def _forward_audio_tagging(self, encoder_out, encoder_out_lens, level: str):
+        if level == "clip":
+            logits = self.classifier(encoder_out)  # (N, T, num_classes)
+        elif level == "segment":
+            logits = self.segment_classifier(encoder_out)  # (N, T, num_classes)
+        padding_mask = make_pad_mask(encoder_out_lens)
+        logits[padding_mask] = 0
+        logits = logits.sum(dim=1)  # mask the padding frames
+        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(
+            logits
+        )  # normalize the logits
+        return logits
+
 def downsample_mask_indices(mask, pooling_type: str="avg"):
     if pooling_type == "avg":
         # Equivalent to the Conv2dSubsampling
