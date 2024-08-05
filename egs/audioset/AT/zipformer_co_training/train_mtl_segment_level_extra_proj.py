@@ -191,6 +191,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--feature-dim",
+        type=int,
+        default=80,
+        help="The input feature dimension",
+    )
+
+    parser.add_argument(
         "--chunk-size",
         type=str,
         default="16,32,64,-1",
@@ -512,7 +519,6 @@ def get_params() -> AttributeDict:
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
-            "feature_dim": 80,
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
