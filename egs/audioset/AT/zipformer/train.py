@@ -216,6 +216,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "--num-events", type=int, default=527, help="Number of sound events"
     )
 
+    parser.add_argument(
+        "--feature-dim",
+        type=int,
+        default=80,
+    )
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -440,7 +446,6 @@ def get_params() -> AttributeDict:
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
-            "feature_dim": 80,
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
