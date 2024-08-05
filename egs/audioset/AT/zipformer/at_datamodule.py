@@ -206,6 +206,18 @@ class AudioSetATDatamodule:
         )
 
         group.add_argument(
+            "--features-mask-size",
+            type=int,
+            default=100,
+        )
+
+        group.add_argument(
+            "--frames-mask-size",
+            type=int,
+            default=27,
+        )
+
+        group.add_argument(
             "--enable-musan",
             type=str2bool,
             default=True,
@@ -275,9 +287,9 @@ class AudioSetATDatamodule:
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
+                    features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
-                    frames_mask_size=100,
+                    frames_mask_size=self.args.frames_mask_size,
                 )
             )
         else:
@@ -450,6 +462,34 @@ class AudioSetATDatamodule:
         return cuts
 
     @lru_cache()
+    def audioset_KD_train_cuts(self, teacher: str = "CED") -> CutSet:
+        logging.info("About to get the audioset training cuts.")
+        if not self.args.weighted_sampler:
+            balanced_cuts = load_manifest_lazy(
+                self.args.manifest_dir / f"cuts_audioset_balanced-with-{teacher}-embeddings.jsonl.gz"
+            )
+            if self.args.audioset_subset == "full":
+                unbalanced_cuts = load_manifest_lazy(
+                    self.args.manifest_dir / f"cuts_audioset_unbalanced-with-{teacher}-embeddings.jsonl.gz"
+                )
+                cuts = CutSet.mux(
+                    balanced_cuts,
+                    unbalanced_cuts,
+                    weights=[20000, 2000000],
+                    stop_early=True,
+                )
+            else:
+                cuts = balanced_cuts
+        else:
+            # assert self.args.audioset_subset == "full", "Only do weighted sampling for full AudioSet"
+            manifest_dir = self.args.manifest_dir / f"cuts_audioset_{self.args.audioset_subset}-with-{teacher}-embeddings.jsonl.gz"
+            logging.info(f"Start to load {manifest_dir}")
+            cuts = load_manifest(manifest_dir)
+            logging.info(f"Get {len(cuts)} cuts in total.")
+
+        return cuts
+
+    @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
         logging.info("About to get audioset eval all cuts")
         return load_manifest_lazy(
@@ -460,6 +500,7 @@ class AudioSetATDatamodule:
     def audioset_sampling_weights(self):
         logging.info(f"About to get the sampling weight for {self.args.audioset_subset} in AudioSet")
         weights = []
+        weight_file = self.args.manifest_dir / f"sample_weights_{self.args.audioset_subset}.txt"
         with open(self.args.manifest_dir / f"sample_weights_{self.args.audioset_subset}.txt", "r") as f:
             while True:
                 line = f.readline()
