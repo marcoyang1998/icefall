@@ -1765,3 +1765,136 @@ class AudioTaggingModel(nn.Module):
 
         return logits
 
+
+
+class GenreClassificationModel(nn.Module):
+    def __init__(
+        self,
+        encoder_embed: nn.Module,
+        encoder: EncoderInterface,
+        encoder_dim: int = 384,
+        num_genres: int = 10,
+        freeze_encoder: bool = False,
+    ):
+        """An audio tagging model
+
+        - Connectionist temporal classification: labelling unsegmented sequence data with recurrent neural networks (http://imagine.enpc.fr/~obozinsg/teaching/mva_gm/papers/ctc.pdf)
+        - Sequence Transduction with Recurrent Neural Networks (https://arxiv.org/pdf/1211.3711.pdf)
+        - Pruned RNN-T for fast, memory-efficient ASR training (https://arxiv.org/pdf/2206.13236.pdf)
+
+        Args:
+          encoder_embed:
+            It is a Convolutional 2D subsampling module. It converts
+            an input of shape (N, T, idim) to an output of of shape
+            (N, T', odim), where T' = (T-3)//2-2 = (T-7)//2.
+          encoder:
+            It is the transcription network in the paper. Its accepts
+            two inputs: `x` of (N, T, encoder_dim) and `x_lens` of shape (N,).
+            It returns two tensors: `logits` of shape (N, T, encoder_dim) and
+            `logit_lens` of shape (N,).
+          decoder:
+            It is the prediction network in the paper. Its input shape
+            is (N, U) and its output shape is (N, U, decoder_dim).
+            It should contain one attribute: `blank_id`.
+            It is used when use_transducer is True.
+          joiner:
+            It has two inputs with shapes: (N, T, encoder_dim) and (N, U, decoder_dim).
+            Its output shape is (N, T, U, vocab_size). Note that its output contains
+            unnormalized probs, i.e., not processed by log-softmax.
+            It is used when use_transducer is True.
+          use_transducer:
+            Whether use transducer head. Default: True.
+          use_ctc:
+            Whether use CTC head. Default: False.
+        """
+        super().__init__()
+
+        assert isinstance(encoder, EncoderInterface), type(encoder)
+
+        self.encoder_embed = encoder_embed
+        self.encoder = encoder
+        self.encoder_dim = encoder_dim
+
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Linear(encoder_dim, num_genres),
+        ) # 10 classes
+        
+        # for multi-class classification
+        self.criterion = torch.nn.CrossEntropyLoss(reduction="sum")
+        self.freeze_encoder = freeze_encoder
+
+    def forward_encoder(
+        self, x: torch.Tensor, x_lens: torch.Tensor, return_middle_out: bool=True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute encoder outputs.
+        Args:
+          x:
+            A 3-D tensor of shape (N, T, C).
+          x_lens:
+            A 1-D tensor of shape (N,). It contains the number of frames in `x`
+            before padding.
+
+        Returns:
+          encoder_out:
+            Encoder output, of shape (N, T, C).
+          encoder_out_lens:
+            Encoder output lengths, of shape (N,).
+        """
+        # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
+        x, x_lens = self.encoder_embed(x, x_lens)
+        # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
+
+        src_key_padding_mask = make_pad_mask(x_lens)
+        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+
+        encoder_out, encoder_out_lens, _ = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out)
+
+        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
+        assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
+
+        return encoder_out, encoder_out_lens, _
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        target: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+          x:
+            A 3-D tensor of shape (N, T, C).
+          x_lens:
+            A 1-D tensor of shape (N,). It contains the number of frames in `x`
+            before padding.
+          target:
+            The ground truth label of audio events, could be many hot
+        Returns:
+          Return the binary crossentropy loss
+        """
+        assert x.ndim == 3, x.shape
+        assert x_lens.ndim == 1, x_lens.shape
+
+        # Compute encoder outputs
+        with torch.set_grad_enabled(not self.freeze_encoder):
+            if self.freeze_encoder: # If freezing the encoder, set them to eval mode
+                self.encoder.eval()
+                self.encoder_embed.eval()
+            encoder_out, encoder_out_lens, _ = self.forward_encoder(x, x_lens, return_middle_out=True)
+        
+        # Forward the classifier
+        logits = self.forward_genre_classification(encoder_out, encoder_out_lens)
+        loss = self.criterion(logits, target)
+
+        return loss
+
+    def forward_genre_classification(self, encoder_out, encoder_out_lens):
+        logits = self.classifier(encoder_out) # (N, T, num_classes)
+        padding_mask = make_pad_mask(encoder_out_lens)
+        logits[padding_mask] = 0
+        logits = logits.sum(dim=1)
+        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits)
+
+        return logits
+
