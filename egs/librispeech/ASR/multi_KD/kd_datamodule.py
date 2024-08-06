@@ -716,9 +716,39 @@ class LibriSpeechKDDataModule:
         )
 
     @lru_cache()
-    def fma_cuts(self) -> CutSet:
+    def fma_train_cuts(self) -> CutSet:
         return load_manifest_lazy(
-            self.args.manifest_dir / f"cuts_fma_{self.args.fma_subset}-with-mert.jsonl.gz"
+            self.args.manifest_dir / f"cuts_fma_{self.args.fma_subset}_train-with-mert.jsonl.gz"
+        )
+
+    @lru_cache()
+    def fma_val_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_fma_{self.args.fma_subset}_validation-with-mert.jsonl.gz"
+        )
+
+    @lru_cache()
+    def fma_test_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_fma_{self.args.fma_subset}_test-with-mert.jsonl.gz"
+        )
+
+    @lru_cache()
+    def gtzan_train_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_gtzan_train.jsonl.gz"
+        )
+
+    @lru_cache()
+    def gtzan_test_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_gtzan_test.jsonl.gz"
+        )
+
+    @lru_cache()
+    def gtzan_dev_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"cuts_gtzan_dev.jsonl.gz"
         )
 
     @lru_cache()
