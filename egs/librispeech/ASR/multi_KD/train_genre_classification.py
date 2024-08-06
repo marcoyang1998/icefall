@@ -72,19 +72,19 @@ from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model import AsrModel
+from model import GenreClassificationModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
-from subsampling import Conv2dSubsampling
+from subsampling_bf16 import Conv2dSubsampling
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from train_multi_KD_with_mert_bf16 import get_encoder_embed, get_encoder_model
-from utils import compare_model, str2multihot, ced2beats_mapping
+from utils import compare_model
 
-from zipformer import Zipformer2
+from zipformer_bf16 import Zipformer2
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -105,6 +105,14 @@ from icefall.utils import (
 )
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
+
+def genre2id(target):
+    # convert a list of genre names to a tensor
+    genres = 'blues classical country disco hiphop jazz metal pop reggae rock'.split()
+    genres = {g: i for i, g in enumerate(genres)}
+    target = [genres[t] for t in target]
+
+    return torch.tensor(target)
 
 
 def get_adjusted_batch_count(params: AttributeDict) -> float:
@@ -252,23 +260,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--decoder-dim",
-        type=int,
-        default=512,
-        help="Embedding dimension in the decoder model.",
-    )
-
-    parser.add_argument(
-        "--joiner-dim",
-        type=int,
-        default=512,
-        help="""Dimension used in the joiner model.
-        Outputs from the encoder and decoder model are projected
-        to this dimension before adding.
-        """,
-    )
-
-    parser.add_argument(
         "--causal",
         type=str2bool,
         default=False,
@@ -331,6 +322,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "--encoder-lr-scale",
         type=float,
         default=1.0,
+    )
+
+    parser.add_argument(
+        "--num-genres",
+        type=int,
+        default=10,
     )
 
 
@@ -397,13 +394,6 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--bpe-model",
-        type=str,
-        default="data/lang_bpe_500/bpe.model",
-        help="Path to the BPE model",
-    )
-
-    parser.add_argument(
         "--base-lr", type=float, default=0.045, help="The base learning rate."
     )
 
@@ -429,44 +419,6 @@ def get_parser():
         default=600,
         help="Reference batch duration for purposes of adjusting batch counts for setting various "
         "schedules inside the model",
-    )
-
-    parser.add_argument(
-        "--context-size",
-        type=int,
-        default=2,
-        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
-    )
-
-    parser.add_argument(
-        "--am-scale",
-        type=float,
-        default=0.0,
-        help="The scale to smooth the loss with am (output of encoder network)" "part.",
-    )
-
-    parser.add_argument(
-        "--simple-loss-scale",
-        type=float,
-        default=0.5,
-        help="To get pruning ranges, we will calculate a simple version"
-        "loss(joiner is just addition), this simple loss also uses for"
-        "training (as a regularization item). We will scale the simple loss"
-        "with this parameter before adding to the final loss.",
-    )
-
-    parser.add_argument(
-        "--ctc-loss-scale",
-        type=float,
-        default=0.2,
-        help="Scale for CTC loss.",
-    )
-
-    parser.add_argument(
-        "--audio-tagging-loss-scale",
-        type=float,
-        default=1.0,
-        help="Scale for audio tagging loss.",
     )
 
     parser.add_argument(
@@ -532,6 +484,20 @@ def get_parser():
         type=str2bool,
         default=False,
         help="Whether to use half precision training.",
+    )
+
+    parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="Whether to use half precision training.",
+    )
+
+    parser.add_argument(
+        "--full-bf16",
+        type=str2bool,
+        default=True,
+        help="If enabled, use pure bf16 training without using autocast and grad scaling"
     )
 
     parser.add_argument(
@@ -657,71 +623,18 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 
-def get_decoder_model(params: AttributeDict) -> nn.Module:
-    decoder = Decoder(
-        vocab_size=params.vocab_size,
-        decoder_dim=params.decoder_dim,
-        blank_id=params.blank_id,
-        context_size=params.context_size,
-    )
-    return decoder
-
-
-def get_joiner_model(params: AttributeDict) -> nn.Module:
-    joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
-        decoder_dim=params.decoder_dim,
-        joiner_dim=params.joiner_dim,
-        vocab_size=params.vocab_size,
-    )
-    return joiner
-
-def get_encoder_final_projection(params: AttributeDict) -> nn.Module:
-    layer = nn.Linear(
-        max(_to_int_tuple(params.encoder_dim)),
-        params.encoder_projection_dim,
-    )
-    return layer
-
 
 def get_model(params: AttributeDict) -> nn.Module:
-    assert params.use_transducer or params.use_ctc, (
-        f"At least one of them should be True, "
-        f"but got params.use_transducer={params.use_transducer}, "
-        f"params.use_ctc={params.use_ctc}"
-    )
-
+    
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
-    if params.use_transducer:
-        decoder = get_decoder_model(params)
-        joiner = get_joiner_model(params)
-    else:
-        decoder = None
-        joiner = None
-
-    if params.use_encoder_projection:
-        encoder_proj = get_encoder_final_projection(params)
-    else:
-        encoder_proj = None
-
-    model = AsrModel(
+    model = GenreClassificationModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
-        decoder=decoder,
-        joiner=joiner,
-        encoder_projection=encoder_proj,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)) if not params.use_encoder_projection else params.encoder_projection_dim,
-        audio_tagging_input_dim=max(_to_int_tuple(params.encoder_dim)),
-        decoder_dim=params.decoder_dim,
-        vocab_size=params.vocab_size,
-        use_transducer=params.use_transducer,
-        use_ctc=params.use_ctc,
-        do_audio_tagging=params.do_audio_tagging,
         freeze_encoder=params.freeze_encoder,
-        freezing_encoder_layer_index=params.freezing_encoder_layer_index,
-        freeze_encoder_steps=params.freeze_encoder_steps,
+        num_genres=params.num_genres,
     )
     return model
 
@@ -916,68 +829,26 @@ def compute_loss(
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
+    if params.full_bf16:
+        feature = feature.to(torch.bfloat16)
 
     supervisions = batch["supervisions"]
+    cuts = supervisions["cut"]
     feature_lens = supervisions["num_frames"].to(device)
 
-    # audio tagging label
-    events = supervisions["audio_event"] # the label indices are in CED format
-    if params.beats_label:
-        audio_tagging_label, _ = str2multihot(events, id_mapping=ced2beats_mapping)
-    else:
-        audio_tagging_label, _ = str2multihot(events)
-    audio_tagging_label = audio_tagging_label.to(device)
+    # genre label
+    genres = [c.supervisions[0].genre for c in cuts]
+    target = genre2id(genres)
+    target = target.to(device)
 
-    batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
 
-    texts = batch["supervisions"]["text"]
-    y = sp.encode(texts, out_type=int)
-    y = k2.RaggedTensor(y)
-
-    # 0 for ASR & SV, 1 for audio tagging
-    task_id = torch.tensor([1 if t[:5] == "Dummy" else 0 for t in texts]).to(device)
-
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss, audio_tagging_loss = model(
+        loss = model(
             x=feature,
             x_lens=feature_lens,
-            audio_tagging_label=audio_tagging_label,
-            y=y,
-            prune_range=params.prune_range,
-            am_scale=params.am_scale,
-            lm_scale=params.lm_scale,
-            reduction="none",
-            batch_idx=batch_idx_train,
+            target=target
         )
-
-        loss = 0.0
-
-        simple_loss = (simple_loss * (1 - task_id)).sum()
-        pruned_loss = (pruned_loss * (1 - task_id)).sum()
-        audio_tagging_loss = (audio_tagging_loss.sum(dim=-1) * task_id).sum()
-
-        if params.use_transducer:
-            s = params.simple_loss_scale
-            # take down the scale on the simple loss from 1.0 at the start
-            # to params.simple_loss scale by warm_step.
-            simple_loss_scale = (
-                s
-                if batch_idx_train >= warm_step
-                else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
-            )
-            pruned_loss_scale = (
-                1.0
-                if batch_idx_train >= warm_step
-                else 0.1 + 0.9 * (batch_idx_train / warm_step)
-            )
-            loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
-
-        if params.use_ctc:
-            loss += params.ctc_loss_scale * ctc_loss
-
-        if params.do_audio_tagging:
-            loss += params.audio_tagging_loss_scale * audio_tagging_loss
 
     assert loss.requires_grad == is_training
 
@@ -988,13 +859,6 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.use_transducer:
-        info["simple_loss"] = simple_loss.detach().cpu().item()
-        info["pruned_loss"] = pruned_loss.detach().cpu().item()
-    if params.use_ctc:
-        info["ctc_loss"] = ctc_loss.detach().cpu().item()
-    if params.do_audio_tagging:
-        info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1105,7 +969,7 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_autocast):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1165,7 +1029,7 @@ def train_one_epoch(
                 rank=rank,
             )
 
-        if batch_idx % 100 == 0 and params.use_fp16:
+        if batch_idx % 100 == 0 and params.use_autocast:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
             # of the grad scaler is configurable, but we can't configure it to have different
             # behavior depending on the current grad scale.
@@ -1186,14 +1050,14 @@ def train_one_epoch(
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
+            cur_grad_scale = scaler._scale.item() if params.use_autocast else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, "
                 f"batch {batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
+                + (f"grad_scale: {scaler._scale.item()}" if params.use_autocast else "")
             )
 
             if tb_writer is not None:
@@ -1205,7 +1069,7 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
-                if params.use_fp16:
+                if params.use_autocast:
                     tb_writer.add_scalar(
                         "train/grad_scale", cur_grad_scale, params.batch_idx_train
                     )
@@ -1268,16 +1132,7 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
-
-    if not params.use_transducer:
-        params.ctc_loss_scale = 1.0
-
+    sp = None
     logging.info(params)
 
     if params.freezing_encoder_layer_index == "-1":
@@ -1300,8 +1155,6 @@ def run(rank, world_size, args):
         model_avg = copy.deepcopy(model).to(torch.float64)
 
     if params.do_finetune:
-        assert params.beats_label, "The pre-trained model use BEATs index for label, but you are using CED label!"
-            
         assert params.start_epoch == 1, "Finetune need to start from epoch 0"
         if params.init_modules is None:
             logging.info(f"Init modules is not specified! Trying to load the whole model!")
@@ -1313,10 +1166,7 @@ def run(rank, world_size, args):
             # model_avg is only used with rank 0
             compare_model(model.state_dict(), model_avg.state_dict())
             model_avg = copy.deepcopy(model).to(torch.float64)
-
     else:
-        logging.info(f"Using BEATs labels {params.beats_label}")
-
         assert params.start_epoch > 0, params.start_epoch
         checkpoints = load_checkpoint_if_available(
             params=params, model=model, model_avg=model_avg
@@ -1330,6 +1180,21 @@ def run(rank, world_size, args):
         logging.info(f"Also setting the lr scale of the projection layer to {params.encoder_lr_scale}")
         model.encoder_projection.lr_scale = params.encoder_lr_scale
 
+    if params.use_fp16:
+        params.dtype = torch.float16 if not params.use_bf16 else torch.bfloat16
+        params.use_autocast = True
+    else:
+        params.dtype = torch.float32
+        params.use_autocast = False
+        
+    if params.full_bf16:
+        assert params.use_bf16
+        params.use_autocast = False # use full bf16 training, no autocast and grad scaling
+
+    logging.info(f"Training using: {params.dtype}")
+    if not params.use_autocast:
+        model.to(params.dtype)
+    
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
@@ -1375,79 +1240,16 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
+    def add_dummy_text(c):
+        if c.supervisions[0].text is None:
+            c.supervisions[0].text = "This is just dummy text!"
+        return c
+    
     librispeech = LibriSpeechKDDataModule(args)
 
-    if not params.full_libri: 
-        train_cuts = librispeech.train_clean_100_cuts()
-        librispeech_cuts_len = 28539 * 3
-    else:
-        train_cuts = librispeech.train_all_shuf_cuts_no_KD()
-        librispeech_cuts_len = 281239 * 3
-
-    if params.use_audioset and params.do_audio_tagging:
-        logging.info(f"Getting audioset cuts")
-        audioset_cuts = librispeech.audioset_cuts()
-        audioset_cuts_lens = {
-            "balanced": 21155,
-            "unbalanced": 1883591 + 21155
-        }
-        logging.info(f"Using mux to combine Librispeech with audioset")
-        train_cuts = CutSet.mux(
-            train_cuts,
-            audioset_cuts,
-            weights=[
-                librispeech_cuts_len,
-                audioset_cuts_lens[params.audioset_subset]
-            ],
-            stop_early=params.stop_early,
-        )
-
-    logging.info(train_cuts)
-
-    def add_dummy_text(c: Cut):
-        if c.supervisions[0].text is None:
-            c.supervisions[0].text = "Dummy text added as a place holder. Please ignore this if possible"
-        return c
-
-    def remove_short_and_long_utt(c: Cut):
-        # Keep only utterances with duration between 1 second and 20 seconds
-        #
-        # Caution: There is a reason to select 20.0 here. Please see
-        # ../local/display_manifest_statistics.py
-        #
-        # You should use ../local/display_manifest_statistics.py to get
-        # an utterance duration distribution for your dataset to select
-        # the threshold
-        if c.duration < 1.0 or c.duration > 20.0:
-            # logging.warning(
-            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            # )
-            return False
-
-        # In pruned RNN-T, we require that T >= S
-        # where T is the number of feature frames after subsampling
-        # and S is the number of tokens in the utterance
-
-        # In ./zipformer.py, the conv module uses the following expression
-        # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
-
-        if T < len(tokens):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. "
-                f"Number of frames (before subsampling): {c.num_frames}. "
-                f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
-                f"Tokens: {tokens}. "
-                f"Number of tokens: {len(tokens)}"
-            )
-            return False
-
-        return True
-
+    train_cuts = librispeech.gtzan_train_cuts().repeat(5)
     train_cuts = train_cuts.map(add_dummy_text)
-    train_cuts = train_cuts.filter(remove_short_and_long_utt)
+    logging.info(train_cuts)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1460,10 +1262,8 @@ def run(rank, world_size, args):
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
-    valid_cuts = librispeech.dev_clean_cuts_no_KD()
-    valid_cuts += librispeech.dev_other_cuts_no_KD()
-    if params.use_audioset:
-        valid_cuts += librispeech.audioset_eval_cuts_no_KD()
+    valid_cuts = librispeech.gtzan_dev_cuts()
+    valid_cuts += librispeech.gtzan_test_cuts()
     valid_cuts = valid_cuts.map(add_dummy_text)
 
     logging.info(valid_cuts)
@@ -1478,7 +1278,7 @@ def run(rank, world_size, args):
     #         params=params,
     #     )
 
-    scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
+    scaler = GradScaler(enabled=params.use_autocast, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
         logging.info("Loading grad scaler state dict")
         scaler.load_state_dict(checkpoints["grad_scaler"])
@@ -1557,10 +1357,6 @@ def display_and_save_batch(
 
     logging.info(f"features shape: {features.shape}")
 
-    y = sp.encode(supervisions["text"], out_type=int)
-    num_tokens = sum(len(i) for i in y)
-    logging.info(f"num tokens: {num_tokens}")
-
 
 def scan_pessimistic_batches_for_oom(
     model: Union[nn.Module, DDP],
@@ -1578,7 +1374,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_autocast):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
