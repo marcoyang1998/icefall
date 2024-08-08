@@ -879,10 +879,8 @@ def compute_loss(
                 task_id = torch.tensor([c.task_id for c in cuts]).to(device)
             except:
                 task_id = torch.tensor([0 for _ in cuts]).to(device)
-            import pdb; pdb.set_trace()
             if random.random() < 0.05:
-                logging.info(cut_ids)
-                logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS+wenet, {sum(task_id==1)} from Vox, {sum(task_id==2)} from AS, {sum(task_id==3)} from Music")
+                logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS+wenet, {sum(task_id==1)} from Vox, {sum(task_id==2)} from AS, {sum(task_id==3)} from FMA")
         else:
             task_id = None
     else:
@@ -1385,11 +1383,10 @@ def run(rank, world_size, args):
             "medium": 24979,
             "large": 106394,
         }
-        fma_cuts = librispeech.fma_cuts().repeat(
+        fma_cuts = librispeech.fma_train_cuts().repeat(
             times=params.repeat_fma,
             preserve_id=False,
         )
-        import pdb; pdb.set_trace()
         fma_cuts = fma_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 3)) # music task ID=3
         train_cuts.append(fma_cuts)
         sampling_weights.append(fma_cuts_lens[params.fma_subset] * params.repeat_fma)
@@ -1452,7 +1449,7 @@ def run(rank, world_size, args):
         asr_valid_cuts = librispeech.dev_clean_cuts()
         asr_valid_cuts += librispeech.dev_other_cuts()
 
-        asr_valid_cuts = asr_valid_cuts.map(partial(_set_task_id, 0))
+        asr_valid_cuts = asr_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0))
         asr_valid_cuts = asr_valid_cuts.filter(remove_short_and_long_utt)
         asr_valid_dl = librispeech.valid_dataloaders(asr_valid_cuts)
         
@@ -1486,6 +1483,16 @@ def run(rank, world_size, args):
         at_valid_dl = librispeech.valid_dataloaders(at_eval_cuts)
         
         valid_sets.append("AT_audioset")
+        valid_dls.append(at_valid_dl)
+
+    # fma
+    if params.use_fma:
+        fma_val_cuts = librispeech.fma_val_cuts()
+        fma_val_cuts = fma_val_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 3))
+        fma_val_cuts = fma_val_cuts.filter(remove_short_and_long_utt)
+        at_valid_dl = librispeech.valid_dataloaders(fma_val_cuts)
+        
+        valid_sets.append("Music_fma")
         valid_dls.append(at_valid_dl)
 
     logging.info(f"Validation sets: {valid_sets}")
