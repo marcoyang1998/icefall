@@ -480,6 +480,13 @@ def get_parser():
         default=False,
         help="Whether to use half precision training.",
     )
+
+    parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="Whether to use bfloat16 in AMP.",
+    )
     
     parser.add_argument(
         "--share-asr",
@@ -1027,7 +1034,7 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_fp16, dtype=params.dtype):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1200,9 +1207,13 @@ def run(rank, world_size, args):
     params.blank_id = sp.piece_to_id("<blk>")
     params.vocab_size = sp.get_piece_size()
 
-    if not params.use_transducer:
-        params.ctc_loss_scale = 1.0
-
+    if params.use_bf16:
+        assert torch.cuda.is_bf16_supported(), f"Your GPU does not support bf16!"
+        params.dtype = torch.bfloat16
+    else:
+        params.dtype = torch.float16
+    logging.info(f"Using dtype={params.dtype}")
+    
     logging.info(params)
 
     logging.info("About to create model")
@@ -1504,7 +1515,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_fp16, dtype=params.dtype):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
