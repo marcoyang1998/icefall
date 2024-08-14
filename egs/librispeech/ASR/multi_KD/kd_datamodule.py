@@ -210,7 +210,7 @@ class LibriSpeechKDDataModule:
             type=str,
             default="vox1",
             choices=["vox1", "vox2", "only_vox2"],
-            help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
+            help="Which subset of voxceleb to use. If vox2, then vox1 AND vox2 will be used.",
         )
         
         group.add_argument(
