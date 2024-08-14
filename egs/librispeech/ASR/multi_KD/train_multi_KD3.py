@@ -68,7 +68,8 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 from kd_datamodule import LibriSpeechKDDataModule
 from lhotse import load_manifest_lazy, CutSet
-from lhotse.cut import Cut
+from lhotse.cut import Cut, MonoCut
+from lhotse.dataset.collation import collate_custom_field
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_shift import MultiKDModel
@@ -840,7 +841,6 @@ def compute_loss(
             except:
                 task_id = torch.tensor([0 for _ in cuts]).to(device)
             if random.random() < 0.05:
-                logging.info(cut_ids)
                 logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS+wenet, {sum(task_id==1)} from Vox, {sum(task_id==2)} fro AS")
         else:
             task_id = None
@@ -851,10 +851,6 @@ def compute_loss(
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
-
-    # texts = batch["supervisions"]["text"]
-    # y = sp.encode(texts, out_type=int)
-    # y = k2.RaggedTensor(y)
 
     with torch.set_grad_enabled(is_training):
         beats_loss, ecapa_loss, whisper_loss, whisper_cb_loss = model(
@@ -890,8 +886,8 @@ def compute_loss(
         if params.use_whisper:
             if task_id is not None:
                 asr_mask = task_id == 0
-                mask = whisper_loss.abs() > 30
-                whisper_loss.clamp_(-30, 30) # loss clamping
+                # mask = whisper_loss.abs() > 30
+                # whisper_loss.clamp_(-30, 30) # loss clamping
                 
                 # nan_mask = whisper_loss.isnan()
                 # whisper_loss[nan_mask] = 0.0
@@ -1034,7 +1030,7 @@ def train_one_epoch(
         batch_size = len(batch["supervisions"]["text"])
 
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16, dtype=params.dtype):
+            with torch.cuda.amp.autocast(enabled=params.use_amp, dtype=params.dtype):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1094,7 +1090,7 @@ def train_one_epoch(
                 rank=rank,
             )
 
-        if batch_idx % 100 == 0 and params.use_fp16:
+        if batch_idx % 100 == 0 and params.use_amp:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
             # of the grad scaler is configurable, but we can't configure it to have different
             # behavior depending on the current grad scale.
@@ -1115,14 +1111,14 @@ def train_one_epoch(
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
+            cur_grad_scale = scaler._scale.item() if params.use_amp else 1.0
 
             logging.info(
                 f"Epoch {params.cur_epoch}, "
                 f"batch {batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
+                + (f"grad_scale: {scaler._scale.item()}" if params.use_amp else "")
             )
 
             if tb_writer is not None:
@@ -1212,6 +1208,7 @@ def run(rank, world_size, args):
         params.dtype = torch.bfloat16
     else:
         params.dtype = torch.float16
+    params.use_amp = params.use_bf16 or params.use_fp16
     logging.info(f"Using dtype={params.dtype}")
     
     logging.info(params)
@@ -1414,7 +1411,7 @@ def run(rank, world_size, args):
 
     logging.info(valid_sets)
 
-    scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
+    scaler = GradScaler(enabled=params.use_amp, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
         logging.info("Loading grad scaler state dict")
         scaler.load_state_dict(checkpoints["grad_scaler"])
@@ -1515,7 +1512,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16, dtype=params.dtype):
+            with torch.cuda.amp.autocast(enabled=params.use_amp, dtype=params.dtype):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
