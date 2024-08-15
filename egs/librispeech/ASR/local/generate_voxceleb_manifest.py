@@ -21,19 +21,19 @@ def get_parser():
     )
     
     parser.add_argument(
-        "--dataset-dir",
+        "--dataset",
         type=str,
-        default="downloads/vox1_test_wav"
+        choices=["vox1", "vox2"],
     )
     
     parser.add_argument(
         "--manifest-output-dir",
         type=str,
-        default="data/fbank/cuts_vox1_test.jsonl.gz"
+        default="data/fbank/cuts_vox1_dev.jsonl.gz"
     )
     
     parser.add_argument(
-        "--split",
+        "--part",
         type=str,
         default="dev",
         choices=["dev", "test"]
@@ -51,13 +51,16 @@ def main():
     parser = get_parser()
     args = parser.parse_args()
     
-    dataset_dir = args.dataset_dir
+    dataset = args.dataset
+    part = args.part
+    dataset_dir = f"download/{dataset}_{part}_wav"
     manifest_output_dir = args.manifest_output_dir
     feat_output_dir = args.feat_output_dir
     
     num_jobs = 15
     num_mel_bins = 80
     
+    import pdb; pdb.set_trace()
     if "vox1" in dataset_dir:
         audio_files = glob.glob(f"{dataset_dir}/*/*/*/*.wav")
         dataset = "vox1"
@@ -80,6 +83,16 @@ def main():
             channel=0,
             recording=recording,
         )
+        cut.supervisions = [
+            SupervisionSegment(
+                id=cut.id,
+                recording_id=cut.recording.id,
+                start=0.0,
+                channel=0,
+                duration=cut.duration,
+                speaker=cut.id.split('/')[0]
+            )
+        ]
         new_cuts.append(cut)
         
         if i % 100 == 0 and i:
@@ -93,7 +106,7 @@ def main():
     with get_executor() as ex:
         cuts = cuts.compute_and_store_features(
             extractor=extractor,
-            storage_path=f"{feat_output_dir}/{dataset}_{args.split}_feats",
+            storage_path=f"{feat_output_dir}/{dataset}_{args.part}_feats",
             num_jobs=num_jobs if ex is None else 80,
             executor=ex,
             storage_type=LilcomChunkyWriter,
@@ -125,7 +138,7 @@ if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
 
     logging.basicConfig(format=formatter, level=logging.INFO)
-    # main()
-    manifest = 'data/fbank/cuts_vox1.jsonl.gz'
-    output_manifest = 'data/fbank/cuts_vox1.jsonl.gz'
-    update_manifest(manifest, output_manifest)
+    main()
+    # manifest = 'data/fbank/cuts_vox1.jsonl.gz'
+    # output_manifest = 'data/fbank/cuts_vox1.jsonl.gz'
+    # update_manifest(manifest, output_manifest)
