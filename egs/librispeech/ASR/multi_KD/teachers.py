@@ -83,7 +83,7 @@ class WhisperTeacher(Teacher):
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
         x_lens: torch.Tensor, shape = (batch_size)
-        layer_idx:
+        layer_idx: which layer's feature to extract
         """
         x = F.gelu(self.model.conv1(x))
         x = F.gelu(self.model.conv2(x))
