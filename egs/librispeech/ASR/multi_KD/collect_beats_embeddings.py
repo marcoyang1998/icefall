@@ -17,7 +17,6 @@ from lhotse.features.io import NumpyHdf5Writer
 from lhotse.dataset import DynamicBucketingSampler, SimpleCutSampler, UnsupervisedWaveformDataset
 
 from BEATs import BEATs, BEATsConfig
-from Tokenizers import TokenizersConfig, Tokenizers
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -43,16 +42,16 @@ def get_parser():
     )
     
     parser.add_argument(
-        "--output-manifest",
+        "--manifest-name",
         type=str,
         required=True,
-        help="name of the manifest, e.g embeddings-dev-clean"
+        help="name of the manifest, e.g embeddings-balanced"
     )
     
     parser.add_argument(
         "--beats-ckpt",
         type=str,
-        default="data/models/BEATs/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt",
+        default="data/models/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt",
     )
     
     parser.add_argument(
@@ -60,28 +59,19 @@ def get_parser():
         type=str,
         default="data/embeddings"
     )
+
+    parser.add_argument(
+        "--target-manifest-file",
+        type=str,
+        required=True,
+        help="Where to store the manifest augmented with whisper features"
+    )
     
     return parser
     
-
-def tokenize():
-    checkpoint = torch.load('data/models/BEATs/Tokenizer_iter3_plus_AS20K.pt')
-
-    cfg = TokenizersConfig(checkpoint['cfg'])
-    BEATs_tokenizer = Tokenizers(cfg)
-    BEATs_tokenizer.load_state_dict(checkpoint['model'])
-    BEATs_tokenizer.eval()
-    BEATs_tokenizer.to("cuda")
-
-    # tokenize the audio and generate the labels
-    audio_input_16khz, _ = torchaudio.load('/star-xy/data/LibriSpeech/dev-clean/1272/128104/1272-128104-0000.flac')
-    padding_mask = torch.zeros_like(audio_input_16khz).bool()
-
-    labels = BEATs_tokenizer.extract_labels(audio_input_16khz, padding_mask=padding_mask)
-    print(labels)
     
 def get_embeddings():
-    checkpoint = torch.load('data/models/BEATs/BEATs_iter3_plus_AS2M.pt')
+    checkpoint = torch.load('data/models/BEATs_iter3_plus_AS2M.pt')
 
     cfg = BEATsConfig(checkpoint['cfg'])
     
@@ -108,11 +98,11 @@ def extract_embeddings(
     setup_logger(f"data/embeddings/log/log-beats-embeddings")
     if params.num_jobs > 1:
         manifest = manifest[rank]
-        output_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'{params.model_id}-{params.output_manifest}-{rank}.h5'
+        output_manifest = params.embedding_dir / f"{params.model_id}-{params.manifest_name}-{rank}.jsonl.gz"
+        embedding_path = params.embedding_dir / f'{params.model_id}-{params.manifest_name}-{rank}.h5'
     else:
-        output_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'{params.model_id}-{params.output_manifest}.h5'
+        output_manifest = params.embedding_dir / f"{params.model_id}-{params.manifest_name}.jsonl.gz"
+        embedding_path =  params.embedding_dir / f'{params.model_id}-{params.manifest_name}.h5'
     
     logging.info(params)
     
@@ -214,9 +204,9 @@ if __name__=="__main__":
     print(f"Finished loading manifest")
     
     params.model_id = params.beats_ckpt.split("/")[-1].replace(".pt", "")
-    target_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}.jsonl.gz"
+    embedding_manifest = params.embedding_dir / f"{params.model_id}-{params.manifest_name}.jsonl.gz"
     
-    if not target_manifest.exists():
+    if not embedding_manifest.exists():
         if nj == 1:
             extract_embeddings(
                 rank=0,
@@ -227,18 +217,20 @@ if __name__=="__main__":
             splitted_cuts = cuts.split(num_splits=nj)
             print(f"Finished splitting manifest")
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
-            manifests =  f"{str(params.embedding_dir)}/{params.model_id}-{params.output_manifest}-*.jsonl.gz"
-            os.system(f"lhotse combine {manifests} {target_manifest}")
+            manifests =  f"{str(params.embedding_dir)}/{params.model_id}-{params.manifest_name}-*.jsonl.gz"
+            os.system(f"lhotse combine {manifests} {embedding_manifest}")
     else:
         print(f"Skip embedding extraction: the manifest is already generated.")
     
-    output_manifest = params.input_manifest.replace(".jsonl.gz", "-with-beats-embeddings.jsonl.gz")
+    output_manifest = params.target_manifest_file
     if not os.path.exists(output_manifest):
         join_manifests(
             input_cuts=cuts,
-            embedding_manifest=target_manifest,
+            embedding_manifest=embedding_manifest,
             output_dir=output_manifest,
         )
+    else:
+        print("The output manifest file already exists!")
     
     
     

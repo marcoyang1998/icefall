@@ -18,7 +18,7 @@ from lhotse.dataset import DynamicBucketingSampler, SimpleCutSampler, Unsupervis
 
 import torch.nn.functional as F
 import torchaudio
-from speechbrain.pretrained import EncoderClassifier, SpeakerRecognition
+from speechbrain.pretrained import EncoderClassifier
 
 
 def get_parser():
@@ -39,10 +39,17 @@ def get_parser():
     )
     
     parser.add_argument(
-        "--output-manifest",
+        "--manifest-name",
         type=str,
         required=True,
         help="name of the manifest, e.g embeddings-dev-clean"
+    )
+
+    parser.add_argument(
+        "--target-manifest-file",
+        type=str,
+        required=True,
+        help="Where to store the manifest augmented with whisper features"
     )
     
     parser.add_argument(
@@ -102,11 +109,11 @@ def extract_embeddings(
     
     if params.num_jobs > 1:
         manifest = manifest[rank]
-        output_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'{params.model_id}_{params.output_manifest}-{rank}.h5'
+        output_manifest = params.embedding_dir / f"{params.model_id}-{params.manifest_name}-{rank}.jsonl.gz"
+        embedding_path = params.embedding_dir / f'{params.model_id}_{params.manifest_name}-{rank}.h5'
     else:
-        output_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'{params.model_id}_{params.output_manifest}.h5'
+        output_manifest = params.embedding_dir / f"{params.model_id}-{params.manifest_name}.jsonl.gz"
+        embedding_path =  params.embedding_dir / f'{params.model_id}_{params.manifest_name}.h5'
         
     dataset = UnsupervisedWaveformDataset(
         manifest
@@ -198,9 +205,9 @@ if __name__=="__main__":
     cuts = load_manifest(params.input_manifest)    
 
     params.model_id = "ecapa-tdnn" # for ecapa
-    target_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}.jsonl.gz"
+    embedding_manifest = params.embedding_dir / f"{params.model_id}-{params.manifest_name}.jsonl.gz"
     
-    if not target_manifest.exists():
+    if not embedding_manifest.exists():
         if nj == 1:
             extract_embeddings(
                 rank=0,
@@ -210,15 +217,15 @@ if __name__=="__main__":
         else:
             splitted_cuts = cuts.split(num_splits=nj)
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
-            manifests =  f"{str(params.embedding_dir)}/{params.model_id}-{params.output_manifest}-*.jsonl.gz"
-            os.system(f"lhotse combine {manifests} {target_manifest}")
+            manifests =  f"{str(params.embedding_dir)}/{params.model_id}-{params.manifest_name}-*.jsonl.gz"
+            os.system(f"lhotse combine {manifests} {embedding_manifest}")
     else:
         print(f"Skip embedding extraction: the manifest is already generated.")
 
-    output_manifest = params.input_manifest.replace(".jsonl.gz", "-with-ecapa-embeddings.jsonl.gz")
+    output_manifest = params.target_manifest_file
     if not os.path.exists(output_manifest):
         join_manifests(
             input_cuts=cuts,
-            embedding_manifest=target_manifest,
+            embedding_manifest=embedding_manifest,
             output_dir=output_manifest,
         )
