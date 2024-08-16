@@ -80,6 +80,7 @@ from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+from utils import _add_dummy_embeddings_and_taskIDs
 from zipformer import Zipformer2
 
 from icefall import diagnostics
@@ -1196,12 +1197,12 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
+    # sp = spm.SentencePieceProcessor()
+    # sp.load(params.bpe_model)
 
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
+    # # <blk> is defined in local/train_bpe_model.py
+    # params.blank_id = sp.piece_to_id("<blk>")
+    # params.vocab_size = sp.get_piece_size()
 
     if params.use_bf16:
         assert torch.cuda.is_bf16_supported(), f"Your GPU does not support bf16!"
@@ -1281,6 +1282,7 @@ def run(rank, world_size, args):
                 preserve_id=False,
             )
             librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
+        librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0)) # ASR task ID=0
         train_cuts.append(librispeech_cuts)
         sampling_weights.append(librispeech_cuts_len)
     
@@ -1294,9 +1296,20 @@ def run(rank, world_size, args):
             preserve_id=False,
         )
         wenetspeech_cuts = wenetspeech_cuts.map(_fix_offset)
-        wenetspeech_cuts_len = 1375798
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0)) # ASR task ID=0
+        wenetspeech_cuts_len = 1375798 * params.repeat_wenetspeech
         train_cuts.append(wenetspeech_cuts)
         sampling_weights.append(wenetspeech_cuts_len)
+
+    if params.use_voxceleb:
+        voxceleb_cuts_lens = {
+            "vox1": 148642,
+            "vox2": 1039062 + 148642,
+        }
+        vox_cuts = librispeech.voxceleb_cuts()
+        vox_cuts = vox_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # SV task ID=1
+        train_cuts.append(vox_cuts)
+        sampling_weights.append(voxceleb_cuts_lens[params.voxceleb_subset])
 
     if params.use_audioset:
         audioset_cuts_lens = {
@@ -1305,17 +1318,9 @@ def run(rank, world_size, args):
         }
         logging.info(f"Getting audioset cuts")
         audioset_cuts = librispeech.audioset_cuts_KD()
+        audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # AT task ID=2
         train_cuts.append(audioset_cuts)
         sampling_weights.append(audioset_cuts_lens[params.audioset_subset])
-
-    if params.use_voxceleb:
-        voxceleb_cuts_lens = {
-            "vox1": 148642,
-            "vox2": 1039062 + 148642,
-        }
-        vox_cuts = librispeech.voxceleb_cuts()
-        train_cuts.append(vox_cuts)
-        sampling_weights.append(voxceleb_cuts_lens[params.voxceleb_subset])
     
     logging.info(f"Using mux to combine Librispeech: {params.use_librispeech}, WenetSpeech: {params.use_wenetspeech}, audioset: {params.use_audioset} and voxceleb: {params.use_voxceleb}")
     if len(train_cuts) > 1:
@@ -1332,7 +1337,7 @@ def run(rank, world_size, args):
     logging.info(train_cuts)
 
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 1.0 or c.duration > 28.0:
+        if c.duration < 1.0 or c.duration > 30.2:
             return False
         
         if len(c.supervisions) == 0:
@@ -1373,7 +1378,7 @@ def run(rank, world_size, args):
         asr_valid_cuts = librispeech.dev_clean_cuts()
         asr_valid_cuts += librispeech.dev_other_cuts()
 
-        asr_valid_cuts = asr_valid_cuts.map(partial(_set_task_id, 0))
+        asr_valid_cuts = asr_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0))
         asr_valid_cuts = asr_valid_cuts.filter(remove_short_and_long_utt)
         asr_valid_dl = librispeech.valid_dataloaders(asr_valid_cuts)
         
@@ -1382,7 +1387,7 @@ def run(rank, world_size, args):
         
     if params.use_wenetspeech:
         asr_wenet_cuts = librispeech.wenetspeech_dev_cuts()
-        asr_wenet_cuts = asr_wenet_cuts.map(partial(_set_task_id, 0))
+        asr_wenet_cuts = asr_wenet_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0))
         asr_wenet_cuts = asr_wenet_cuts.filter(remove_short_and_long_utt)
         asr_wenet_valid_dl = librispeech.valid_dataloaders(asr_wenet_cuts)
         
@@ -1392,7 +1397,7 @@ def run(rank, world_size, args):
     # sv validation
     if params.use_voxceleb:
         vox_test_cuts = librispeech.voxceleb1_test_cuts()
-        vox_test_cuts = vox_test_cuts.map(partial(_set_task_id, 1))
+        vox_test_cuts = vox_test_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
         vox_test_cuts = vox_test_cuts.filter(remove_short_and_long_utt)
         vox_test_dl = librispeech.valid_dataloaders(vox_test_cuts)
         
@@ -1402,7 +1407,7 @@ def run(rank, world_size, args):
     # audio tagging validation
     if params.use_audioset:
         at_eval_cuts = librispeech.audioset_eval_cuts()
-        at_eval_cuts = at_eval_cuts.map(partial(_set_task_id, 2))
+        at_eval_cuts = at_eval_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
         at_eval_cuts = at_eval_cuts.filter(remove_short_and_long_utt)
         at_valid_dl = librispeech.valid_dataloaders(at_eval_cuts)
         
@@ -1490,10 +1495,6 @@ def display_and_save_batch(
     features = batch["inputs"]
 
     logging.info(f"features shape: {features.shape}")
-
-    # y = sp.encode(supervisions["text"], out_type=int)
-    # num_tokens = sum(len(i) for i in y)
-    # logging.info(f"num tokens: {num_tokens}")
 
 
 def scan_pessimistic_batches_for_oom(
