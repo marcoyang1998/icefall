@@ -16,7 +16,7 @@ from icefall.utils import get_executor, str2bool
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
-def parse_csv(csv_file="downloads/audioset/full_train_asedata_with_duration.csv"):
+def parse_csv(csv_file="download/audioset/full_train_asedata_with_duration.csv"):
 
     mapping = {}
     with open(csv_file, 'r') as fin:
@@ -37,7 +37,7 @@ def get_parser():
     parser.add_argument(
         "--dataset-dir",
         type=str,
-        default="downloads/audioset"
+        default="download/audioset"
     )
     
     parser.add_argument(
@@ -67,9 +67,9 @@ def main():
     num_mel_bins = 80
 
     if split in ["balanced", "unbalanced"]:
-        csv_file = "downloads/audioset/full_train_asedata_with_duration.csv"
+        csv_file = "download/audioset/full_train_asedata_with_duration.csv"
     elif split == "eval":
-        csv_file = "downloads/audioset/eval.csv"
+        csv_file = "download/audioset/eval.csv"
     else:
         raise ValueError()
 
@@ -130,6 +130,3 @@ if __name__=="__main__":
 
     logging.basicConfig(format=formatter, level=logging.INFO)
     main()
-    # manifest = 'data/fbank/cuts_vox1.jsonl.gz'
-    # output_manifest = 'data/fbank/cuts_vox1.jsonl.gz'
-    # update_manifest(manifest, output_manifest)
