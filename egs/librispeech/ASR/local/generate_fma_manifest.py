@@ -89,7 +89,7 @@ def get_parser():
     parser.add_argument(
         "--dataset-dir",
         type=str,
-        default="downloads/fma"
+        default="download/fma"
     )
     
     parser.add_argument(

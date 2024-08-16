@@ -25,7 +25,8 @@ log() {
 
 log "manifest_dir: $manifest_dir"
 
-log "We assume you have finished the data preparation of librispeech following prepare.sh"
+log "We assume you have finished the data preparation of librispeech "
+log "by running: ./prepare.sh --stage 0 --stop_stage 3"
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
     log "Download Audioset from https://huggingface.co/datasets/marcoyang/audioset-full/tree/main to dl_dir"
