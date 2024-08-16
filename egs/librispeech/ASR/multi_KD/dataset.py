@@ -17,7 +17,6 @@
 import random
 from typing import Callable, Dict, List, Optional, Union
 
-from utils import get_class_dict
 from teachers import Teacher
 
 import numpy as np
@@ -83,7 +82,7 @@ class MultiKDDataset(torch.utils.data.Dataset):
         self.whisper = whisper
         self.mert = mert
         
-        self.beats_class_dict = get_class_dict()
+        self.beats_class_dict = None
         
         # This attribute is a workaround to constantly growing HDF5 memory
         # throughout the epoch. It regularly closes open file handles to

@@ -16,7 +16,7 @@ beats_id2str = {0: '/m/078jl', 1: '/m/07rjwbb', 2: '/m/04rlf', 3: '/m/07qb_dv', 
 beats_str2id = {v: k for (k,v) in beats_id2str.items()}
 
 ced2beats_mapping = {}
-with open("downloads/audioset/class_labels_indices.csv", "r") as f:
+with open("download/audioset/class_labels_indices.csv", "r") as f:
     reader = csv.reader(f, delimiter=",")
     for i, row in enumerate(reader):
         if i == 0:
@@ -249,12 +249,12 @@ def add_dummy_embeddings_and_taskID(input_manifest, output_manifest, whisper_dim
     
 def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
     whisper_embedding_dict = {
-        'array': {'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_whisper_embedding_1510_63a0d00c-8c49-4587-abbb-ba0e82d28730.h5', 'storage_key': 'dummy_whisper_embedding_{T}', 'shape': [1510, 1280]}, 'temporal_dim': 0, 'frame_shift': 0.02, 'start': 0
+        'array': {'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_whisper_embedding_1510.h5', 'storage_key': 'dummy_whisper_embedding_1510', 'shape': [1510, 1280]}, 'temporal_dim': 0, 'frame_shift': 0.02, 'start': 0
     }
     whisper_dummy_embedding = TemporalArray.from_dict(whisper_embedding_dict)
     
     beats_embedding_dict = {
-        'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_beats_embedding_92f11995-6b96-48a6-af79-0316dafee432.h5', 'storage_key': 'dummy_beats_embedding', 'shape': [527]
+        'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_beats_embedding.h5', 'storage_key': 'dummy_beats_embedding', 'shape': [527]
     }
     beats_dummy_embedding = Array.from_dict(beats_embedding_dict)
     
