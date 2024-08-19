@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import logging
 import re
 from pathlib import Path
@@ -23,8 +24,22 @@ from pathlib import Path
 from lhotse import CutSet, SupervisionSegment
 from lhotse.recipes.utils import read_manifests_if_cached
 
+from icefall.utils import str2bool
+
 # Similar text filtering and normalization procedure as in:
 # https://github.com/SpeechColab/GigaSpeech/blob/main/toolkits/kaldi/gigaspeech_data_prep.sh
+
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--perturb-speed",
+        type=str2bool,
+        default=False,
+        help="Whether to use speed perturbation.",
+    )
+
+    return parser.parse_args()
 
 
 def normalize_text(
@@ -42,7 +57,7 @@ def has_no_oov(
     return oov_pattern.search(sup.text) is None
 
 
-def preprocess_giga_speech():
+def preprocess_giga_speech(args):
     src_dir = Path("data/manifests")
     output_dir = Path("data/fbank")
     output_dir.mkdir(exist_ok=True)
@@ -50,21 +65,19 @@ def preprocess_giga_speech():
     dataset_parts = (
         "DEV",
         "TEST",
-        "XS",
-        "S",
-        "M",
-        "L",
         "XL",
+        "L",
+        "M",
+        "S",
+        "XS",
     )
 
     logging.info("Loading manifest (may take 4 minutes)")
-    prefix = "gigaspeech"
-    suffix = "jsonl.gz"
     manifests = read_manifests_if_cached(
         dataset_parts=dataset_parts,
         output_dir=src_dir,
-        prefix=prefix,
-        suffix=suffix,
+        prefix="gigaspeech",
+        suffix="jsonl.gz",
     )
     assert manifests is not None
 
@@ -77,7 +90,7 @@ def preprocess_giga_speech():
 
     for partition, m in manifests.items():
         logging.info(f"Processing {partition}")
-        raw_cuts_path = output_dir / f"{prefix}_cuts_{partition}_raw.{suffix}"
+        raw_cuts_path = output_dir / f"gigaspeech_cuts_{partition}_raw.jsonl.gz"
         if raw_cuts_path.is_file():
             logging.info(f"{partition} already exists - skipping")
             continue
@@ -90,7 +103,6 @@ def preprocess_giga_speech():
         logging.info(f"Normalizing text in {partition}")
         for sup in m["supervisions"]:
             sup.text = normalize_text(sup.text)
-            sup.custom = {"origin": "giga"}
 
         # Create long-recording cut manifests.
         logging.info(f"Processing {partition}")
@@ -100,20 +112,15 @@ def preprocess_giga_speech():
         )
         # Run data augmentation that needs to be done in the
         # time domain.
-        #  if partition not in ["DEV", "TEST"]:
-        #      logging.info(
-        #          f"Speed perturb for {partition} with factors 0.9 and 1.1 "
-        #          "(Perturbing may take 8 minutes and saving may"
-        #          " take 20 minutes)"
-        #      )
-        #      cut_set = (
-        #          cut_set
-        #          + cut_set.perturb_speed(0.9)
-        #          + cut_set.perturb_speed(1.1)
-        #      )
-        #
-        # Note: No need to perturb the training subset as not all of the
-        # data is going to be used in the training.
+        if partition not in ["DEV", "TEST"]:
+            if args.perturb_speed:
+                logging.info(
+                    f"Speed perturb for {partition} with factors 0.9 and 1.1 "
+                    "(Perturbing may take 8 minutes and saving may take 20 minutes)"
+                )
+                cut_set = (
+                    cut_set + cut_set.perturb_speed(0.9) + cut_set.perturb_speed(1.1)
+                )
         logging.info(f"Saving to {raw_cuts_path}")
         cut_set.to_file(raw_cuts_path)
 
@@ -122,7 +129,8 @@ def main():
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     logging.basicConfig(format=formatter, level=logging.INFO)
 
-    preprocess_giga_speech()
+    args = get_args()
+    preprocess_giga_speech(args)
 
 
 if __name__ == "__main__":
