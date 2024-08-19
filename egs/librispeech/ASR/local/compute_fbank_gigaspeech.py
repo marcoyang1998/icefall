@@ -20,7 +20,8 @@ import logging
 from pathlib import Path
 
 import torch
-from lhotse import CutSet, KaldifeatFbank, KaldifeatFbankConfig
+from lhotse import CutSet, Fbank, FbankConfig, LilcomChunkyWriter
+from icefall.utils import get_executor
 
 # Torch's multithreaded behavior needs to be disabled or
 # it wastes a lot of CPU and slow things down.
@@ -33,7 +34,7 @@ torch.set_num_interop_threads(1)
 def compute_fbank_gigaspeech():
     in_out_dir = Path("data/fbank")
     # number of workers in dataloader
-    num_workers = 20
+    num_jobs = 20
 
     # number of seconds in a batch
     batch_duration = 1000
@@ -43,37 +44,39 @@ def compute_fbank_gigaspeech():
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda", 0)
-    extractor = KaldifeatFbank(KaldifeatFbankConfig(device=device))
+
+    extractor = Fbank(FbankConfig(num_mel_bins=80))
 
     logging.info(f"device: {device}")
 
-    for partition in subsets:
-        cuts_path = in_out_dir / f"gigaspeech_cuts_{partition}.jsonl.gz"
-        if cuts_path.is_file():
-            logging.info(f"{cuts_path} exists - skipping")
-            continue
+    with get_executor() as ex:  # Initialize the executor only once.
+        for partition in subsets:
+            cuts_path = in_out_dir / f"gigaspeech_cuts_{partition}.jsonl.gz"
+            if cuts_path.is_file():
+                logging.info(f"{cuts_path} exists - skipping")
+                continue
 
-        raw_cuts_path = in_out_dir / f"gigaspeech_cuts_{partition}_raw.jsonl.gz"
+            raw_cuts_path = in_out_dir / f"gigaspeech_cuts_{partition}_raw.jsonl.gz"
 
-        logging.info(f"Loading {raw_cuts_path}")
-        cut_set = CutSet.from_file(raw_cuts_path)
+            logging.info(f"Loading {raw_cuts_path}")
+            cut_set = CutSet.from_file(raw_cuts_path)
 
-        logging.info("Computing features")
+            logging.info("Computing features")
 
-        cut_set = cut_set.compute_and_store_features_batch(
-            extractor=extractor,
-            storage_path=f"{in_out_dir}/gigaspeech_feats_{partition}",
-            num_workers=num_workers,
-            batch_duration=batch_duration,
-            overwrite=True,
-        )
-        cut_set = cut_set.trim_to_supervisions(
-            keep_overlapping=False, min_duration=None
-        )
+            cut_set = cut_set.compute_and_store_features(
+                extractor=extractor,
+                storage_path=f"{in_out_dir}/gigaspeech_feats_{partition}",
+                num_jobs=num_jobs if ex is None else 80,
+                executor=ex,
+                storage_type=LilcomChunkyWriter,
+            )
+            cut_set = cut_set.trim_to_supervisions(
+                keep_overlapping=False, min_duration=None
+            )
 
-        logging.info(f"Saving to {cuts_path}")
-        cut_set.to_file(cuts_path)
-        logging.info(f"Saved to {cuts_path}")
+            logging.info(f"Saving to {cuts_path}")
+            cut_set.to_file(cuts_path)
+            logging.info(f"Saved to {cuts_path}")
 
 
 def main():
