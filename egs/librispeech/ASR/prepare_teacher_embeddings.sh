@@ -71,7 +71,7 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
                 --target-manifest-file ${manifest_dir}/librispeech_cuts_${key}.jsonl.gz \
                 --embedding-layer $embedding_layer \
                 --max-duration 300 \
-                --whisper-version $whisper_version
+                --whisper-version large-v3
         done
     done
 fi
@@ -134,7 +134,7 @@ fi
 if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
     log "Stage 8: Download FMA dataset"
     log "Please first follow the instructions at https://github.com/mdeff/fma"
-    log "Then make a softlink under $dl_dir via ln -s FMA_DIR fma"
+    log "Then make a softlink under $dl_dir via: ln -svf FMA_DIR fma"
 
     for part in large; do
         python ./local/generate_fma_manifest.py \
@@ -154,5 +154,29 @@ if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
             --output-manifest embeddings-fma-${part} \
             --mert-version MERT-v1-330M \
             --max-duration 500
+    done
+fi
+
+# The following are for Gigaspeech dataset (optional)
+
+if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
+    log "Stage 10: Download gigaspeech"
+    log "Please run ./prepare_gigaspeech.sh --stage 0 --stop_stage 11 \
+    to preprocess gigaspeech dataset"
+fi
+
+if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
+    log "Stage 11: Extract Whisper embedding on Gigaspeech"
+    log "This assume that you already downloaded Gigaspeech and prepared fbank for gigaspeech"
+    for key in XS; do
+        python multi_KD/collect_whisper_embeddings.py \
+            --num-jobs 1 \
+            --input-manifest data/fbank/gigaspeech_cuts_${key}.jsonl.gz \
+            --manifest-name embeddings-${key} \
+            --target-manifest-file ${manifest_dir}/gigaspeech_cuts_${key}.jsonl.gz \
+            --embedding-layer -1 \
+            --max-duration 300 \
+            --whisper-version large-v3
+
     done
 fi
