@@ -657,7 +657,7 @@ class LibriSpeechKDDataModule:
     def train_clean_100_cuts(self) -> CutSet:
         if not self.args.on_the_fly_feats:
             return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_train-clean-100-with-3-embeddings.jsonl.gz"
+                self.args.manifest_dir / "librispeech_cuts_train-clean-100-with-speaker-embed.jsonl.gz"
             )
         else:
             logging.info("About to get train-clean-100 cuts")
@@ -695,9 +695,8 @@ class LibriSpeechKDDataModule:
     @lru_cache()
     def train_all_shuf_cuts(self) -> CutSet:
         if not self.args.on_the_fly_feats:
-            logging.info("About to get the shuffled train-960 with 3 teacher embeddings.")
             return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-3-embeddings.jsonl.gz"
+                self.args.manifest_dir / "librispeech_cuts_train-all-shuf-with-speaker-embed.jsonl.gz"
             )
                 
         else:
@@ -708,12 +707,6 @@ class LibriSpeechKDDataModule:
             return load_manifest_lazy(
                 self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
             )
-
-    @lru_cache()
-    def train_all_shuf_cuts_no_KD(self) -> CutSet:
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
-        )
 
     @lru_cache()
     def fma_train_cuts(self) -> CutSet:
@@ -767,7 +760,7 @@ class LibriSpeechKDDataModule:
             )
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_dev-clean-with-3-embeddings.jsonl.gz"
+                self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
             )
 
     @lru_cache()
@@ -785,7 +778,7 @@ class LibriSpeechKDDataModule:
             )
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "librispeech_cuts_dev-other-with-3-embeddings.jsonl.gz"
+                self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
             )
 
     @lru_cache()
@@ -846,7 +839,7 @@ class LibriSpeechKDDataModule:
     def voxceleb1_cuts(self) -> CutSet:
         logging.info("About to get the voxceleb1 set.")
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_vox1.jsonl.gz"
+            self.args.manifest_dir / "cuts_vox1_dev.jsonl.gz"
         )
         
     @lru_cache()
@@ -860,7 +853,7 @@ class LibriSpeechKDDataModule:
     def voxceleb2_cuts(self) -> CutSet:
         logging.info("About to get the voxceleb2 set.")
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_vox2.jsonl.gz"
+            self.args.manifest_dir / "cuts_vox2_dev.jsonl.gz"
         )
 
     @lru_cache()
@@ -885,18 +878,6 @@ class LibriSpeechKDDataModule:
 
     @lru_cache()
     def audioset_cuts(self) -> CutSet:
-        logging.info("About to get the audioset cuts.")
-        cuts = load_manifest_lazy(
-            f"data/fbank_audioset/cuts_audioset_balanced-with-beats-embeddings.jsonl.gz"
-        )
-        if self.args.audioset_subset == "unbalanced":
-            cuts += load_manifest_lazy(
-                f"data/fbank_audioset/cuts_audioset_unbalanced-with-beats-embeddings.jsonl.gz"
-            )
-        return cuts
-
-    @lru_cache()
-    def audioset_cuts_KD(self) -> CutSet:
         logging.info("About to get the audioset cuts for KD.")
         cuts = load_manifest_lazy(
             self.args.manifest_dir / "cuts_audioset_balanced.jsonl.gz"
@@ -913,19 +894,12 @@ class LibriSpeechKDDataModule:
         return load_manifest_lazy(
             self.args.manifest_dir / "cuts_audioset_eval.jsonl.gz"
         )
-        
-    @lru_cache()
-    def audioset_eval_cuts_no_KD(self) -> CutSet:
-        logging.info("About to get the audioset eval cuts.")
-        return load_manifest_lazy(
-            "data/fbank_audioset/cuts_audioset_eval.jsonl.gz"
-        )
 
     @lru_cache()
     def audioset_eval_all_cuts(self) -> CutSet:
         logging.info(f"About to get all eval cuts from audioset")
         return load_manifest_lazy(
-            "data/fbank_audioset/cuts_audioset_eval_all.jsonl.gz"
+            self.args.manifest_dir / "cuts_audioset_eval_all.jsonl.gz"
         )
         
     @lru_cache

@@ -84,7 +84,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from train_multi_KD3 import get_encoder_embed, get_encoder_model
-from utils import compare_model, str2multihot, ced2beats_mapping
+from utils import compare_model, str2multihot, ced2beats_mapping, _add_dummy_embeddings_and_taskIDs
 
 from zipformer import Zipformer2
 
@@ -108,6 +108,7 @@ from icefall.utils import (
     str2bool,
 )
 
+from functools import partial
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
 
@@ -1636,6 +1637,7 @@ def run(rank, world_size, args):
                 preserve_id=False,
             )
             librispeech_cuts_len = 281239 * params.repeat_librispeech # no speed purturb
+        librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0)) # ASR task ID=0
         train_cuts.append(librispeech_cuts)
         sampling_weights.append(librispeech_cuts_len)
         
@@ -1661,6 +1663,7 @@ def run(rank, world_size, args):
             "unbalanced": 1883591 + 21155
         }
         audioset_cuts = librispeech.audioset_cuts_KD()
+        audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # AT task ID=2
         train_cuts.append(audioset_cuts)
         sampling_weights.append(audioset_cuts_lens[params.audioset_subset])
     else:
@@ -1754,24 +1757,25 @@ def run(rank, world_size, args):
     valid_dls = []
 
     if params.use_librispeech:
-        valid_cuts = librispeech.dev_clean_cuts_KD()
-        valid_cuts += librispeech.dev_other_cuts_KD()
-        valid_cuts = valid_cuts.map(add_dummy_text)
+        valid_cuts = librispeech.dev_clean_cuts()
+        valid_cuts += librispeech.dev_other_cuts()
+        valid_cuts = valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0)) # ASR task ID=0
         valid_dl = librispeech.valid_dataloaders(valid_cuts)
         valid_dls.append(valid_dl)
         valid_sets.append("ASR_libri")
     
     if params.use_wenetspeech:
         asr_wenet_cuts = librispeech.wenetspeech_dev_cuts()
-        asr_wenet_cuts = asr_wenet_cuts.map(add_dummy_text)
+        asr_wenet_cuts = asr_wenet_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0)) # ASR task ID=0
         asr_wenet_valid_dl = librispeech.valid_dataloaders(asr_wenet_cuts)
         
         valid_dls.append(asr_wenet_valid_dl)
         valid_sets.append("ASR_wenet")
     
     if params.do_audio_tagging:
-        at_valid_cuts = librispeech.audioset_eval_cuts_KD()
+        at_valid_cuts = librispeech.audioset_eval_cuts()
         at_valid_cuts = at_valid_cuts.map(add_dummy_text)
+        at_valid_cuts = at_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # AT task ID=2
         at_valid_dl = librispeech.valid_dataloaders(at_valid_cuts)
         valid_dls.append(at_valid_dl)
         logging.info(at_valid_cuts)

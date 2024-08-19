@@ -1197,6 +1197,7 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
+    sp = None
     # sp = spm.SentencePieceProcessor()
     # sp.load(params.bpe_model)
 
@@ -1317,7 +1318,7 @@ def run(rank, world_size, args):
             "unbalanced": 1883591 + 21155
         }
         logging.info(f"Getting audioset cuts")
-        audioset_cuts = librispeech.audioset_cuts_KD()
+        audioset_cuts = librispeech.audioset_cuts()
         audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # AT task ID=2
         train_cuts.append(audioset_cuts)
         sampling_weights.append(audioset_cuts_lens[params.audioset_subset])

@@ -606,19 +606,19 @@ class LibriSpeechAsrDataModule:
     def audioset_cuts_KD(self) -> CutSet:
         logging.info("About to get the audioset cuts for KD.")
         cuts = load_manifest_lazy(
-            self.args.manifest_dir / "cuts_audioset_balanced-with-3-embeddings.jsonl.gz"
+            self.args.manifest_dir / "cuts_audioset_balanced.jsonl.gz"
         )
         if self.args.audioset_subset == "unbalanced":
             cuts += load_manifest_lazy(
-                self.args.manifest_dir / "cuts_audioset_unbalanced-with-3-embeddings.jsonl.gz"
+                self.args.manifest_dir / "cuts_audioset_unbalanced.jsonl.gz"
             )
         return cuts
 
     @lru_cache()
-    def audioset_eval_cuts_KD(self) -> CutSet:
+    def audioset_eval_cuts(self) -> CutSet:
         logging.info("About to get test-other cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "cuts_audioset_eval-with-3-embeddings.jsonl.gz"
+            self.args.manifest_dir / "cuts_audioset_eval.jsonl.gz"
         )
 
     @lru_cache()
