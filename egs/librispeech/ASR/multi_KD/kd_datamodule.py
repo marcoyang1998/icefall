@@ -834,13 +834,6 @@ class LibriSpeechKDDataModule:
         new_cuts =CutSet.from_cuts(new_cuts)
         
         return new_cuts
-
-    @lru_cache()
-    def all_mixed_cuts(self) -> CutSet:
-        logging.info(f"About to get all mixed cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "all_mixed_cuts.jsonl.gz"
-        )
     
     @lru_cache()
     def voxceleb1_test_cuts(self) -> CutSet:
@@ -934,28 +927,21 @@ class LibriSpeechKDDataModule:
     def gigaspeech_train_cuts(self) -> CutSet:
         logging.info(f"About to get gigaspeech train cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / f"gigaspeech_cuts_{self.args.gigaspeech_subset}.jsonl.gz"
+            self.args.manifest_dir / f"gigaspeech_cuts_{self.args.gigaspeech_subset}-with-speaker-embed.jsonl.gz"
         )
 
     @lru_cache
     def gigaspeech_dev_cuts(self) -> CutSet:
         logging.info(f"About to get gigaspeech DEV cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "gigaspeech_cuts_DEV.jsonl.gz"
-        )
-
-    @lru_cache
-    def gigaspeech_dev_cuts(self) -> CutSet:
-        logging.info(f"About to get gigaspeech DEV cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "gigaspeech_cuts_DEV.jsonl.gz"
+            self.args.manifest_dir / "gigaspeech_cuts_DEV-with-speaker-embed.jsonl.gz"
         )
 
     @lru_cache
     def gigaspeech_test_cuts(self) -> CutSet:
         logging.info(f"About to get gigaspeech TEST cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "gigaspeech_cuts_TEST.jsonl.gz"
+            self.args.manifest_dir / "gigaspeech_cuts_TEST-with-speaker-embed.jsonl.gz"
         )
         
     @lru_cache()

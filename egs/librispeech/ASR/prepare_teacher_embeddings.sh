@@ -32,32 +32,45 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
     log "Download Audioset from https://huggingface.co/datasets/marcoyang/audioset-full/tree/main to dl_dir"
 
     # combine the splits
-    cat download/audioset.tar.gz.part* > $dl_dir/audioset.tar.gz
-    tar -xvzf download/audioset.tar.gz -C $dl_dir
+    if [ ! -e $dl_dir/.audioset.done ]; then
+        cat download/audioset.tar.gz.part* > $dl_dir/audioset.tar.gz
+        tar -xvzf download/audioset.tar.gz -C $dl_dir
+        touch $dl_dir/.audioset.done
+    fi
 fi
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     log "Stage 1: Compute fbank for audioset and generate manifest"
-    for split in balanced unbalanced eval; do
-        python ./local/generate_audioset_manifest.py \
-            --dataset-dir download/audioset \
-            --split $split \
-            --feat-output-dir data/fbank_audioset
-    done
+    if [ ! -e data/fbank_audioset/.audioset.done ]; then
+        for split in balanced unbalanced eval; do
+            python ./local/generate_audioset_manifest.py \
+                --dataset-dir download/audioset \
+                --split $split \
+                --feat-output-dir data/fbank_audioset
+        done
+        touch data/fbank_audioset/.audioset.done
+    fi
 fi
 
 if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
     log "Stage 2: Compute fbank for VoxCeleb and generate manifest"
-    log "You need to first download VoxCeleb1 and VoxCeleb2 to dl_dir"
+    log "You need to first download VoxCeleb1 and VoxCeleb2 to $dl_dir"
     log "After downloading, convert the w4a to wav: https://gist.github.com/seungwonpark/4f273739beef2691cd53b5c39629d830"
-    for dataset in vox1 vox2; do
-        for part in dev test; do
-            python ./local/generate_voxceleb_manifest.py \
-                --dataset $dataset \
-                --part $part \
-                --manifest-output-dir data/fbank/cuts_${dataset}_${part}.jsonl.gz
+    
+    if [ ! -e data/fbank/.voxceleb.done ]; then
+        for dataset in vox1 vox2; do
+            for part in dev test; do
+                python ./local/generate_voxceleb_manifest.py \
+                    --dataset $dataset \
+                    --part $part \
+                    --manifest-output-dir data/fbank/cuts_${dataset}_${part}.jsonl.gz
+            done
         done
-    done
+        touch data/fbank/.voxceleb.done
+    fi
+
+    log "Download the evaluate pairs"
+    wget https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt -P $dl_dir
 fi
 
 if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
@@ -109,6 +122,7 @@ fi
 
 if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
     log "Stage 6: Collect ECAPA-TDNN embeddings for LibriSpeech and create manifest accordingly"
+    log "This is necessary if you share ASR data for SV"
     log "This is recommended!"
     for part in train-all-shuf dev-other dev-clean; do
         python multi_KD/collect_ecapa_embeddings.py \
@@ -130,18 +144,20 @@ if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
 fi
 
 # The following are for FMA dataset (optional)
-
 if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
     log "Stage 8: Download FMA dataset"
     log "Please first follow the instructions at https://github.com/mdeff/fma"
     log "Then make a softlink under $dl_dir via: ln -svf FMA_DIR fma"
 
-    for part in large; do
-        python ./local/generate_fma_manifest.py \
-            --dataset-dir download/fma \
-            --split $part \
-            --extension mp3
-    done
+    if [ ! -e data/fbank/.fma.done ]; then
+        for part in large; do
+            python ./local/generate_fma_manifest.py \
+                --dataset-dir download/fma \
+                --split $part \
+                --extension mp3
+        done
+        touch data/fbank/.fma.done
+    fi
 fi
 
 if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
@@ -158,7 +174,6 @@ if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
 fi
 
 # The following are for Gigaspeech dataset (optional)
-
 if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
     log "Stage 10: Download gigaspeech"
     log "Please run ./prepare_gigaspeech.sh --stage 0 --stop_stage 11 \
@@ -177,6 +192,18 @@ if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
             --embedding-layer -1 \
             --max-duration 300 \
             --whisper-version large-v3
+    done
+fi
 
+if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
+    log "Stage 6: Collect ECAPA-TDNN embeddings for GigaSpeech and create manifest accordingly"
+    log "This is necessary if you share ASR data for SV"
+    for part in XL DEV TEST; do
+        python multi_KD/collect_ecapa_embeddings.py \
+            --num-jobs 4 \
+            --input-manifest ${manifest_dir}/gigaspeech_cuts_${part}.jsonl.gz \
+            --manifest-name embeddings-$part \
+            --target-manifest-file ${manifest_dir}/gigaspeech_cuts_${part}-with-speaker-embed.jsonl.gz \
+            --max-duration 1000
     done
 fi

@@ -106,12 +106,12 @@ def get_parser():
 
 def get_test_pairs(dataset_name: str):
     test_mapping = {
-        "VoxCeleb1": "downloads/veri_test.txt",
-        "VoxCeleb1-cleaned": "downloads/veri_test2.txt",
-        "VoxCeleb1-H": "downloads/list_test_hard.txt",
-        "VoxCeleb1-H-cleaned": "downloads/list_test_hard2.txt",
-        "VoxCeleb1-E": "downloads/list_test_all.txt",
-        "VoxCeleb1-E-cleaned": "downloads/list_test_all2.txt",
+        "VoxCeleb1": "download/veri_test.txt",
+        "VoxCeleb1-cleaned": "download/veri_test2.txt",
+        "VoxCeleb1-H": "download/list_test_hard.txt",
+        "VoxCeleb1-H-cleaned": "download/list_test_hard2.txt",
+        "VoxCeleb1-E": "download/list_test_all.txt",
+        "VoxCeleb1-E-cleaned": "download/list_test_all2.txt",
     }
     test_file = test_mapping[dataset_name]
     with open(test_file, 'r') as f:
