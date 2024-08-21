@@ -1331,6 +1331,12 @@ def run(rank, world_size, args):
             logging.info(f"At epoch {epoch}, pruning the less important channels")
             model_state_dict = replace_dead_units(model.state_dict(), threshold=params.channel_pruning_threshold)
             model.load_state_dict(model_state_dict)
+            # re-initialize the optimizer (throw away the states)
+            optimizer = ScaledAdam(
+                get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
+                lr=params.base_lr,  # should have no effect
+                clipping_scale=2.0,
+            )
 
     logging.info("Done!")
 
