@@ -207,3 +207,9 @@ if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
             --max-duration 1000
     done
 fi
+
+# Optional, for CED model
+if [ $stage -le 13 ] && [ $stop_stage -ge 13 ]; then
+    git clone https://github.com/RicherMans/CED.git
+    ln -svf CED/models multi_KD/
+fi
