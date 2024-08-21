@@ -168,7 +168,7 @@ fi
 if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
     log "Stage 11: Extract Whisper embedding on Gigaspeech"
     log "This assume that you already downloaded Gigaspeech and prepared fbank for gigaspeech"
-    for key in XS; do
+    for key in XL DEV TEST; do
         python multi_KD/collect_whisper_embeddings.py \
             --num-jobs 1 \
             --input-manifest data/fbank/gigaspeech_cuts_${key}.jsonl.gz \
