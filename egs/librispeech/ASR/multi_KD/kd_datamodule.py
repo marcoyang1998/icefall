@@ -176,6 +176,20 @@ class LibriSpeechKDDataModule:
             default=False,
             help="If use librispeech as the training set.",
         )
+
+        group.add_argument(
+            "--use-gigaspeech",
+            type=str2bool,
+            default=False,
+            help="If use gigaspeech as the training set.",
+        )
+
+        group.add_argument(
+            "--gigaspeech-subset",
+            type=str,
+            choices=["XS", "S", "M", "L", "XL"],
+            help="Which split of gigaspeech to use"
+        )
         
         group.add_argument(
             "--use-wenetspeech",
@@ -914,6 +928,34 @@ class LibriSpeechKDDataModule:
         logging.info(f"About to get wenetspeech DEV cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "cuts_DEV-with-whisper-large-v3-layer--3-embeddings.jsonl.gz"
+        )
+
+    @lru_cache
+    def gigaspeech_train_cuts(self) -> CutSet:
+        logging.info(f"About to get gigaspeech train cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"gigaspeech_cuts_{self.args.gigaspeech_subset}.jsonl.gz"
+        )
+
+    @lru_cache
+    def gigaspeech_dev_cuts(self) -> CutSet:
+        logging.info(f"About to get gigaspeech DEV cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "gigaspeech_cuts_DEV.jsonl.gz"
+        )
+
+    @lru_cache
+    def gigaspeech_dev_cuts(self) -> CutSet:
+        logging.info(f"About to get gigaspeech DEV cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "gigaspeech_cuts_DEV.jsonl.gz"
+        )
+
+    @lru_cache
+    def gigaspeech_test_cuts(self) -> CutSet:
+        logging.info(f"About to get gigaspeech TEST cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "gigaspeech_cuts_TEST.jsonl.gz"
         )
         
     @lru_cache()

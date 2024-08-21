@@ -531,6 +531,13 @@ def get_parser():
         default=1,
         help="How many times to repeat LS",
     )
+
+    parser.add_argument(
+        "--repeat-gigaspeech",
+        type=int,
+        default=1,
+        help="How many times to repeat giga",
+    )
     
     parser.add_argument(
         "--repeat-wenetspeech",
@@ -1286,6 +1293,21 @@ def run(rank, world_size, args):
         librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0)) # ASR task ID=0
         train_cuts.append(librispeech_cuts)
         sampling_weights.append(librispeech_cuts_len)
+
+    if params.use_gigaspeech:
+        gigaspeech_cuts = librispeech.gigaspeech_train_cuts().repeat(
+            times=params.repeat_gigaspeech,
+            preserve_id=False,
+        )
+        giga_lens = {
+            "XS": 9389, # 10 hours
+            "S": 229394, # 250 hours
+            "M": 909401, # 1000 hours, no speed purturb
+        }
+        gigaspeech_cuts_len = giga_lens[params.gigaspeech_subset] * params.repeat_gigaspeech 
+        gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0)) # ASR task ID=0
+        train_cuts.append(gigaspeech_cuts)
+        sampling_weights.append(gigaspeech_cuts_len)
     
     if params.use_wenetspeech:
         def _fix_offset(c):
@@ -1385,7 +1407,16 @@ def run(rank, world_size, args):
         
         valid_sets.append("ASR_libri")
         valid_dls.append(asr_valid_dl)
+
+    if params.use_gigaspeech:
+        asr_giga_cuts = librispeech.gigaspeech_dev_cuts()
+        asr_giga_cuts = asr_giga_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0))
+        asr_giga_cuts = asr_giga_cuts.filter(remove_short_and_long_utt)
+        asr_giga_valid_dl = librispeech.valid_dataloaders(asr_giga_cuts)
         
+        valid_sets.append("ASR_giga")
+        valid_dls.append(asr_giga_valid_dl)
+
     if params.use_wenetspeech:
         asr_wenet_cuts = librispeech.wenetspeech_dev_cuts()
         asr_wenet_cuts = asr_wenet_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 0))
