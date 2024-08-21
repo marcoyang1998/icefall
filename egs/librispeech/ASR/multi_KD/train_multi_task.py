@@ -1107,10 +1107,9 @@ def compute_loss(
         except:
             task_id = torch.tensor([0 for _ in cuts]).to(device)
         if random.random() < 0.05:
-            logging.info(cut_ids)
             logging.info(f"A total of {len(cuts)} cuts. {sum(task_id==0)} from LS, {sum(task_id==1)} from Vox, {sum(task_id==2)} fro AS")
     else:
-        task_id = None
+        task_id = torch.tensor([c.task_id for c in cuts]).to(device)
 
     with torch.set_grad_enabled(is_training):
         simple_loss, pruned_loss, ctc_loss, audio_tagging_loss, sv_loss = model(
