@@ -3,7 +3,6 @@ log-*
 run*.sh
 multi_KD/pretrained_models
 downloads
-run
 *.h5
 *.npy
 *.gz
