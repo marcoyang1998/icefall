@@ -370,6 +370,21 @@ def get_parser():
         modified_beam_search_LODR.
         """,
     )
+
+    parser.add_argument(
+        "--snr",
+        type=int,
+        default=-1,
+        help="The SNR ratio of the test data"
+    )
+
+    parser.add_argument(
+        "--mixed-noise",
+        type=str,
+        default="as",
+        help="The noise mixed in"
+    )
+
     add_model_arguments(parser)
 
     return parser
@@ -830,6 +845,9 @@ def main():
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
 
+    if params.snr > 0:
+        params.suffix += f"-snr-{params.snr}"
+
     setup_logger(f"{params.res_dir}/log-decode-{params.suffix}")
     logging.info("Decoding started")
 
@@ -926,7 +944,8 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
-                )
+                ),
+                strict=False,
             )
 
     model.to(device)

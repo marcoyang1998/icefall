@@ -68,6 +68,7 @@ import torch.nn as nn
 from asr_datamodule import LibriSpeechAsrDataModule
 from decoder import Decoder
 from joiner import Joiner
+from lhotse import load_manifest_lazy
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.collation import collate_custom_field
 from lhotse.dataset.sampling.base import CutSampler
@@ -443,6 +444,19 @@ def get_parser():
         default=0.1,
         help="The scale of codebook loss.",
     )
+    
+    parser.add_argument(
+        "--teacher-model",
+        type=str,
+        default="small.en"
+    )
+
+    parser.add_argument(
+        "--teacher-layer",
+        type=int,
+        default=-1,
+        help="Which layer's embedding to be used as teacher targets, need to load manifest"
+    )
 
     parser.add_argument(
         "--embedding-loss-scale",
@@ -804,7 +818,7 @@ def save_checkpoint(
         copyfile(src=filename, dst=best_valid_filename)
 
 
-def extract_whisper_embedding(batch: Dict) -> Tuple[Tensor, Tensor]:
+def extract_whisper_embedding(batch: Dict, key="whisper_embedding") -> Tuple[Tensor, Tensor]:
     cuts = batch["supervisions"]["cut"]
     # -100 is identical to ignore_value in CE loss computation.
     cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
@@ -1212,6 +1226,16 @@ def run(rank, world_size, args):
     if not params.use_transducer:
         params.ctc_loss_scale = 1.0
 
+
+    if "small" in params.teacher_model:
+        params.teacher_embedding_dim = 768
+    elif "medium" in params.teacher_model:
+        params.teacher_embedding_dim = 1024
+    elif "large" in params.teacher_model:
+        params.teacher_embedding_dim = 1280
+    else:
+        raise ValueError()
+
     logging.info(params)
 
     logging.info("About to create model")
@@ -1267,10 +1291,21 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args)
 
-    train_cuts = librispeech.train_clean_100_cuts()
-    if params.full_libri:
-        train_cuts += librispeech.train_clean_360_cuts()
-        train_cuts += librispeech.train_other_500_cuts()
+    # train_cuts = librispeech.train_clean_100_cuts()
+    if not params.full_libri:
+        if params.teacher_layer == -1:
+            train_cuts = load_manifest_lazy(
+                params.manifest_dir / f"librispeech_cuts_train-clean-100-with-whisper-{params.teacher_model}-embeddings.jsonl.gz"
+            )
+        else:
+            train_cuts = load_manifest_lazy(
+                params.manifest_dir / f"librispeech_cuts_train-clean-100-with-whisper-{params.teacher_model}-layer-{params.teacher_layer}-embeddings.jsonl.gz"
+            )
+    
+    else:
+        train_cuts = load_manifest_lazy(
+            params.manifest_dir / f"librispeech_cuts_train-all-shuf-with-whisper-{params.teacher_model}-embeddings.jsonl.gz"
+        )
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds

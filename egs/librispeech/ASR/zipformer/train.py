@@ -788,7 +788,7 @@ def extract_codebook_indexes(batch: Dict) -> Tuple[Tensor, Tensor]:
     # -100 is identical to ignore_value in CE loss computation.
     cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
     codebook_indexes, codebook_indexes_lens = collate_custom_field(
-        cuts_pre_mixed, "codebook_indexes", pad_value=-100
+        cuts_pre_mixed, "whisper_codebook_indexes", pad_value=-100
     )
     return codebook_indexes, codebook_indexes_lens
 
@@ -841,7 +841,7 @@ def compute_loss(
         codebook_indexes = None
 
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss, codebook_loss = model(
+        simple_loss, pruned_loss, ctc_loss, codebook_loss, _ = model(
             x=feature,
             x_lens=feature_lens,
             y=y,
@@ -1236,10 +1236,10 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args)
 
-    train_cuts = librispeech.train_clean_100_cuts()
-    if params.full_libri:
-        train_cuts += librispeech.train_clean_360_cuts()
-        train_cuts += librispeech.train_other_500_cuts()
+    if not params.full_libri:
+        train_cuts = librispeech.train_clean_100_cuts()
+    else:
+        train_cuts = librispeech.train_all_shuf_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
