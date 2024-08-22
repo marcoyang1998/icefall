@@ -50,7 +50,7 @@ try:
     from sklearn.metrics import average_precision_score
 except Exception as ex:
     raise RuntimeError(f"{ex}\nPlease run\n" "pip3 install -U scikit-learn")
-from train import add_model_arguments, get_model, get_params, str2multihot
+from train_KD import add_model_arguments, get_model, get_params, str2multihot
 
 from icefall.checkpoint import (
     average_checkpoints,
