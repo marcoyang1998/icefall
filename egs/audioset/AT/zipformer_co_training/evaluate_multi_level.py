@@ -206,7 +206,7 @@ def main():
     params = get_params()
     params.update(vars(args))
 
-    params.res_dir = params.exp_dir / "inference_audio_tagging"
+    params.res_dir = params.exp_dir / "inference_audio_tagging_multi_level"
 
     if params.iter > 0:
         params.suffix = f"iter-{params.iter}-avg-{params.avg}"
