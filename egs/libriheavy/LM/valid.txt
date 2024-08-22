@@ -1,0 +1,4 @@
+334385 /ceph-data3/xiaoyu/librilight_text/output_text_large_cleaned/History of Julius Caesar/text.txt
+40699 /ceph-data3/xiaoyu/librilight_text/output_text_large_cleaned/Funeral Oration on Meletius/text.txt
+679125 /ceph-data3/xiaoyu/librilight_text/output_text_large_cleaned/Best British Short Stories of 1922/text.txt
+35960 /ceph-data3/xiaoyu/librilight_text/output_text_large_cleaned/Homeward Songs by the Way/text.txt
