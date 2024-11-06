@@ -782,7 +782,7 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
-    import pdb; pdb.set_trace()
+    
     tokens = batch["tokens"]
     # at entry, token is (N, T, C)
     assert tokens.ndim == 2
@@ -1140,7 +1140,6 @@ def run(rank, world_size, args):
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
 
-    import pdb; pdb.set_trace()
     assert params.save_every_n >= params.average_period
     model_avg: Optional[nn.Module] = None
     if rank == 0:
@@ -1188,10 +1187,10 @@ def run(rank, world_size, args):
 
     librispeech = LibriSpeechAsrDataModule(args)
 
-    train_cuts = librispeech.train_clean_100_cuts()
-    if params.full_libri:
-        train_cuts += librispeech.train_clean_360_cuts()
-        train_cuts += librispeech.train_other_500_cuts()
+    if not params.full_libri:
+        train_cuts = librispeech.train_clean_100_cuts() # 100h
+    else:
+        train_cuts = librispeech.train_all_shuf_cuts() # full libri
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
