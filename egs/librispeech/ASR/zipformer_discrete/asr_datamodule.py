@@ -158,6 +158,12 @@ class LibriSpeechAsrDataModule:
             help="AudioSamples or PrecomputedFeatures",
         )
         group.add_argument(
+            "--duplicate-tokens",
+            type=str2bool,
+            default=True,
+            help="If true, repeat every token twice",
+        )
+        group.add_argument(
             "--num-tokens",
             type=int,
             default=500,
@@ -207,6 +213,7 @@ class LibriSpeechAsrDataModule:
         train = DiscretizedInputSpeechRecognitionDataset(
             field="discrete_tokens",
             num_tokens=self.args.num_tokens,
+            duplicate_tokens=self.args.duplicate_tokens,
             frequency_size=80,
             token_type="hubert",
             input_transforms=input_transforms,
@@ -254,6 +261,7 @@ class LibriSpeechAsrDataModule:
         logging.info("About to create dev dataset")
         validate = DiscretizedInputSpeechRecognitionDataset(
             field="discrete_tokens",
+            duplicate_tokens=self.args.duplicate_tokens,
             num_tokens=self.args.num_tokens,
             token_type="hubert",
         )
@@ -278,6 +286,7 @@ class LibriSpeechAsrDataModule:
         test = DiscretizedInputSpeechRecognitionDataset(
             field="discrete_tokens",
             num_tokens=self.args.num_tokens,
+            duplicate_tokens=self.args.duplicate_tokens,
             token_type="hubert",
         )
         sampler = DynamicBucketingSampler(
@@ -313,6 +322,16 @@ class LibriSpeechAsrDataModule:
         logging.info("About to get train-other-500 cuts")
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_train-other-500.jsonl.gz"
+        )
+    
+    @lru_cache()
+    def train_all_shuf_cuts(self) -> CutSet:
+        logging.info(
+            "About to get the shuffled train-clean-100, \
+            train-clean-360 and train-other-500 cuts"
+        )
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
         )
 
     @lru_cache()

@@ -28,6 +28,7 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
         token_type: str,
         frequency_size: Optional[int] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
+        duplicate_tokens: bool = True,
     ) -> None:
         super().__init__()
         self.field = field
@@ -35,6 +36,7 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
         self.frequency_size = frequency_size
         self.token_type = token_type
         self.input_transforms = ifnone(input_transforms, [])
+        self.duplicate_tokens = duplicate_tokens
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Any]:
         if self.token_type in ("wavlm", "hubert"):
@@ -79,28 +81,29 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
             )
             token_lens = torch.tensor(token_lens, dtype=torch.int64)
 
-        if self.token_type in ("wavlm", "hubert"):
-            tokens = (
-                torch.nn.functional.interpolate(
-                    tokens.unsqueeze(0).to(torch.float32),
-                    size=int(tokens.size(1)) * 2,
-                    mode="nearest",
+        if self.duplicate_tokens:
+            if self.token_type in ("wavlm", "hubert"):
+                tokens = (
+                    torch.nn.functional.interpolate(
+                        tokens.unsqueeze(0).to(torch.float32),
+                        size=int(tokens.size(1)) * 2,
+                        mode="nearest",
+                    )
+                    .squeeze(0)
+                    .to(torch.int64)
                 )
-                .squeeze(0)
-                .to(torch.int64)
-            )
-            token_lens = token_lens * 2
-        elif self.token_type == "encodec":
-            tokens = (
-                torch.nn.functional.interpolate(
-                    tokens.unsqueeze(0).to(torch.float32),
-                    size=(math.ceil(tokens.size(1) * 4 / 3), 8),
-                    mode="nearest",
+                token_lens = token_lens * 2
+            elif self.token_type == "encodec":
+                tokens = (
+                    torch.nn.functional.interpolate(
+                        tokens.unsqueeze(0).to(torch.float32),
+                        size=(math.ceil(tokens.size(1) * 4 / 3), 8),
+                        mode="nearest",
+                    )
+                    .squeeze(0)
+                    .to(torch.int64)
                 )
-                .squeeze(0)
-                .to(torch.int64)
-            )
-            token_lens = (tokens[:, :, 0] != self.num_tokens).sum(1)
+                token_lens = (tokens[:, :, 0] != self.num_tokens).sum(1)
 
         data_dict = {}
         for tnfm in self.input_transforms:
