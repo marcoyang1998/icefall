@@ -24,7 +24,7 @@ from typing import Any, Dict, Optional
 import torch
 from lhotse import CutSet, Fbank, FbankConfig, load_manifest, load_manifest_lazy
 from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
-    AudioTaggingDataset,
+    DiscretizedInputAugment,
     CutConcatenate,
     CutMix,
     DynamicBucketingSampler,
@@ -33,13 +33,11 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     SpecAugment,
     WeightedSimpleCutSampler,
 )
-from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
-    AudioSamples,
-    OnTheFlyFeatures,
-)
+
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
+from dataset import DiscretizedInputAudioTaggingDataset
 from icefall.utils import str2bool
 
 
@@ -219,6 +217,19 @@ class AudioSetATDatamodule:
             default="PrecomputedFeatures",
             help="AudioSamples or PrecomputedFeatures",
         )
+        
+        group.add_argument(
+            "--duplicate-tokens",
+            type=str2bool,
+            default=True,
+            help="If true, repeat every token twice",
+        )
+        group.add_argument(
+            "--num-tokens",
+            type=int,
+            default=500,
+            help="Number of k-means clusters",
+        )
 
     def train_dataloaders(
         self,
@@ -259,55 +270,40 @@ class AudioSetATDatamodule:
 
         input_transforms = []
         if self.args.enable_spec_aug:
-            logging.info("Enable SpecAugment")
+            logging.info("Enable DiscretizedInputAugment")
             logging.info(f"Time warp factor: {self.args.spec_aug_time_warp_factor}")
             # Set the value of num_frame_masks according to Lhotse's version.
             # In different Lhotse's versions, the default of num_frame_masks is
             # different.
             num_frame_masks = 10
             num_frame_masks_parameter = inspect.signature(
-                SpecAugment.__init__
+                DiscretizedInputAugment.__init__
             ).parameters["num_frame_masks"]
             if num_frame_masks_parameter.default == 1:
                 num_frame_masks = 2
             logging.info(f"Num frame mask: {num_frame_masks}")
             input_transforms.append(
-                SpecAugment(
+                DiscretizedInputAugment(
+                    token_type="hubert",
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
-                    num_feature_masks=2,
+                    tokens_mask_size=27,
+                    num_token_masks=2,
                     frames_mask_size=100,
                 )
             )
         else:
-            logging.info("Disable SpecAugment")
+            logging.info("Disable DiscretizedInputAugment")
 
         logging.info("About to create train dataset")
-        train = AudioTaggingDataset(
-            input_strategy=eval(self.args.input_strategy)(),
-            cut_transforms=transforms,
+        train = DiscretizedInputAudioTaggingDataset(
+            field="discrete_tokens",
+            num_tokens=self.args.num_tokens,
+            duplicate_tokens=self.args.duplicate_tokens,
+            frequency_size=80,
+            token_type="hubert",
             input_transforms=input_transforms,
-            return_cuts=self.args.return_cuts,
         )
-
-        if self.args.on_the_fly_feats:
-            # NOTE: the PerturbSpeed transform should be added only if we
-            # remove it from data prep stage.
-            # Add on-the-fly speed perturbation; since originally it would
-            # have increased epoch size by 3, we will apply prob 2/3 and use
-            # 3x more epochs.
-            # Speed perturbation probably should come first before
-            # concatenation, but in principle the transforms order doesn't have
-            # to be strict (e.g. could be randomized)
-            # transforms = [PerturbSpeed(factors=[0.9, 1.1], p=2/3)] + transforms   # noqa
-            # Drop feats to be on the safe side.
-            train = AudioTaggingDataset(
-                cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
-                input_transforms=input_transforms,
-                return_cuts=self.args.return_cuts,
-            )
 
         if self.args.bucketing_sampler:
             assert (
@@ -374,17 +370,12 @@ class AudioSetATDatamodule:
             ] + transforms
 
         logging.info("About to create dev dataset")
-        if self.args.on_the_fly_feats:
-            validate = AudioTaggingDataset(
-                cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
-                return_cuts=self.args.return_cuts,
-            )
-        else:
-            validate = AudioTaggingDataset(
-                cut_transforms=transforms,
-                return_cuts=self.args.return_cuts,
-            )
+        validate = DiscretizedInputAudioTaggingDataset(
+            field="discrete_tokens",
+            num_tokens=self.args.num_tokens,
+            duplicate_tokens=self.args.duplicate_tokens,
+            token_type="hubert",
+        )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
             max_duration=self.args.max_duration,
@@ -403,11 +394,11 @@ class AudioSetATDatamodule:
 
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
         logging.debug("About to create test dataset")
-        test = AudioTaggingDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
-            if self.args.on_the_fly_feats
-            else eval(self.args.input_strategy)(),
-            return_cuts=self.args.return_cuts,
+        test = DiscretizedInputAudioTaggingDataset(
+            field="discrete_tokens",
+            num_tokens=self.args.num_tokens,
+            duplicate_tokens=self.args.duplicate_tokens,
+            token_type="hubert",
         )
         sampler = DynamicBucketingSampler(
             cuts,

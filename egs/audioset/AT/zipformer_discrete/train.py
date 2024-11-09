@@ -207,6 +207,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--num-events", type=int, default=527, help="Number of sound events"
     )
+    
+    parser.add_argument(
+        "--token-dim",
+        type=int,
+        default=80,
+        help="Dimension of token embeddings.",
+    )
 
 
 def get_parser():
@@ -455,12 +462,17 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # In the normal configuration, we will downsample once more at the end
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
+    tokens_embed = nn.Embedding(
+        num_embeddings=params.num_tokens+1,
+        embedding_dim=80,
+        padding_idx=params.num_tokens,
+    )
     encoder_embed = Conv2dSubsampling(
         in_channels=params.feature_dim,
         out_channels=_to_int_tuple(params.encoder_dim)[0],
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
     )
-    return encoder_embed
+    return tokens_embed, encoder_embed
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
@@ -488,10 +500,11 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
 
 def get_model(params: AttributeDict) -> nn.Module:
 
-    encoder_embed = get_encoder_embed(params)
+    tokens_embed, encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
     model = AudioTaggingModel(
+        token_embed=tokens_embed,
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
@@ -641,28 +654,27 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
-    feature = batch["inputs"]
-    # at entry, feature is (N, T, C)
-    assert feature.ndim == 3
-    feature = feature.to(device)
+    
+    tokens = batch["tokens"].to(device) # at entry, token is (N, T)
+    token_lens = batch["token_lens"].to(device)
+    assert tokens.ndim == 2
+    
+    frequency_masks = (
+        batch["frequency_masks"].to(device)
+        if "frequency_masks" in batch.keys()
+        else None
+    )
 
-    supervisions = batch["supervisions"]
-    events = supervisions[
-        "audio_event"
-    ]  # the label indices are in CED format (https://github.com/RicherMans/CED)
+    events = batch["audio_events"]  # the label indices are in CED format (https://github.com/RicherMans/CED)
     labels, _ = str2multihot(events, n_classes=params.num_events)
     labels = labels.to(device)
 
-    feature_lens = supervisions["num_frames"].to(device)
-
-    batch_idx_train = params.batch_idx_train
-    warm_step = params.warm_step
-
     with torch.set_grad_enabled(is_training):
         loss = model(
-            x=feature,
-            x_lens=feature_lens,
+            x=tokens,
+            x_lens=token_lens,
             target=labels,
+            frequency_masks=frequency_masks,
         )
 
     assert loss.requires_grad == is_training
@@ -670,7 +682,7 @@ def compute_loss(
     info = MetricsTracker()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
+        info["frames"] = (token_lens // params.subsampling_factor).sum().item()
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
@@ -795,7 +807,7 @@ def train_one_epoch(
             set_batch_count(model, get_adjusted_batch_count(params))
 
         params.batch_idx_train += 1
-        batch_size = batch["inputs"].size(0)
+        batch_size = len(batch["cuts"])
         num_samples += batch_size
 
         try:
@@ -1127,10 +1139,9 @@ def display_and_save_batch(
     logging.info(f"Saving batch to {filename}")
     torch.save(batch, filename)
 
-    supervisions = batch["supervisions"]
-    features = batch["inputs"]
+    tokens = batch["inputs"]
 
-    logging.info(f"features shape: {features.shape}")
+    logging.info(f"features shape: {tokens.shape}")
 
 
 def scan_pessimistic_batches_for_oom(

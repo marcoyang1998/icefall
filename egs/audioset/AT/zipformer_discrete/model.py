@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import random
 from typing import Tuple
 
 import torch
@@ -104,11 +105,12 @@ class AudioTaggingModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         target: torch.Tensor,
+        frequency_masks: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
           x:
-            A 3-D tensor of shape (N, T, C).
+            A 2-D tensor of shape (N, C).
           x_lens:
             A 1-D tensor of shape (N,). It contains the number of frames in `x`
             before padding.
@@ -117,11 +119,18 @@ class AudioTaggingModel(nn.Module):
         Returns:
           Return the binary crossentropy loss
         """
-        assert x.ndim == 3, x.shape
+        assert x.ndim == 2, x.shape
         assert x_lens.ndim == 1, x_lens.shape
 
         # embed the tokens
         x = self.token_embed(x)
+        
+        if frequency_masks is not None:
+            x.masked_fill_(frequency_masks.unsqueeze(1), 0)
+            
+        # Add GaussianNoise
+        if self.training and random.random() < 0.25:
+            x += torch.randn_like(x)
         
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
