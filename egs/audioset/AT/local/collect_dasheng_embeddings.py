@@ -1,8 +1,8 @@
-import logging
 import argparse
+import logging
+import os
 
 import torch
-
 from lhotse import load_manifest_lazy, CutSet
 from lhotse.features.io import LilcomChunkyWriter
 from lhotse.utils import fastcopy
@@ -42,6 +42,12 @@ def get_parser():
         "--subset",
         type=str,
         required=True,
+    )
+    
+    parser.add_argument(
+        "--max-duration",
+        type=int,
+        default=200,
     )
     
     return parser.parse_args()
@@ -144,12 +150,14 @@ if __name__=="__main__":
     embedding_path = f"embeddings/dasheng_embeddings/dasheng-{dasheng_version}-layer-{layer_idx}-{subset}.h5"
     output_manifest_path = f"manifests/{subset}-dasheng-{dasheng_version}-layer-{layer_idx}.jsonl.gz"
     
-    max_duration = 200
-    collect_results(
-        dasheng_version=dasheng_version,
-        manifest_path=manifest_path,
-        embedding_path=embedding_path,
-        output_manifest_path=output_manifest_path,
-        layer_idx=layer_idx,
-        max_duration=max_duration,
-    )
+    if not os.path.exists(output_manifest_path):
+        collect_results(
+            dasheng_version=dasheng_version,
+            manifest_path=manifest_path,
+            embedding_path=embedding_path,
+            output_manifest_path=output_manifest_path,
+            layer_idx=layer_idx,
+            max_duration=args.max_duration,
+        )
+    else:
+        logging.info(f"The manifest {output_manifest_path} already exists. Skip this subset.")
