@@ -67,7 +67,7 @@ def get_parser():
     parser.add_argument(
         "--normalize",
         type=str2bool,
-        default=False,
+        default=True,
         help="If normalize each dimension to zero mean and unit variance"
     )
     
