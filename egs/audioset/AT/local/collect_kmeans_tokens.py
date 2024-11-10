@@ -14,6 +14,8 @@ from lhotse.dataset import DynamicBucketingSampler, UnsupervisedWaveformDataset
 from dasheng import dasheng_base, dasheng_06B, dasheng_12B
 from train_kmeans import normalize_embedding
 
+from icefall.utils import str2bool
+
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -62,6 +64,20 @@ def get_parser():
         default=200,
     )
     
+    parser.add_argument(
+        "--truncate",
+        type=str2bool,
+        default=False,
+        help="If truncate the cuts to 10s max"
+    )
+    
+    parser.add_argument(
+        "--normalize",
+        type=str2bool,
+        default=True,
+        help="If normalize each dimension to zero mean and unit variance"
+    )
+    
     return parser.parse_args()       
 
 @torch.no_grad()
@@ -71,6 +87,7 @@ def collect_tokens(
     manifest_path,
     kmeans_model_path,
     output_manifest_path,
+    normalize,
     layer_idx=21,
     max_duration=200
 ):
@@ -116,12 +133,13 @@ def collect_tokens(
     model.to(device)
     
     # load the normalization stats
-    logging.info("Loading normalization stats")
-    if args.model_name == "dasheng":
-        global_mean = np.load(f"normalization_stats/dasheng-{args.model_version}-mu.npy")
-        global_std = np.load(f"normalization_stats/dasheng-{args.model_version}-std.npy")
-    else:
-        raise ValueError(f"{model_name} is not supported yet")
+    if normalize:
+        logging.info("Loading normalization stats")
+        if args.model_name == "dasheng":
+            global_mean = np.load(f"normalization_stats/dasheng-{args.model_version}-mu.npy")
+            global_std = np.load(f"normalization_stats/dasheng-{args.model_version}-std.npy")
+        else:
+            raise ValueError(f"{model_name} is not supported yet")
     
     # load the kmeans model
     logging.info(f"Loading kmeans model from {kmeans_model_path}")
@@ -146,11 +164,15 @@ def collect_tokens(
         
         for j, cut in enumerate(cuts):
             cut = cut if isinstance(cut, MonoCut) else cut.tracks[0].cut
-            cur_embeddings = normalize_embedding(
-                embeddings[j, :embedding_lens[j], :],
-                global_mean,
-                global_std,
-            )[0]
+            
+            if normalize:
+                cur_embeddings = normalize_embedding(
+                    embeddings[j, :embedding_lens[j], :],
+                    global_mean,
+                    global_std,
+                )[0]
+            else:
+                cur_embeddings = embeddings[j, :embedding_lens[j], :]
             
             labels = kmeans_model.predict(cur_embeddings)
             
@@ -183,6 +205,7 @@ if __name__=="__main__":
             manifest_path=args.manifest_path,
             kmeans_model_path=args.kmeans_model,
             output_manifest_path=args.output_manifest_path,
+            normalize=args.normalize,
             layer_idx=args.layer_idx,
             max_duration=args.max_duration,
         )
