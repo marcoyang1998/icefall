@@ -26,7 +26,8 @@ class AudioTaggingModel(nn.Module):
     def __init__(
         self,
         encoder: nn.Module,
-        encoder_dim: int,
+        encoder_dim: int = 768,
+        num_encoder_layers: int = 12,
         num_events: int = 527,
         freeze_encoder: bool = True,
     ):
@@ -40,7 +41,16 @@ class AudioTaggingModel(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.encoder_dim = encoder_dim
-        self.classifier = nn.Linear(encoder_dim, num_events)
+        assert encoder_dim == encoder.embed_dim
+        self.num_encoder_layers = num_encoder_layers
+        assert num_encoder_layers == len(encoder.blocks)
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(encoder_dim, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, num_events),
+        )
         self.freeze_encoder = freeze_encoder
         
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction="sum")
