@@ -40,7 +40,12 @@ class AudioTaggingModel(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.encoder_dim = encoder_dim
-        self.classifier = nn.Linear(encoder_dim, num_events)
+        self.classifier = nn.Sequential(
+            nn.Linear(encoder_dim, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, num_events),
+        )
         self.freeze_encoder = freeze_encoder
         
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction="sum")
@@ -48,17 +53,24 @@ class AudioTaggingModel(nn.Module):
     def forward_encoder(
         self,
         x: torch.Tensor,
+        layer_idx: int = -1
     ):
-        x, _ = self.encoder(x)
+        if layer_idx == -1:
+            x, _ = self.encoder(x)
+        else:
+            _, all_hidden_states = self.encoder(x, output_hidden_states=True)
+            x = all_hidden_states[layer_idx] # (B,T,C)
         return x
     
     def forward(
         self,
         x: torch.Tensor,
         target: torch.Tensor,
+        layer_idx: int = -1,
     ):
+        # layer_idx means which layer's feature to use for classification
         with torch.set_grad_enabled(not self.freeze_encoder):
-            x = self.forward_encoder(x)
+            x = self.forward_encoder(x, layer_idx=layer_idx)
             
         logits = self.classifier(x) # (B,T,C)
         logits = logits.mean(dim=1)
