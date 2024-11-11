@@ -63,7 +63,7 @@ def get_parser():
     parser.add_argument("--reassignment-ratio", default=0.0, type=float)
     parser.add_argument("--kmeans-model-path", type=str, required=True)
     parser.add_argument("--output-manifest", type=str, required=True)
-    
+    parser.add_argument("--layer-idx", type=int, required=True)
     parser.add_argument(
         "--normalize",
         type=str2bool,
@@ -124,8 +124,8 @@ def train_kmeans(args, cuts):
         logging.info(f"Start normalizing the embeddings")
         all_embeddings, mu, sigma = normalize_embedding(all_embeddings)
         logging.info(f"Saving the normalization stats to normalization_stats folder")
-        np.save(f"normalization_stats/{args.model_name}-{args.model_version}-mu.npy", mu)
-        np.save(f"normalization_stats/{args.model_name}-{args.model_version}-std.npy", sigma)
+        np.save(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-mu.npy", mu)
+        np.save(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-std.npy", sigma)
         
     
     km_model = get_km_model(
@@ -154,29 +154,33 @@ def compute_kmeans_label(args):
     
     # train a kmeans model
     if not os.path.exists(args.kmeans_model_path):
+        logging.info("No existing kmeans model, training a new one")
         km_model = train_kmeans(args, cuts=cuts)
     else:
         logging.info(f"Loading pretrained kmeans model from {args.kmeans_model_path}")
         km_model = joblib.load(args.kmeans_model_path)
         
     if args.normalize:
-        global_mean = np.load(f"normalization_stats/{args.model_name}-{args.model_version}-mu.npy")
-        global_std = np.load(f"normalization_stats/{args.model_name}-{args.model_version}-std.npy")
+        global_mean = np.load(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-mu.npy")
+        global_std = np.load(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-std.npy")
     
-    new_cuts = []
-    for i, cut in enumerate(cuts):
-        embedding = cut.load_custom(f"{args.model_name}_embedding")
-        if args.normalize:
-            embedding, _, _ = normalize_embedding(embedding, global_mean, global_std)
-        labels = km_model.predict(embedding)
-        cut.custom.update({"tokens": labels.tolist()})
-        new_cut = fastcopy(cut)
-        new_cuts.append(new_cut)
-        if i % 200 == 0 and i > 0:
-            logging.info(f"Processed {i} cuts")
-        
-    CutSet.from_cuts(new_cuts).to_jsonl(args.output_manifest)
-    logging.info(f"The output manifest is saved to {args.output_manifest}")
+    if not os.path.exists(args.output_manifest):
+        new_cuts = []
+        for i, cut in enumerate(cuts):
+            embedding = cut.load_custom(f"{args.model_name}_embedding")
+            if args.normalize:
+                embedding, _, _ = normalize_embedding(embedding, global_mean, global_std)
+            labels = km_model.predict(embedding)
+            cut.custom.update({"tokens": labels.tolist()})
+            new_cut = fastcopy(cut)
+            new_cuts.append(new_cut)
+            if i % 200 == 0 and i > 0:
+                logging.info(f"Processed {i} cuts")
+            
+        CutSet.from_cuts(new_cuts).to_jsonl(args.output_manifest)
+        logging.info(f"The output manifest is saved to {args.output_manifest}")
+    else:
+        logging.info(f"The output manifest already exists at {args.output_manifest}")
         
     
 if __name__=="__main__":
