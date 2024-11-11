@@ -2,10 +2,42 @@ import math
 from typing import Optional, List, Callable, Dict, Any
 
 from lhotse import CutSet, validate
+from lhotse.dataset.collation import collate_audio
+from lhotse.audio.utils import suppress_audio_loading_errors
 from lhotse.utils import compute_num_frames, ifnone
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from lhotse.workarounds import Hdf5MemoryIssueFix
+
+class WaveformAudioTaggingDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        collate: bool = True,
+    ):
+        super().__init__()
+        self.collate = collate
+        
+    def __getitem__(self, cuts: CutSet) -> Dict[str, Any]:
+        audio_events = [c.supervisions[0].audio_event for c in cuts]
+        if self.collate:
+            audio, audio_lens = collate_audio(cuts)
+            return {
+                "cuts": cuts,
+                "audio": audio,
+                "audio_lens": audio_lens,
+                "audio_events": audio_events,
+            }
+        else:
+            remain_cuts = []
+            remain_audios = []
+            for c in cuts:
+                with suppress_audio_loading_errors():
+                    remain_audios.append(c.load_audio())
+                    remain_cuts.append(c)
+            return {"cuts": CutSet.from_cuts(remain_cuts), "audio": remain_audios, "audio_events": audio_events}
+    def _validate(self, cuts: CutSet) -> None:
+        validate(cuts)
+        assert all(cut.has_recording for cut in cuts)
 
 class DiscretizedInputAudioTaggingDataset(torch.utils.data.Dataset):
     """
