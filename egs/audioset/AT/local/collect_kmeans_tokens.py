@@ -136,8 +136,8 @@ def collect_tokens(
     if normalize:
         logging.info("Loading normalization stats")
         if args.model_name == "dasheng":
-            global_mean = np.load(f"normalization_stats/dasheng-{args.model_version}-mu.npy")
-            global_std = np.load(f"normalization_stats/dasheng-{args.model_version}-std.npy")
+            global_mean = np.load(f"normalization_stats/dasheng-{args.model_version}-layer-{layer_idx}-mu.npy")
+            global_std = np.load(f"normalization_stats/dasheng-{args.model_version}-layer-{layer_idx}-std.npy")
         else:
             raise ValueError(f"{model_name} is not supported yet")
     
