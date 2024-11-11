@@ -99,6 +99,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=True,
     )
+    
+    parser.add_argument(
+        "--layer-idx",
+        type=int,
+        default=-1,
+        help="Which layer to use for classification. If -1, use the final output."
+    )
 
 
 def get_parser():
@@ -495,25 +502,24 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
-    cuts = batch["supervisions"]["cut"]
+    cuts = batch["cuts"]
     
-    audios = [torch.from_numpy(c.load_audio()).squeeze(0) for c in cuts]
-    audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True)
-    audios = audios.to(device)
+    audios = batch["audio"].to(device)
+    audio_lens = batch["audio_lens"].to(device)
     
-    supervisions = batch["supervisions"]
-    events = supervisions[
-        "audio_event"
-    ]  # the label indices are in CED format (https://github.com/RicherMans/CED)
+    # the label indices are in CED format (https://github.com/RicherMans/CED)
+    events = batch["audio_events"]
     labels, _ = str2multihot(events, n_classes=params.num_events)
     labels = labels.to(device)
 
-    feature_lens = supervisions["num_frames"].to(device)
+    # feature_lens = supervisions["num_frames"].to(device)
+    feature_lens = audio_lens // 160 # 100 samples per frame
 
     with torch.set_grad_enabled(is_training):
         loss = model(
             x=audios,
             target=labels,
+            layer_idx=params.layer_idx,
         )
 
     assert loss.requires_grad == is_training
@@ -644,7 +650,7 @@ def train_one_epoch(
     for batch_idx, batch in enumerate(train_dl):
 
         params.batch_idx_train += 1
-        batch_size = batch["inputs"].size(0)
+        batch_size = len(batch["cuts"])
         num_samples += batch_size
 
         try:
@@ -899,12 +905,12 @@ def run(rank, world_size, args):
     else:
         sampler_state_dict = None
 
-    train_dl = audioset.train_dataloaders(
+    train_dl = audioset.waveform_train_dataloaders(
         train_cuts, sampler_state_dict=sampler_state_dict
     )
 
     valid_cuts = audioset.audioset_eval_cuts()
-    valid_dl = audioset.valid_dataloaders(valid_cuts)
+    valid_dl = audioset.waveform_valid_dataloaders(valid_cuts)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
@@ -976,8 +982,7 @@ def display_and_save_batch(
     logging.info(f"Saving batch to {filename}")
     torch.save(batch, filename)
 
-    supervisions = batch["supervisions"]
-    features = batch["inputs"]
+    features = batch["audio"]
 
     logging.info(f"features shape: {features.shape}")
 
