@@ -63,12 +63,26 @@ def get_parser():
     parser.add_argument("--reassignment-ratio", default=0.0, type=float)
     parser.add_argument("--kmeans-model-path", type=str, required=True)
     parser.add_argument("--output-manifest", type=str, required=True)
-    parser.add_argument("--layer-idx", type=int, required=True)
+    parser.add_argument("--layer-idx", type=int, default=-1)
     parser.add_argument(
         "--normalize",
         type=str2bool,
         default=True,
         help="If normalize each dimension to zero mean and unit variance"
+    )
+    parser.add_argument(
+        "--weighted-combine",
+        type=str,
+        default=False,
+        help="Whether to use weighted combination from the dasheng model. If True, the layer idx will be ignored",
+    )
+    parser.add_argument(
+        "--global-mean-file",
+        type=str,
+    )
+    parser.add_argument(
+        "--global-std-file",
+        type=str,
     )
     
     return parser.parse_args()
@@ -124,8 +138,8 @@ def train_kmeans(args, cuts):
         logging.info(f"Start normalizing the embeddings")
         all_embeddings, mu, sigma = normalize_embedding(all_embeddings)
         logging.info(f"Saving the normalization stats to normalization_stats folder")
-        np.save(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-mu.npy", mu)
-        np.save(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-std.npy", sigma)
+        np.save(args.global_mean_file, mu)
+        np.save(args.global_std_file, sigma)
         
     
     km_model = get_km_model(
@@ -152,6 +166,13 @@ def compute_kmeans_label(args):
     logging.info(f"Loading manifest from {args.manifest_path}")
     cuts = load_manifest_lazy(args.manifest_path)
     
+    # if args.weighted_combine:
+    #     global_mean_file = f"normalization_stats/{args.model_name}-{args.model_version}-weighted-combine-mu.npy"
+    #     global_std_file = f"normalization_stats/{args.model_name}-{args.model_version}-weighted-combine-std.npy"
+    # else:
+    #     global_mean_file = f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-mu.npy"
+    #     global_std_file = f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-std.npy"
+    
     # train a kmeans model
     if not os.path.exists(args.kmeans_model_path):
         logging.info("No existing kmeans model, training a new one")
@@ -161,8 +182,9 @@ def compute_kmeans_label(args):
         km_model = joblib.load(args.kmeans_model_path)
         
     if args.normalize:
-        global_mean = np.load(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-mu.npy")
-        global_std = np.load(f"normalization_stats/{args.model_name}-{args.model_version}-layer-{args.layer_idx}-std.npy")
+        logging.info(f"Loading normalization stats from {args.global_mean_file} and {args.global_std_file}")
+        global_mean = np.load(args.global_mean_file)
+        global_std = np.load(args.global_std_file)
     
     if not os.path.exists(args.output_manifest):
         new_cuts = []
