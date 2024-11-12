@@ -128,7 +128,9 @@ def collect_results(
     model.to(device)
     
     if weighted_combine:
+        logging.info(f"Loading weight from: {weight_file}")
         weight = torch.load(weight_file).to(device)
+        logging.info(f"Loaded weights: {weight}")
     else:
         weight = None
     
