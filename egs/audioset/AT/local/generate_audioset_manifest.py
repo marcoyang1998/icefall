@@ -65,12 +65,14 @@ def parse_csv(csv_file: str, id_mapping: Dict):
 
     mapping = {}
     with open(csv_file, "r") as fin:
-        reader = csv.reader(fin, delimiter=" ")
+        reader = csv.reader(fin, delimiter="\t")
         for i, row in enumerate(reader):
-            if i <= 2:
+            if i == 0:
                 continue
-            key = row[0].replace(",", "")
-            mapping[key] = name2id(row[-1])
+            key = row[0].split("/")[-1]
+            assert key not in mapping, f"Duplicate key: {key}"
+            # mapping[key] = name2id(row[1])
+            mapping[key] = row[1]
     return mapping
 
 
@@ -123,7 +125,7 @@ def main():
 
     new_cuts = []
     for i, audio in enumerate(audio_files):
-        cut_id = audio.split("/")[-1].split("_")[0]
+        cut_id = audio.split("/")[-1]
         recording = Recording.from_file(audio, cut_id)
         cut = MonoCut(
             id=cut_id,
@@ -150,6 +152,7 @@ def main():
         if i % 100 == 0 and i:
             logging.info(f"Processed {i} cuts until now.")
 
+    logging.info(f"Total {len(new_cuts)} cuts are valid.")
     cuts = CutSet.from_cuts(new_cuts)
 
     extractor = Fbank(FbankConfig(num_mel_bins=num_mel_bins))

@@ -10,7 +10,7 @@ stage=-1
 stop_stage=4
 
 dl_dir=$PWD/download
-fbank_dir=data/fbank
+fbank_dir=data/fbank_audioset
 
 # we assume that you have your downloaded the AudioSet and placed
 # it under $dl_dir/audioset, the folder structure should look like
@@ -39,8 +39,8 @@ log "Running prepare.sh"
 log "dl_dir: $dl_dir"
 
 if [ $stage -le -1 ] && [ $stop_stage -ge -1 ]; then
-  log "Stage 0: Download the necessary csv files"
-  if [ ! -e $dl_dir/audioset/.csv.done]; then
+  log "Stage -1: Download the necessary csv files"
+  if [ ! -e $dl_dir/audioset/.csv.done ]; then
     wget --continue "http://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv" -O "${dl_dir}/audioset/class_labels_indices.csv"
     wget --continue http://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/balanced_train_segments.csv -O "${dl_dir}/audioset/balanced_train_segments.csv"
     wget --continue http://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/eval_segments.csv -O "${dl_dir}/audioset/eval_segments.csv"
@@ -50,7 +50,7 @@ fi
 
 if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   log "Stage 0: Construct the audioset manifest and compute the fbank features for balanced set"
-  if [! -e $fbank_dir/.balanced.done]; then
+  if [ ! -e $fbank_dir/.balanced.done ]; then
     python local/generate_audioset_manifest.py \
       --dataset-dir $dl_dir/audioset \
       --split balanced \
@@ -61,8 +61,7 @@ fi
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
   log "Stage 1: Construct the audioset manifest and compute the fbank features for unbalanced set"
-  fbank_dir=data/fbank
-  if [! -e $fbank_dir/.unbalanced.done]; then
+  if [! -e $fbank_dir/.unbalanced.done ]; then
     python local/generate_audioset_manifest.py \
       --dataset-dir $dl_dir/audioset \
       --split unbalanced \
@@ -73,8 +72,7 @@ fi
 
 if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
   log "Stage 2: Construct the audioset manifest and compute the fbank features for eval set"
-  fbank_dir=data/fbank
-  if [! -e $fbank_dir/.eval.done]; then
+  if [ ! -e $fbank_dir/.eval.done ]; then
     python local/generate_audioset_manifest.py \
       --dataset-dir $dl_dir/audioset \
       --split eval \
