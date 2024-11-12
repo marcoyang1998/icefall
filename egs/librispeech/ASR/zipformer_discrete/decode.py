@@ -301,6 +301,12 @@ def get_parser():
         Used only when the decoding method is fast_beam_search_nbest,
         fast_beam_search_nbest_LG, and fast_beam_search_nbest_oracle""",
     )
+    
+    parser.add_argument(
+        "--snr",
+        type=int,
+        default=None,
+    )
 
     add_model_arguments(parser)
 
@@ -629,7 +635,11 @@ def main():
         "fast_beam_search_nbest_oracle",
         "modified_beam_search",
     )
-    params.res_dir = params.exp_dir / params.decoding_method
+    
+    if params.snr == None:
+        params.res_dir = params.exp_dir / params.decoding_method
+    else:
+        params.res_dir = params.exp_dir / f"{params.decoding_method}_snr{params.snr}"
 
     if params.iter > 0:
         params.suffix = f"iter-{params.iter}-avg-{params.avg}"
