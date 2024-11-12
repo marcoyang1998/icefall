@@ -1,3 +1,7 @@
 log-*
 .DS_Store
 run*.sh
+*/exp-*
+error*.log
+submit.sh*
+env.sh
