@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from lhotse.dataset import DynamicBucketingSampler, UnsupervisedWaveformDataset
 
 from dasheng import dasheng_base, dasheng_06B, dasheng_12B
+from icefall.utils import str2bool
 
 MODEL_DICT = {
     "base": dasheng_base,
@@ -39,6 +40,19 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--weighted-combine",
+        type=str2bool,
+        default=False,
+        help="Whether to use weighted combination of features from different layers."
+    )
+    
+    parser.add_argument(
+        "--weight-file",
+        type=str,
+        default="Path to the file containing the layer weights."
+    )
+    
+    parser.add_argument(
         "--subset",
         type=str,
         required=True,
@@ -52,7 +66,7 @@ def get_parser():
     
     return parser.parse_args()
 
-def test_wavlm():
+def test_dasheng():
     import torchaudio
     model = dasheng_base()
 
@@ -68,8 +82,23 @@ def test_wavlm():
     import pdb; pdb.set_trace()
     print(features.shape) #(B,T,C)
     
+def combine_embeddings(all_hidden_states, weight=None):
+    all_hidden_states = torch.stack(all_hidden_states, dim=0) # (L,B,T,C)
+    all_hidden_states = weight.reshape(-1, 1,1,1) * all_hidden_states # (L,B,T,C) 
+    hidden_states = torch.sum(all_hidden_states, dim=0) # (B,T,C)
+    return hidden_states
+    
 @torch.no_grad()
-def collect_results(dasheng_version, manifest_path, embedding_path, output_manifest_path, layer_idx=21, max_duration=200):
+def collect_results(
+    dasheng_version,
+    manifest_path,
+    embedding_path,
+    weighted_combine,
+    weight_file,
+    output_manifest_path,
+    layer_idx=21,
+    max_duration=200
+):
     
     # load the pretrained dasheng model
     model = MODEL_DICT[dasheng_version]()
@@ -98,6 +127,11 @@ def collect_results(dasheng_version, manifest_path, embedding_path, output_manif
     device = torch.device("cuda")
     model.to(device)
     
+    if weighted_combine:
+        weight = torch.load(weight_file).to(device)
+    else:
+        weight = None
+    
     new_cuts = []
     num_cuts = 0
     with LilcomChunkyWriter(embedding_path) as writer:
@@ -108,10 +142,14 @@ def collect_results(dasheng_version, manifest_path, embedding_path, output_manif
             
             features, all_hidden_states = model(audio_input_16khz, output_hidden_states=True)
             
-            if layer_idx != -1:
-                layer_results = all_hidden_states[layer_idx] # (B,T,C)
+            if weighted_combine:
+                layer_results = combine_embeddings(all_hidden_states, weight=weight)
             else:
-                layer_results = features # (B,T,C)
+                if layer_idx != -1:
+                    layer_results = all_hidden_states[layer_idx] # (B,T,C)
+                else:
+                    layer_results = features # (B,T,C)
+                    
             layer_results = layer_results.cpu().numpy()
             embedding_lens = audio_lens // 640 # The output frequency is 25Hz
             
@@ -145,10 +183,16 @@ if __name__=="__main__":
     dasheng_version = args.dasheng_version
     layer_idx = args.layer_idx
     subset = args.subset
+    weighted_combine = args.weighted_combine
+    weight_file = args.weight_file
     
     manifest_path = f"data/fbank_audioset/cuts_audioset_{subset}.jsonl.gz"
-    embedding_path = f"embeddings/dasheng_embeddings/dasheng-{dasheng_version}-layer-{layer_idx}-{subset}.h5"
-    output_manifest_path = f"manifests/{subset}-dasheng-{dasheng_version}-layer-{layer_idx}.jsonl.gz"
+    if weighted_combine:
+        embedding_path = f"embeddings/dasheng_embeddings/dasheng-{dasheng_version}-weighted-combine-{subset}.h5"
+        output_manifest_path = f"manifests/{subset}-dasheng-{dasheng_version}-weighted-combine.jsonl.gz"
+    else:
+        embedding_path = f"embeddings/dasheng_embeddings/dasheng-{dasheng_version}-layer-{layer_idx}-{subset}.h5"
+        output_manifest_path = f"manifests/{subset}-dasheng-{dasheng_version}-layer-{layer_idx}.jsonl.gz"
     
     if not os.path.exists(output_manifest_path):
         collect_results(
@@ -156,6 +200,8 @@ if __name__=="__main__":
             manifest_path=manifest_path,
             embedding_path=embedding_path,
             output_manifest_path=output_manifest_path,
+            weighted_combine=weighted_combine,
+            weight_file=weight_file,
             layer_idx=layer_idx,
             max_duration=args.max_duration,
         )
