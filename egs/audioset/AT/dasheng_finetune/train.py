@@ -48,7 +48,7 @@ from at_datamodule import AudioSetATDatamodule
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model import AudioTaggingModel
+from model2 import AudioTaggingModel
 from optim import Eden, ScaledAdam
 
 from torch import Tensor
@@ -105,6 +105,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=int,
         default=-1,
         help="Which layer to use for classification. If -1, use the final output."
+    )
+    
+    parser.add_argument(
+        "--weighted-combine",
+        type=str2bool,
+        default=False,
+        help="Whether to use weighted combination from the dasheng model",
     )
 
 
@@ -351,11 +358,15 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
 def get_model(params: AttributeDict) -> nn.Module:
 
     encoder = get_encoder_model(params)
+    assert encoder.embed_dim == params.encoder_dim, (encoder.embed_dim, params.encoder_dim)
 
     model = AudioTaggingModel(
         encoder=encoder,
         encoder_dim=params.encoder_dim,
+        num_encoder_layers=len(encoder.blocks),
         num_events=params.num_events,
+        layer_idx=params.layer_idx,
+        weighted_combine=params.weighted_combine,
         freeze_encoder=params.freeze_encoder,
     )
     return model
@@ -519,7 +530,6 @@ def compute_loss(
         loss = model(
             x=audios,
             target=labels,
-            layer_idx=params.layer_idx,
         )
 
     assert loss.requires_grad == is_training

@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
+import logging
+import random
 
 import torch
 import torch.nn as nn
@@ -29,6 +30,8 @@ class AudioTaggingModel(nn.Module):
         encoder_dim: int = 768,
         num_encoder_layers: int = 12,
         num_events: int = 527,
+        weighted_combine: bool = False,
+        layer_idx: int = -1,
         freeze_encoder: bool = True,
     ):
         """The simplest audio tagging model. 
@@ -41,16 +44,14 @@ class AudioTaggingModel(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.encoder_dim = encoder_dim
-        assert encoder_dim == encoder.embed_dim
         self.num_encoder_layers = num_encoder_layers
         assert num_encoder_layers == len(encoder.blocks)
         
-        self.classifier = nn.Sequential(
-            nn.Linear(encoder_dim, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, num_events),
-        )
+        self.layer_weight = nn.Parameter(torch.full((num_encoder_layers+1,), 0.5))
+        self.classifier = nn.Linear(encoder_dim, num_events)
+        
+        self.weighted_combine = weighted_combine
+        self.layer_idx = layer_idx
         self.freeze_encoder = freeze_encoder
         
         self.criterion = torch.nn.BCEWithLogitsLoss(reduction="sum")
@@ -58,28 +59,34 @@ class AudioTaggingModel(nn.Module):
     def forward_encoder(
         self,
         x: torch.Tensor,
-        layer_idx: int = -1
     ):
-        if layer_idx == -1:
-            x, _ = self.encoder(x)
+        # obtain the merged hidden states from all layers
+        with torch.set_grad_enabled(not self.freeze_encoder):
+            x, all_hidden_states = self.encoder(x, output_hidden_states=True)
+        if self.weighted_combine:
+            all_hidden_states = torch.stack(all_hidden_states, dim=0) # (L,B,T,C)
+            weight = torch.nn.functional.softmax(self.layer_weight, dim=0) #(L)
+            if random.random() < 0.05 and self.training:
+                logging.info(f"Current weight for each layer: {weight.tolist()}")
+            all_hidden_states = weight.reshape(-1, 1,1,1) * all_hidden_states # (L,B,T,C) 
+            hidden_states = torch.sum(all_hidden_states, dim=0) # (B,T,C)
         else:
-            _, all_hidden_states = self.encoder(x, output_hidden_states=True)
-            x = all_hidden_states[layer_idx] # (B,T,C)
-        return x
+            hidden_states = all_hidden_states[self.layer_idx] # (B,T,C)
+        
+        return hidden_states
+    
+    def forward_audio_tagging(
+        self, x: torch.Tensor,
+    ):
+        return self.classifier(x).mean(dim=1)
     
     def forward(
         self,
         x: torch.Tensor,
         target: torch.Tensor,
-        layer_idx: int = -1,
-    ):
-        # layer_idx means which layer's feature to use for classification
-        with torch.set_grad_enabled(not self.freeze_encoder):
-            x = self.forward_encoder(x, layer_idx=layer_idx)
-            
-        logits = self.classifier(x) # (B,T,C)
-        logits = logits.mean(dim=1)
-        
+    ):  
+        x = self.forward_encoder(x)
+        logits = self.forward_audio_tagging(x) 
         loss = self.criterion(logits, target)
         
         return loss

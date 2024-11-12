@@ -186,8 +186,6 @@ def main():
     logging.info(params)
 
     device = torch.device("cpu")
-    if torch.cuda.is_available():
-        device = torch.device("cuda", 0)
 
     logging.info("About to create model")
 
