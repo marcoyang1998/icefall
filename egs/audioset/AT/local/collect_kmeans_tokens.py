@@ -13,6 +13,7 @@ from lhotse.dataset import DynamicBucketingSampler, UnsupervisedWaveformDataset
 
 from dasheng import dasheng_base, dasheng_06B, dasheng_12B
 from train_kmeans import normalize_embedding
+from collect_dasheng_embeddings import combine_embeddings
 
 from icefall.utils import str2bool
 
@@ -78,6 +79,26 @@ def get_parser():
         help="If normalize each dimension to zero mean and unit variance"
     )
     
+    parser.add_argument(
+        "--weighted-combine",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--weight-file",
+        type=str,
+    )
+    
+    parser.add_argument(
+        "--global-mean-file",
+        type=str,
+    )
+    parser.add_argument(
+        "--global-std-file",
+        type=str,
+    )
+    
     return parser.parse_args()       
 
 @torch.no_grad()
@@ -88,6 +109,10 @@ def collect_tokens(
     kmeans_model_path,
     output_manifest_path,
     normalize,
+    weighted_combine,
+    weight_file,
+    global_mean_file,
+    global_std_file,
     layer_idx=21,
     max_duration=200
 ):
@@ -132,14 +157,17 @@ def collect_tokens(
     device = torch.device("cuda")
     model.to(device)
     
+    # load layer-wise weights
+    if weighted_combine:
+        weight = torch.load(weight_file).to(device)
+    else:
+        weight = None
+    
     # load the normalization stats
     if normalize:
         logging.info("Loading normalization stats")
-        if args.model_name == "dasheng":
-            global_mean = np.load(f"normalization_stats/dasheng-{args.model_version}-layer-{layer_idx}-mu.npy")
-            global_std = np.load(f"normalization_stats/dasheng-{args.model_version}-layer-{layer_idx}-std.npy")
-        else:
-            raise ValueError(f"{model_name} is not supported yet")
+        global_mean = np.load(global_mean_file)
+        global_std = np.load(global_std_file)
     
     # load the kmeans model
     logging.info(f"Loading kmeans model from {kmeans_model_path}")
@@ -152,12 +180,15 @@ def collect_tokens(
         cuts = batch["cuts"]
         audio = batch["audio"].to(device)
         audio_lens = batch["audio_lens"].to(device)
-        if layer_idx == -1:
-            features, _ = model(audio)
-            embeddings = features
+        
+        features, all_hidden_states = model(audio, output_hidden_states=True)
+        if weighted_combine:
+            embeddings = combine_embeddings(all_hidden_states, weight=weight)
         else:
-            features, all_hidden_states = model(audio, output_hidden_states=True)
-            embeddings = all_hidden_states[layer_idx]
+            if layer_idx == -1:
+                embeddings = features
+            else:
+                embeddings = all_hidden_states[layer_idx]
             
         embeddings = embeddings.cpu().numpy()
         embedding_lens = audio_lens // 640 # The output frequency is 25Hz
@@ -206,6 +237,10 @@ if __name__=="__main__":
             kmeans_model_path=args.kmeans_model,
             output_manifest_path=args.output_manifest_path,
             normalize=args.normalize,
+            global_mean_file=args.global_mean_file,
+            global_std_file=args.global_std_file,
+            weighted_combine=args.weighted_combine,
+            weight_file=args.weight_file,
             layer_idx=args.layer_idx,
             max_duration=args.max_duration,
         )
