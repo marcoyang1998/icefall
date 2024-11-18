@@ -34,6 +34,7 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     SimpleCutSampler,
     SpecAugment,
 )
+from dataset import WaveformAsrDataset
 from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
     AudioSamples,
     OnTheFlyFeatures,
@@ -214,6 +215,12 @@ class LibriSpeechAsrDataModule:
             default="PrecomputedFeatures",
             help="AudioSamples or PrecomputedFeatures",
         )
+        
+        group.add_argument(
+            "--collate",
+            type=str2bool,
+            default=True,
+        )
 
     def train_dataloaders(
         self,
@@ -343,6 +350,48 @@ class LibriSpeechAsrDataModule:
         )
 
         return train_dl
+    
+    def waveform_train_dataloaders(
+        self,
+        cuts_train: CutSet,
+        sampler_state_dict: Optional[Dict[str, Any]] = None,
+        collate: bool = True,
+    ) -> DataLoader:
+        
+        train = WaveformAsrDataset(
+            collate=collate
+        )
+        
+        train_sampler = DynamicBucketingSampler(
+            cuts_train,
+            max_duration=self.args.max_duration,
+            shuffle=self.args.shuffle,
+            num_buckets=self.args.num_buckets,
+            buffer_size=self.args.num_buckets * 2000,
+            shuffle_buffer_size=self.args.num_buckets * 5000,
+            drop_last=self.args.drop_last,
+        )
+        
+        if sampler_state_dict is not None:
+            logging.info("Loading sampler state dict")
+            train_sampler.load_state_dict(sampler_state_dict)
+
+        # 'seed' is derived from the current random state, which will have
+        # previously been set in the main process.
+        seed = torch.randint(0, 100000, ()).item()
+        worker_init_fn = _SeedWorkers(seed)
+
+        train_dl = DataLoader(
+            train,
+            sampler=train_sampler,
+            batch_size=None,
+            num_workers=self.args.num_workers,
+            persistent_workers=False,
+            worker_init_fn=worker_init_fn,
+        )
+
+        return train_dl
+        
 
     def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
         transforms = []
@@ -365,6 +414,24 @@ class LibriSpeechAsrDataModule:
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
             )
+        valid_sampler = DynamicBucketingSampler(
+            cuts_valid,
+            max_duration=self.args.max_duration,
+            shuffle=False,
+        )
+        logging.info("About to create dev dataloader")
+        valid_dl = DataLoader(
+            validate,
+            sampler=valid_sampler,
+            batch_size=None,
+            num_workers=2,
+            persistent_workers=False,
+        )
+
+        return valid_dl
+    
+    def waveform_valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+        validate = WaveformAsrDataset(collate=True)
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
             max_duration=self.args.max_duration,
@@ -403,6 +470,24 @@ class LibriSpeechAsrDataModule:
         )
         return test_dl
 
+    def waveform_test_dataloaders(self, cuts_test: CutSet) -> DataLoader:
+        test = WaveformAsrDataset(collate=True)
+        test_sampler = DynamicBucketingSampler(
+            cuts_test,
+            max_duration=self.args.max_duration,
+            shuffle=False,
+        )
+        logging.info("About to create test dataloader")
+        valid_dl = DataLoader(
+            test,
+            sampler=test_sampler,
+            batch_size=None,
+            num_workers=2,
+            persistent_workers=False,
+        )
+
+        return valid_dl
+    
     @lru_cache()
     def train_clean_5_cuts(self) -> CutSet:
         logging.info("mini_librispeech: About to get train-clean-5 cuts")
