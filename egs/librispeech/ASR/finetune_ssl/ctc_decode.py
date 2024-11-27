@@ -381,25 +381,8 @@ def decode_one_batch(
         device = HLG.device
     else:
         device = H.device
-    feature = batch["inputs"]
-    assert feature.ndim == 3
-    feature = feature.to(device)
-    # at entry, feature is (N, T, C)
 
-    supervisions = batch["supervisions"]
-    feature_lens = supervisions["num_frames"].to(device)
-
-    if params.causal:
-        # this seems to cause insertions at the end of the utterance if used with zipformer.
-        pad_len = 30
-        feature_lens += pad_len
-        feature = torch.nn.functional.pad(
-            feature,
-            pad=(0, 0, 0, pad_len),
-            value=LOG_EPS,
-        )
-
-    encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens)
+    encoder_out, encoder_out_lens = model.forward_encoder(batch)
     ctc_output = model.ctc_output(encoder_out)  # (N, T, C)
 
     if params.decoding_method == "ctc-greedy-search":
@@ -411,6 +394,7 @@ def decode_one_batch(
         key = "ctc-greedy-search"
         return {key: hyps}
 
+    supervisions = None
     supervision_segments = torch.stack(
         (
             supervisions["sequence_idx"],
@@ -622,8 +606,8 @@ def decode_dataset(
 
     results = defaultdict(list)
     for batch_idx, batch in enumerate(dl):
-        texts = batch["supervisions"]["text"]
-        cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
+        texts = batch["text"]
+        cut_ids = [cut.id for cut in batch["cuts"]]
 
         hyps_dict = decode_one_batch(
             params=params,
@@ -751,16 +735,6 @@ def main():
         params.suffix = f"iter-{params.iter}_avg-{params.avg}"
     else:
         params.suffix = f"epoch-{params.epoch}_avg-{params.avg}"
-
-    if params.causal:
-        assert (
-            "," not in params.chunk_size
-        ), "chunk_size should be one value in decoding."
-        assert (
-            "," not in params.left_context_frames
-        ), "left_context_frames should be one value in decoding."
-        params.suffix += f"_chunk-{params.chunk_size}"
-        params.suffix += f"_left-context-{params.left_context_frames}"
 
     if params.use_averaged_model:
         params.suffix += "_use-averaged-model"
@@ -911,12 +885,11 @@ def main():
                 "Calculating the averaged model over iteration checkpoints"
                 f" from {filename_start} (excluded) to {filename_end}"
             )
-            model.to(device)
+            # model.to(device)
             model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
-                    device=device,
                 )
             )
         else:
@@ -929,12 +902,10 @@ def main():
                 f"Calculating the averaged model over epoch range from "
                 f"{start} (excluded) to {params.epoch}"
             )
-            model.to(device)
             model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
-                    device=device,
                 )
             )
 
@@ -943,6 +914,9 @@ def main():
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
+    
+    weights = model.layer_weight.softmax(-1).cpu()
+    logging.info(f"Layer weights: {weights}")
 
     # we need cut ids to display recognition results.
     args.return_cuts = True
@@ -951,8 +925,8 @@ def main():
     test_clean_cuts = librispeech.test_clean_cuts()
     test_other_cuts = librispeech.test_other_cuts()
 
-    test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
-    test_other_dl = librispeech.test_dataloaders(test_other_cuts)
+    test_clean_dl = librispeech.waveform_test_dataloaders(test_clean_cuts)
+    test_other_dl = librispeech.waveform_test_dataloaders(test_other_cuts)
 
     test_sets = ["test-clean", "test-other"]
     test_dl = [test_clean_dl, test_other_dl]
