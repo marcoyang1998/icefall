@@ -9,8 +9,8 @@ from lhotse.utils import fastcopy
 from torch.utils.data import DataLoader
 from lhotse.dataset import DynamicBucketingSampler, UnsupervisedWaveformDataset
 
-from models import Data2Vec, WavlmModel, HuBERT, W2vBERT
-from icefall.utils import make_pad_mask
+from ssl_models import Data2Vec, WavlmModel, HuBERT, W2vBERT
+from icefall.utils import make_pad_mask, str2bool
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -38,6 +38,18 @@ def get_parser():
     
     parser.add_argument(
         "--subset",
+        type=str,
+        required=True,
+    )
+    
+    parser.add_argument(
+        "--weighted-combine",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--weight-file",
         type=str,
         required=True,
     )
@@ -70,6 +82,8 @@ def collect_results(
     manifest_path,
     embedding_path,
     output_manifest_path,
+    weighted_combine,
+    weight_file,
     layer_idx=21,
     max_duration=200
 ):
@@ -77,7 +91,7 @@ def collect_results(
     if model_name == "data2vec":
         model = Data2Vec(model_version=model_version)
     elif model_name == "wavlm":
-        model = WavlmModel(ckpt_path=model_version)
+        model = WavlmModel()
     elif model_name == "hubert":
         model = HuBERT(model_version=model_version)
     elif model_name == "w2v-bert":
@@ -110,17 +124,31 @@ def collect_results(
     device = torch.device("cuda")
     model.to(device)
     
+    if weighted_combine:
+        weights = torch.load(weight_file).to(device)
+        logging.info(f"Using weighted combine: {weights}")
+    
     new_cuts = []
     num_cuts = 0
     with LilcomChunkyWriter(embedding_path) as writer:
         for i, batch in enumerate(dl):
             cuts = batch["cuts"]
-            layer_results, embedding_lens = model.extract_features(batch, layer_idx)
+            features, all_hidden_states, embedding_lens = model(batch)
+            if weighted_combine:
+                all_hidden_states = torch.stack(all_hidden_states, dim=0) # (L,B,T,C)
+                all_hidden_states = weights.reshape(-1, 1,1,1) * all_hidden_states # (L,B,T,C) 
+                hidden_states = torch.sum(all_hidden_states, dim=0) # (B,T,C)
+            else:
+                if layer_idx == -1:
+                    hidden_states = features
+                else:
+                    hidden_states = all_hidden_states[layer_idx] # (B,T,C)
+            hidden_states = hidden_states.cpu().numpy()
             
             for j, cut in enumerate(cuts):
                 embedding = writer.store_array(
                     key=cut.id,
-                    value=layer_results[j, :embedding_lens[j]],
+                    value=hidden_states[j, :embedding_lens[j]],
                     temporal_dim=0,
                     frame_shift=0.02,
                     start=0,
@@ -148,19 +176,31 @@ if __name__=="__main__":
     model_version = args.model_version
     layer_idx = args.layer_idx
     subset = args.subset
+    weighted_combine = args.weighted_combine
+    weight_file = args.weight_file
     
     manifest_path = f"data/fbank/librispeech_cuts_{subset}.jsonl.gz"
-    embedding_path = f"embeddings/{model_name}_embeddings/model_name-{model_version}-layer-{layer_idx}-{subset}"
-    output_manifest_path = f"manifests/{subset}-{model_name}-{model_version}-layer-{layer_idx}.jsonl.gz"
+    if weighted_combine:
+        embedding_path = f"embeddings/{model_name}_embeddings/model_name-{model_version}-weighted-{subset}"
+        output_manifest_path = f"manifests/{subset}-{model_name}-{model_version}-weighted.jsonl.gz"
+    else:
+        embedding_path = f"embeddings/{model_name}_embeddings/model_name-{model_version}-layer-{layer_idx}-{subset}"
+        output_manifest_path = f"manifests/{subset}-{model_name}-{model_version}-layer-{layer_idx}.jsonl.gz"
 
     max_duration = 100
     
-    collect_results(
-        model_name=model_name,
-        model_version=model_version,
-        manifest_path=manifest_path,
-        embedding_path=embedding_path,
-        output_manifest_path=output_manifest_path,
-        layer_idx=layer_idx,
-        max_duration=max_duration,
-    )
+    import os
+    if os.path.exists(output_manifest_path):
+        logging.info("Manifest already exists: {}. Skip it.".format(manifest_path))
+    else:
+        collect_results(
+            model_name=model_name,
+            model_version=model_version,
+            manifest_path=manifest_path,
+            embedding_path=embedding_path,
+            output_manifest_path=output_manifest_path,
+            weighted_combine=weighted_combine,
+            weight_file=weight_file,
+            layer_idx=layer_idx,
+            max_duration=max_duration,
+        )
