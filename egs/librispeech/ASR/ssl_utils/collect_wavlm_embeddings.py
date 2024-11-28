@@ -36,7 +36,7 @@ def get_parser():
         type=int,
         default=-1,
         help="Index starts from 1, to get the 12-th layer features, set layer-idx=12"
-    )w
+    )
     
     parser.add_argument(
         "--subset",
