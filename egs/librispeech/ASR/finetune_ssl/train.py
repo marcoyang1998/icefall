@@ -148,6 +148,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="Whether to freeze the encoder",
     )
 
+    parser.add_argument(
+        "--do-normalize",
+        type=str2bool,
+        default=True,
+        help="Whether to normalize the input audio",
+    )
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -397,7 +403,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     if model_name == "wavlm":
         encoder = WavlmModel()
     elif model_name == "hubert":
-        encoder = HuBERT(model_version=params.model_version)
+        encoder = HuBERT(model_version=params.model_version, normalize=params.do_normalize)
     elif model_name == "data2vec":
         encoder = Data2Vec(model_version=params.model_version)
     return encoder

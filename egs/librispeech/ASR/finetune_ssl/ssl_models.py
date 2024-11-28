@@ -15,7 +15,6 @@ from transformers import (
 
 from icefall.utils import make_pad_mask
 from WavLM import WavLM, WavLMConfig
-import fairseq
 
 class Teacher(torch.nn.Module):
     def __init__(
@@ -180,10 +179,15 @@ class Data2Vec(HuggingfaceModel):
     
     
 class HuBERT(HuggingfaceModel):
-    def __init__(self, model_version: str="large"):
+    def __init__(self, model_version: str="large", normalize: bool=True):
         super().__init__()
-        self.processor = Wav2Vec2FeatureExtractor.from_pretrained(f"facebook/hubert-{model_version}-ll60k")
-        self.model = AutoModel.from_pretrained(f"facebook/hubert-{model_version}-ll60k")
+        if model_version == "large":
+            self.processor = Wav2Vec2FeatureExtractor.from_pretrained(f"facebook/hubert-{model_version}-ll60k")
+            self.model = AutoModel.from_pretrained(f"facebook/hubert-{model_version}-ll60k")
+        elif model_version == "base":
+            self.processor = Wav2Vec2FeatureExtractor.from_pretrained(f"facebook/hubert-{model_version}-ls960")
+            self.model = AutoModel.from_pretrained(f"facebook/hubert-{model_version}-ls960")
+        self.processor.do_normalize = normalize
         
 class W2vBERT(HuggingfaceModel):
     def __init__(self, model_version: str="large"):
@@ -249,32 +253,4 @@ class WavlmModel(torch.nn.Module):
         embedding_lens = (~padding_mask).sum(dim=-1)
         
         return rep, layer_results, embedding_lens
-    
-class FairseqHuBERT(torch.nn.Module):
-    def __init__(self, ckpt_path: str):
-        super().__init__()
-        models, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([ckpt_path])
-        self.do_normalize = task.cfg.normalize
-        self.model = models[0]
-    
-    def forward(self, batch):
-        device = next(self.model.parameters()).device
         
-        audio_input_16khz = batch["audio"].to(device)
-        audio_lens = batch["audio_lens"].to(device)
-        padding_mask = make_pad_mask(audio_lens)
-        
-        if self.do_normalize:
-            audio_input_16khz = torch.nn.functional.layer_norm(audio_input_16khz, audio_input_16khz.shape)
-        
-        (rep, layer_results), padding_mask = self.model.extract_features(
-            audio_input_16khz,
-            padding_mask=padding_mask,
-            output_layer=self.model.cfg.encoder_layers,
-        )
-        layer_results = [res.permute(1,0,2) for res, _ in layer_results]
-        embedding_lens = (~padding_mask).sum(dim=-1)
-        
-        return rep, layer_results, embedding_lens
-    
-    
