@@ -51,7 +51,7 @@ import optim
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from hubert_ce import HubertModel
+from hubert_multi_ce import HubertModel
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
@@ -223,6 +223,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=1.0,
         help="multiply feature extractor var grads by this",
+    )
+    
+    parser.add_argument(
+        "--num-proj-heads",
+        type=int,
+        default=1,
+        help="How many heads of final projections"
     )
 
     # masking
@@ -665,6 +672,7 @@ def get_params() -> AttributeDict:
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             "env_info": get_env_info(),
+            "head_names": ["hubert", "wavlm"],
         }
     )
 
@@ -822,10 +830,17 @@ def compute_loss(
     audio = batch["audio"].to(device)
     padding_mask = batch["padding_mask"].to(device)
     kmeans = batch["kmeans"].to(device)
+    kmeans2 = batch["kmeans2"]
+    if kmeans2 is not None and params.num_proj_heads == 2:
+        kmeans2 = kmeans2.to(device)
+        target_list = [kmeans, kmeans2]
+    else:
+        target_list = [kmeans]
 
+    assert len(target_list) == params.num_proj_heads
     with torch.set_grad_enabled(is_training):
-        loss, num_masked_tokens, logging_output = model(
-            source=audio, target_list=[kmeans], padding_mask=padding_mask
+        loss, num_masked_tokens, logging_output_list = model(
+            source=audio, target_list=target_list, padding_mask=padding_mask
         )
 
     assert loss.requires_grad == is_training
@@ -834,8 +849,9 @@ def compute_loss(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = num_masked_tokens
-    for item in logging_output:
-        info[item] = logging_output[item]
+    for logging_output, head_name in zip(logging_output_list, params.head_names):
+        for item in logging_output:
+            info[f"{head_name}_{item}"] = logging_output[item]
     return loss, info
 
 
@@ -1116,6 +1132,7 @@ def run(rank, world_size, args):
 
     logging.info("About to create model")
     model = get_model(params)
+    params.head_names = params.head_names[:params.num_proj_heads]
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
@@ -1192,9 +1209,9 @@ def run(rank, world_size, args):
             c.duration < params.min_keep_size / params.sample_rate
             or c.duration > params.max_keep_size / params.sample_rate
         ):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            )
+            # logging.warning(
+            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
+            # )
             return False
 
         return True
