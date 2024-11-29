@@ -83,12 +83,24 @@ class HubertDataset(torch.utils.data.Dataset):
             for label in kmeans
         ]
         kmeans, _ = self.collater_frm_label(kmeans, audio_size, audio_starts)
+        
+        if "kmeans2" in cuts[0].custom:
+            kmeans2 = [cut.custom["kmeans2"] for cut in cuts]
+            kmeans2 = [
+                torch.tensor([int(item) for item in label.split()], dtype=torch.int64)
+                for label in kmeans2
+            ]
+            kmeans2, _ = self.collater_frm_label(kmeans2, audio_size, audio_starts)
+        else:
+            kmeans2 = None
+        
 
         return {
             "cuts": cuts,
             "audio": audio,
             "padding_mask": padding_mask,
             "kmeans": kmeans,
+            "kmeans2": kmeans2,
         }
 
     def postprocess(self, wav, cur_sample_rate):
