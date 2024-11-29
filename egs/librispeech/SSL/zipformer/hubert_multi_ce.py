@@ -297,7 +297,12 @@ class HubertModel(nn.Module):
         self.layer_norm = LayerNorm(self.embed)
 
         self.untie_final_proj = cfg.untie_final_proj
-        self.final_proj = nn.Linear(encoder_output_dim, sum(cfg.num_classes))
+        self.num_proj_heads = cfg.num_proj_heads
+        self.final_proj = nn.ModuleList()
+        for i in range(self.num_proj_heads):
+            self.final_proj.append(
+                nn.Linear(encoder_output_dim, sum(cfg.num_classes))
+            )
 
         # modules below are not needed during fine-tuning
         self.num_classes = cfg.num_classes
@@ -435,38 +440,44 @@ class HubertModel(nn.Module):
         if features_only:
             return {"x": x, "padding_mask": padding_mask, "features": features}
 
-        if not self.skip_masked:
+        # iterate over all projection layers
+        loss_list = []
+        logging_output_list = []
+        for i, proj_layer in enumerate(self.final_proj):
             masked_indices = torch.logical_and(~padding_mask, mask_indices)
-            proj_x_m = self.final_proj(x[masked_indices])
-            proj_x_m /= self.logit_temp
-            logit_m_list = [proj_x_m for _ in range(len(target_list))]
-        else:
-            logit_m_list = [None for _ in target_list]
-
-        if not self.skip_nomask:
             nomask_indices = torch.logical_and(~padding_mask, ~mask_indices)
-            proj_x_u = self.final_proj(x[nomask_indices])
-            proj_x_u /= self.logit_temp
-            logit_u_list = [proj_x_u for _ in range(len(target_list))]
-        else:
-            logit_u_list = [None for _ in target_list]
+            
+            if not self.skip_masked:
+                proj_x_m = proj_layer(x[masked_indices])
+                proj_x_m /= self.logit_temp
+                logit_m_list = [proj_x_m for _ in range(len(target_list) // self.num_proj_heads)]
+            else:
+                logit_m_list = [None for _ in target_list]
 
-        # result = {
-        #     "logit_m_list": logit_m_list,
-        #     "logit_u_list": logit_u_list,
-        #     "padding_mask": padding_mask,
-        #     "features_pen": features_pen,
-        # }
-        targ_m_list = target_list[0][masked_indices]
-        targ_m_list = targ_m_list.long()
-        targ_m_list = [targ_m_list for _ in range(len(target_list))]
+            if not self.skip_nomask:
+                proj_x_u = proj_layer(x[nomask_indices])
+                proj_x_u /= self.logit_temp
+                logit_u_list = [proj_x_u for _ in range(len(target_list) // self.num_proj_heads)]
+            else:
+                logit_u_list = [None for _ in target_list]
 
-        targ_u_list = target_list[0][nomask_indices]
-        targ_u_list = targ_u_list.long()
-        targ_u_list = [targ_u_list for _ in range(len(target_list))]
-        return self.compute_loss(
-            logit_m_list, logit_u_list, targ_m_list, targ_u_list, features_pen
-        )
+            targ_m_list = target_list[i][masked_indices]
+            targ_m_list = targ_m_list.long()
+            targ_m_list = [targ_m_list for _ in range(len(target_list) // self.num_proj_heads)]
+
+            targ_u_list = target_list[i][nomask_indices]
+            targ_u_list = targ_u_list.long()
+            targ_u_list = [targ_u_list for _ in range(len(target_list) // self.num_proj_heads)]
+        
+            loss, sample_size, logging_output = self.compute_loss(
+                logit_m_list, logit_u_list, targ_m_list, targ_u_list, features_pen
+            )
+            loss_list.append(loss)
+            logging_output_list.append(logging_output)
+        tot_loss = sum(loss_list) / len(loss_list) # sum the loss
+        sample_size = sample_size
+        
+        return tot_loss, sample_size, logging_output_list
 
     def extract_features(
         self,
