@@ -256,6 +256,7 @@ class HubertAsrDataset(torch.utils.data.Dataset):
         return {
             "cuts": cuts,
             "audio": audio,
+            "audio_lens": torch.tensor(audio_lens),
             "padding_mask": padding_mask,
             "supervisions": default_collate(
                 [
