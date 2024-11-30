@@ -58,7 +58,7 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 from asr_datamodule import LibriSpeechAsrDataModule
 from decoder import Decoder
-from hubert_ce import HubertModel
+from hubert_multi_ce import HubertModel
 from joiner import Joiner
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
@@ -231,6 +231,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=1.0,
         help="multiply feature extractor var grads by this",
+    )
+    
+    parser.add_argument(
+        "--num-proj-heads",
+        type=int,
+        default=1,
+        help="How many heads of final projections"
     )
 
     # masking
@@ -511,6 +518,7 @@ def get_parser():
     parser.add_argument(
         "--pretrained-dir",
         type=str,
+        default=None,
         help="""The pretrained model dir.
         It specifies the directory where the pretrained checkpoint is saved.""",
     )
@@ -747,12 +755,13 @@ def _to_int_tuple(s: str):
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
-    if hasattr(params, "pretrained_dir"):
+    if hasattr(params, "pretrained_dir") and params.pretrained_dir is not None:
         logging.info(f"Loading {params.pretrained_dir}")
         pretrained = torch.load(params.pretrained_dir)
         encoder = HubertModel(params)
         encoder.load_state_dict(pretrained["model"])
     else:
+        logging.info(f"Do not use pretrained model")
         encoder = HubertModel(params)
     return encoder
 

@@ -304,6 +304,9 @@ class HubertModel(nn.Module):
         self.pred_masked_weight = cfg.pred_masked_weight
         self.pred_nomask_weight = cfg.pred_nomask_weight
         self.loss_weights = cfg.loss_weights
+        
+        # co-training related
+        self.co_train_loss = cfg.co_train_loss
 
     def upgrade_state_dict_named(self, state_dict, name):
         """Upgrade a (possibly old) state dict for new versions of fairseq."""
@@ -311,21 +314,22 @@ class HubertModel(nn.Module):
         super().upgrade_state_dict_named(state_dict, name)
         return state_dict
 
-    def apply_mask(self, x, padding_mask, target_list):
+    def apply_mask(self, x, padding_mask, target_list, mask_indices=None):
         B, T, C = x.shape
         if self.mask_prob > 0:
-            mask_indices = compute_mask_indices(
-                (B, T),
-                padding_mask,
-                self.mask_prob,
-                self.mask_length,
-                self.mask_selection,
-                self.mask_other,
-                min_masks=2,
-                no_overlap=self.no_mask_overlap,
-                min_space=self.mask_min_space,
-            )
-            mask_indices = torch.from_numpy(mask_indices).to(x.device)
+            if mask_indices is None:
+                mask_indices = compute_mask_indices(
+                    (B, T),
+                    padding_mask,
+                    self.mask_prob,
+                    self.mask_length,
+                    self.mask_selection,
+                    self.mask_other,
+                    min_masks=2,
+                    no_overlap=self.no_mask_overlap,
+                    min_space=self.mask_min_space,
+                )
+                mask_indices = torch.from_numpy(mask_indices).to(x.device)
             x[mask_indices] = self.mask_emb.to(x.dtype)
         else:
             mask_indices = None
@@ -388,7 +392,7 @@ class HubertModel(nn.Module):
         padding_mask = padding_mask.all(-1)
         return padding_mask
 
-    def forward(
+    def forward_old(
         self,
         source: torch.Tensor,
         target_list: Optional[List[torch.Tensor]] = None,
@@ -402,7 +406,7 @@ class HubertModel(nn.Module):
         if target_list is not None:
             features, target_list = self.forward_targets(features, target_list)
 
-        features_pen = features.float().pow(2).mean()
+        features_pen = features.float().pow(2).mean() 
 
         features = features.transpose(1, 2)
         features = self.layer_norm(features)
@@ -467,6 +471,101 @@ class HubertModel(nn.Module):
         return self.compute_loss(
             logit_m_list, logit_u_list, targ_m_list, targ_u_list, features_pen
         )
+        
+    # the co-training forward function
+    def forward(
+        self,
+        source: torch.Tensor,
+        target_list: Optional[List[torch.Tensor]] = None,
+        padding_mask: Optional[torch.Tensor] = None,
+        mask: bool = True,
+        features_only: bool = False,
+        output_layer: Optional[int] = None,
+    ):
+        """output layer is 1-based"""
+        features = self.forward_features(source)
+        if target_list is not None:
+            features, target_list = self.forward_targets(features, target_list)
+
+        features_pen = features.float().pow(2).mean()
+
+        features = features.transpose(1, 2)
+        features = self.layer_norm(features)
+        
+        if padding_mask is not None:
+            padding_mask = self.forward_padding_mask(features, padding_mask)
+
+        if self.post_extract_proj is not None:
+            features = self.post_extract_proj(features)
+            
+        features = self.dropout_input(features)
+        unmasked_features = features.clone()
+        
+        if mask:
+            x1, mask_indices1 = self.apply_mask(features, padding_mask, target_list)
+            x2, mask_indices2 = self.apply_mask(unmasked_features, padding_mask, target_list, mask_indices=~mask_indices1)
+            x = torch.cat([x1,x2]) # (B,T,D) -> (2B,T,D)
+            mask_indices = torch.cat([mask_indices1, mask_indices2]) # (2B,T)
+        else:
+            x = features.repeat(2,1,1)
+            mask_indices = None
+            
+        padding_mask = padding_mask.repeat(2,1) # (2B,T)
+        target_list = [t.repeat(2,1) for t in target_list] # List of tensor in shape (2B,T)
+            
+        # feature: (2B, T, D), float
+        # target: (2B, T), long
+        # x: (B, T, D), float -> (T, B, D), float
+        # padding_mask: (2B, T), bool
+        # mask_indices: (B, T), bool
+        x = x.transpose(0, 1)
+        x, x_lens = self.encoder(x, (~padding_mask).sum(dim=-1))
+        x = x.transpose(0, 1)
+        
+        if features_only:
+            return {"x": x, "padding_mask": padding_mask, "features": features}
+
+        
+        # 1. Compute the normal hubert loss
+        x_proj = self.final_proj(x)
+        masked_indices = torch.logical_and(~padding_mask, mask_indices)
+        nomask_indices = torch.logical_and(~padding_mask, ~mask_indices)
+        if not self.skip_masked:
+            proj_x_m = x_proj[masked_indices]
+            proj_x_m /= self.logit_temp
+            logit_m_list = [proj_x_m for _ in range(len(target_list))]
+        else:
+            logit_m_list = [None for _ in target_list]
+
+        if not self.skip_nomask:
+            proj_x_u = x_proj[nomask_indices]
+            proj_x_u /= self.logit_temp
+            logit_u_list = [proj_x_u for _ in range(len(target_list))]
+        else:
+            logit_u_list = [None for _ in target_list]
+            
+        targ_m_list = target_list[0][masked_indices]
+        targ_m_list = targ_m_list.long()
+        targ_m_list = [targ_m_list for _ in range(len(target_list))]
+
+        targ_u_list = target_list[0][nomask_indices]
+        targ_u_list = targ_u_list.long()
+        targ_u_list = [targ_u_list for _ in range(len(target_list))]
+        ce_loss, sample_size, logging_output = self.compute_loss(
+            logit_m_list, logit_u_list, targ_m_list, targ_u_list, features_pen
+        ) # ce_loss is actually the sum of ce_loss + feature penalty loss
+        
+        if self.co_train_loss == "ce":
+            co_train_loss = self.compute_co_training_loss_ce(x_proj, padding_mask, mask_indices)
+        else:
+            co_train_loss = self.compute_co_training_loss_kl(x_proj, padding_mask, mask_indices)
+        
+        # normalize the losses
+        ce_loss *= 0.5
+        co_train_loss *= 0.5
+        sample_size = sample_size // 2
+        
+        return ce_loss, co_train_loss, sample_size, [logging_output]
     
     def extract_features(
         self,
@@ -564,14 +663,14 @@ class HubertModel(nn.Module):
             ), f"{len(extra_losses)}, {len(self.loss_weights)}"
             for p, n, coef in zip(extra_losses, names, self.loss_weights):
                 if coef != 0 and p is not None:
-                    p = coef * p.float() * sample_size
+                    p = coef * p.float() * sample_size # sample size is also doubled
                     loss += p
                     logging_output[f"loss_{n}"] = p.item()
 
-        logging_output = {
-            "loss": loss.item() if reduce else loss,
-            **logging_output,
-        }
+        # logging_output = {
+        #     "ce_loss": loss.item() if reduce else loss,
+        #     **logging_output,
+        # }
 
         # for lk in self.log_keys:
         #     if lk in net_output:
@@ -597,5 +696,46 @@ class HubertModel(nn.Module):
             corr_u, count_u = compute_correct(logp_u_list, targ_u_list)
             logging_output[f"correct_u_0"] = corr_u
             logging_output[f"count_u_0"] = count_u
+            
+        logging_output = {
+            k: item * 0.5 for k, item in logging_output.items()
+        }
 
         return loss, sample_size, logging_output
+    
+    def compute_co_training_loss_kl(
+        self, x, padding_mask, mask_indices,
+    ):
+        # x: the output of the final classification layer, unnormalized prob
+        log_prob = x.log_softmax(dim=-1)
+        exchanged_target = log_prob.detach().chunk(2, dim=0)
+        exchanged_target = torch.cat(
+            [exchanged_target[1], exchanged_target[0]], dim=0
+        )
+        co_training_loss = F.kl_div(
+            input=log_prob,
+            target=exchanged_target,
+            reduction="none",
+            log_target=True,
+        )
+        co_training_loss = co_training_loss.masked_fill(~mask_indices.unsqueeze(-1), 0.0)
+        co_training_loss = co_training_loss.masked_fill(padding_mask.unsqueeze(-1), 0.0).sum()
+        return co_training_loss
+
+    def compute_co_training_loss_ce(
+        self, x, padding_mask, mask_indices,
+    ):
+        # x: the output of the final classification layer, unnormalized prob
+        # log_prob = x.log_softmax(dim=-1)
+        exchanged_target = x.argmax(dim=-1).detach().chunk(2, dim=0)
+        exchanged_target = torch.cat(
+            [exchanged_target[1], exchanged_target[0]], dim=0
+        )
+        co_training_loss = F.cross_entropy(
+            input=x.permute(0,2,1),
+            target=exchanged_target,
+            reduction="none",
+        ) # (B,T)
+        co_training_loss = co_training_loss.masked_fill(~mask_indices, 0.0)
+        co_training_loss = co_training_loss.masked_fill(padding_mask, 0.0).sum()
+        return co_training_loss
