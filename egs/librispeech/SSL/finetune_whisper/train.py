@@ -98,87 +98,35 @@ from icefall.utils import (
     setup_logger,
     str2bool,
 )
+from whisper_utils import replace_whisper_encoder_forward, compute_whisper_fbank
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
 def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--num-encoder-layers",
+        "--model-version",
         type=str,
-        default="2,2,3,4,3,2",
-        help="Number of zipformer encoder layers per stack, comma separated.",
+        default="turbo",
+        help="Which version of Whisper encoder to use"
     )
-
+    
     parser.add_argument(
-        "--downsampling-factor",
-        type=str,
-        default="1,2,4,8,4,2",
-        help="Downsampling factor for each stack of encoder layers.",
+        "--n-mels",
+        type=int,
+        default=128,
     )
-
-    parser.add_argument(
-        "--feedforward-dim",
-        type=str,
-        default="512,768,1024,1536,1024,768",
-        help="Feedforward dimension of the zipformer encoder layers, per stack, comma separated.",
-    )
-
-    parser.add_argument(
-        "--num-heads",
-        type=str,
-        default="4,4,4,8,4,4",
-        help="Number of attention heads in the zipformer encoder layers: a single int or comma-separated list.",
-    )
-
+    
     parser.add_argument(
         "--encoder-dim",
-        type=str,
-        default="192,256,384,512,384,256",
-        help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--query-head-dim",
-        type=str,
-        default="32",
-        help="Query/key dimension per head in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--value-head-dim",
-        type=str,
-        default="12",
-        help="Value dimension per head in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--pos-head-dim",
-        type=str,
-        default="4",
-        help="Positional-encoding dimension per head in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--pos-dim",
         type=int,
-        default="48",
-        help="Positional-encoding embedding dimension",
+        default=1024,
+        help="Embedding dimension in the decoder model.",
     )
-
+    
     parser.add_argument(
-        "--encoder-unmasked-dim",
-        type=str,
-        default="192,192,256,256,256,192",
-        help="Unmasked dimensions in the encoders, relates to augmentation during training.  "
-        "A single int or comma-separated list.  Must be <= each corresponding encoder_dim.",
-    )
-
-    parser.add_argument(
-        "--cnn-module-kernel",
-        type=str,
-        default="31,31,15,15,15,31",
-        help="Sizes of convolutional kernels in convolution modules in each encoder stack: "
-        "a single int or comma-separated list.",
+        "--freeze-encoder",
+        type=str2bool,
+        default=False,
     )
 
     parser.add_argument(
@@ -196,30 +144,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         Outputs from the encoder and decoder model are projected
         to this dimension before adding.
         """,
-    )
-
-    parser.add_argument(
-        "--causal",
-        type=str2bool,
-        default=False,
-        help="If True, use causal version of model.",
-    )
-
-    parser.add_argument(
-        "--chunk-size",
-        type=str,
-        default="16,32,64,-1",
-        help="Chunk sizes (at 50Hz frame rate) will be chosen randomly from this list during training. "
-        " Must be just -1 if --causal=False",
-    )
-
-    parser.add_argument(
-        "--left-context-frames",
-        type=str,
-        default="64,128,256,-1",
-        help="Maximum left-contexts for causal training, measured in frames which will "
-        "be converted to a number of chunks.  If splitting into chunks, "
-        "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
     parser.add_argument(
@@ -508,7 +432,7 @@ def get_params() -> AttributeDict:
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 80,
-            "subsampling_factor": 4,  # not passed in, this is fixed.
+            "subsampling_factor": 2,  # whisper is 50 Hz
             "warm_step": 2000,
             "env_info": get_env_info(),
         }
@@ -517,11 +441,11 @@ def get_params() -> AttributeDict:
     return params
 
 
-
-
-
 def get_encoder_model(params: AttributeDict) -> nn.Module:
-    encoder = whisper.load_model(params.model_version).encoder
+    model = whisper.load_model(params.model_version)
+    encoder = model.encoder
+    assert params.encoder_dim == model.dims.n_audio_state
+    assert params.n_mels == model.dims.n_mels
     return encoder
 
 
@@ -537,7 +461,7 @@ def get_decoder_model(params: AttributeDict) -> nn.Module:
 
 def get_joiner_model(params: AttributeDict) -> nn.Module:
     joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_dim=params.encoder_dim,
         decoder_dim=params.decoder_dim,
         joiner_dim=params.joiner_dim,
         vocab_size=params.vocab_size,
@@ -552,7 +476,6 @@ def get_model(params: AttributeDict) -> nn.Module:
         f"params.use_ctc={params.use_ctc}"
     )
 
-    encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
     if params.use_transducer:
@@ -563,15 +486,15 @@ def get_model(params: AttributeDict) -> nn.Module:
         joiner = None
 
     model = AsrModel(
-        encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
         joiner=joiner,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_dim=params.encoder_dim,
         decoder_dim=params.decoder_dim,
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
+        freeze_encoder=params.freeze_encoder,
     )
     return model
 
@@ -718,13 +641,11 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
-    feature = batch["inputs"]
+    feature = batch["feature"]
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
     feature = feature.to(device)
-
-    supervisions = batch["supervisions"]
-    feature_lens = supervisions["num_frames"].to(device)
+    feature_lens = batch["feature_lens"]
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
@@ -881,8 +802,6 @@ def train_one_epoch(
         )
 
     for batch_idx, batch in enumerate(train_dl):
-        if batch_idx % 10 == 0:
-            set_batch_count(model, get_adjusted_batch_count(params))
 
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
@@ -1062,6 +981,7 @@ def run(rank, world_size, args):
     logging.info(params)
 
     logging.info("About to create model")
+    replace_whisper_encoder_forward()
     model = get_model(params)
 
     num_param = sum([p.numel() for p in model.parameters()])
@@ -1116,15 +1036,6 @@ def run(rank, world_size, args):
 
     if params.full_libri:
         train_cuts = librispeech.train_all_shuf_cuts()
-
-        # previously we used the following code to load all training cuts,
-        # strictly speaking, shuffled training cuts should be used instead,
-        # but we leave the code here to demonstrate that there is an option
-        # like this to combine multiple cutsets
-
-        # train_cuts = librispeech.train_clean_100_cuts()
-        # train_cuts += librispeech.train_clean_360_cuts()
-        # train_cuts += librispeech.train_other_500_cuts()
     else:
         train_cuts = librispeech.train_clean_100_cuts()
 
@@ -1142,27 +1053,6 @@ def run(rank, world_size, args):
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )
             return False
-
-        # In pruned RNN-T, we require that T >= S
-        # where T is the number of feature frames after subsampling
-        # and S is the number of tokens in the utterance
-
-        # In ./zipformer.py, the conv module uses the following expression
-        # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
-
-        if T < len(tokens):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. "
-                f"Number of frames (before subsampling): {c.num_frames}. "
-                f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
-                f"Tokens: {tokens}. "
-                f"Number of tokens: {len(tokens)}"
-            )
-            return False
-
         return True
 
     train_cuts = train_cuts.filter(remove_short_and_long_utt)
@@ -1175,21 +1065,22 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict
+        train_cuts, sampler_state_dict=sampler_state_dict, n_mels=params.n_mels,
     )
 
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
-    valid_dl = librispeech.valid_dataloaders(valid_cuts)
+    valid_cuts = valid_cuts.filter(remove_short_and_long_utt)
+    valid_dl = librispeech.valid_dataloaders(valid_cuts, n_mels=params.n_mels,)
 
-    if not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
@@ -1266,9 +1157,9 @@ def display_and_save_batch(
     torch.save(batch, filename)
 
     supervisions = batch["supervisions"]
-    features = batch["inputs"]
+    feature = batch["feature"]
 
-    logging.info(f"features shape: {features.shape}")
+    logging.info(f"feature shape: {feature.shape}")
 
     y = sp.encode(supervisions["text"], out_type=int)
     num_tokens = sum(len(i) for i in y)

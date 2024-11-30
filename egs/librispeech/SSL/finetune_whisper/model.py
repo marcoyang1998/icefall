@@ -38,6 +38,7 @@ class AsrModel(nn.Module):
         vocab_size: int = 500,
         use_transducer: bool = True,
         use_ctc: bool = False,
+        freeze_encoder: bool = False,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -102,11 +103,13 @@ class AsrModel(nn.Module):
                 nn.Linear(encoder_dim, vocab_size),
                 nn.LogSoftmax(dim=-1),
             )
+            
+        self.freeze_encoder = freeze_encoder
 
     def forward_encoder(
         self,
         x: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
+        x_lens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute encoder outputs.
         Args:
@@ -119,17 +122,11 @@ class AsrModel(nn.Module):
           encoder_out_lens:
             Encoder output lengths, of shape (N,).
         """
-        if padding_mask is None:
-            padding_mask = torch.zeros_like(x, dtype=torch.bool)
 
-        encoder_out, padding_mask = self.encoder.extract_features(
-            source=x,
-            padding_mask=padding_mask,
-            mask=self.encoder.training,
-        )
-        encoder_out_lens = torch.sum(~padding_mask, dim=1)
-        assert torch.all(encoder_out_lens > 0), encoder_out_lens
-
+        x = x.permute(0,2,1)
+        encoder_out = self.encoder(x) # (B,T,C)
+        encoder_out_lens = x_lens // 2
+        assert encoder_out_lens.max() <= encoder_out.size(1)
         return encoder_out, encoder_out_lens
 
     def forward_ctc(
@@ -271,8 +268,8 @@ class AsrModel(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        x_lens: torch.Tensor,
         y: k2.RaggedTensor,
-        padding_mask: Optional[torch.Tensor] = None,
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
@@ -303,13 +300,14 @@ class AsrModel(nn.Module):
               lm_scale * lm_probs + am_scale * am_probs +
               (1-lm_scale-am_scale) * combined_probs
         """
-        assert x.ndim == 2, x.shape
+        assert x.ndim == 3, x.shape
         assert y.num_axes == 2, y.num_axes
 
         assert x.size(0) == y.dim0, (x.shape, y.dim0)
 
         # Compute encoder outputs
-        encoder_out, encoder_out_lens = self.forward_encoder(x, padding_mask)
+        with torch.set_grad_enabled(not self.freeze_encoder):
+            encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
 
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1]
@@ -341,4 +339,4 @@ class AsrModel(nn.Module):
         else:
             ctc_loss = torch.empty(0)
 
-        return simple_loss, pruned_loss, ctc_loss, encoder_out_lens
+        return simple_loss, pruned_loss, ctc_loss
