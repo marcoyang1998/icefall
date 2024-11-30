@@ -894,9 +894,9 @@ def run(rank, world_size, args):
             c.duration < params.min_keep_size / params.sample_rate
             or c.duration > params.max_keep_size / params.sample_rate
         ):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            )
+            # logging.warning(
+            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
+            # )
             return False
 
         return True

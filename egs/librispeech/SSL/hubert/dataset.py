@@ -98,6 +98,7 @@ class HubertDataset(torch.utils.data.Dataset):
         return {
             "cuts": cuts,
             "audio": audio,
+            "audio_lens": audio_lens,
             "padding_mask": padding_mask,
             "kmeans": kmeans,
             "kmeans2": kmeans2,
