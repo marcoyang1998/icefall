@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
-from dataset import HubertAsrDataset
+from dataset import WhisperAsrDataset
 from lhotse import CutSet, load_manifest_lazy
 from lhotse.dataset import DynamicBucketingSampler, SimpleCutSampler
 from lhotse.utils import fix_random_seed
@@ -120,17 +120,11 @@ class LibriSpeechAsrDataModule:
             help="The number of training dataloader workers that "
             "collect the batches.",
         )
-        group.add_argument(
-            "--do-normalize",
-            type=str2bool,
-            default=True,
-            help="whether to normalize the data",
-        )
 
     def train_dataloaders(
         self,
         cuts_train: CutSet,
-        do_normalize: bool,
+        n_mels: int = 128,
         sampler_state_dict: Optional[Dict[str, Any]] = None,
     ) -> DataLoader:
         """
@@ -141,7 +135,7 @@ class LibriSpeechAsrDataModule:
             The state dict for the training sampler.
         """
         logging.info("About to create train dataset")
-        train = HubertAsrDataset(do_normalize=do_normalize)
+        train = WhisperAsrDataset(n_mels=n_mels)
 
         if self.args.bucketing_sampler:
             logging.info("Using DynamicBucketingSampler.")
@@ -181,9 +175,9 @@ class LibriSpeechAsrDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self, cuts_valid: CutSet, do_normalize: bool) -> DataLoader:
+    def valid_dataloaders(self, cuts_valid: CutSet, n_mels: int = 128) -> DataLoader:
         logging.info("About to create dev dataset")
-        validate = HubertAsrDataset(do_normalize=do_normalize)
+        validate = WhisperAsrDataset(n_mels=n_mels)
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
             max_duration=self.args.max_duration,
@@ -200,9 +194,9 @@ class LibriSpeechAsrDataModule:
 
         return valid_dl
 
-    def test_dataloaders(self, cuts: CutSet, do_normalize: bool) -> DataLoader:
+    def test_dataloaders(self, cuts: CutSet, n_mels: int=128) -> DataLoader:
         logging.debug("About to create test dataset")
-        test = HubertAsrDataset(do_normalize=do_normalize)
+        test = WhisperAsrDataset(n_mels=n_mels)
         sampler = DynamicBucketingSampler(
             cuts,
             max_duration=self.args.max_duration,

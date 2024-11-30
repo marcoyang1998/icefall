@@ -25,6 +25,7 @@ from lhotse import validate
 from lhotse.cut import CutSet
 from lhotse.dataset.collation import read_audio_from_cuts
 from torch.utils.data.dataloader import default_collate
+from whisper.audio import log_mel_spectrogram
 
 
 class HubertDataset(torch.utils.data.Dataset):
@@ -208,7 +209,7 @@ class HubertDataset(torch.utils.data.Dataset):
         return targets, lengths
 
 
-class HubertAsrDataset(torch.utils.data.Dataset):
+class WhisperAsrDataset(torch.utils.data.Dataset):
     """
     In this implementation, there will always be a single channel.
 
@@ -227,7 +228,8 @@ class HubertAsrDataset(torch.utils.data.Dataset):
         sample_rate: float = 16000,
         random_crop: bool = True,
         pad_audio: bool = True,
-        do_normalize: bool = True,
+        do_normalize: bool = False,
+        n_mels: int = 128,
     ) -> None:
         super().__init__()
         self.sample_rate = sample_rate
@@ -237,6 +239,7 @@ class HubertAsrDataset(torch.utils.data.Dataset):
         self.max_sample_size = (
             max_sample_size if max_sample_size is not None else sys.maxsize
         )
+        self.n_mels = n_mels
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Any]:
         self._validate(cuts)
@@ -252,11 +255,18 @@ class HubertAsrDataset(torch.utils.data.Dataset):
         audio, padding_mask, audio_starts = self.collater_audio(
             audio, audio_lens, audio_size
         )
+        audio_lens = torch.tensor(audio_lens)
+        
+        feature = log_mel_spectrogram(audio, n_mels=self.n_mels)
+        feature = feature.permute(0,2,1)
+        feature_lens = audio_lens // 160
 
         return {
             "cuts": cuts,
             "audio": audio,
-            "audio_lens": torch.tensor(audio_lens),
+            "audio_lens": audio_lens,
+            "feature": feature,
+            "feature_lens": feature_lens,
             "padding_mask": padding_mask,
             "supervisions": default_collate(
                 [
