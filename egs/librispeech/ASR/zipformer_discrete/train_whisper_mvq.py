@@ -550,6 +550,9 @@ def _to_int_tuple(s: str):
 
 class MvqEmbed(nn.Module):
     def __init__(self, num_codebooks, num_tokens, token_dim):
+        # This module simply unfolds the multi-codebook tokens 
+        # and concatenates all token embeddings, then project
+        # back to a single-token dimension
         super().__init__()
         self.token_embed = nn.Embedding(
             num_embeddings=num_tokens * num_codebooks +1,
@@ -559,10 +562,11 @@ class MvqEmbed(nn.Module):
         self.proj = nn.Linear(num_codebooks * token_dim, token_dim)
         
     def forward(self, x):
+        # x: (B,T,num_cb)
         B,T,_ = x.shape
-        x = self.token_embed(x) # (B,T,N,token_dim)
-        x = x.reshape(B,T,-1) # (B,T,N)
-        x = self.proj(x)
+        x = self.token_embed(x) # (B,T,num_cb,token_dim)
+        x = x.reshape(B,T,-1) # (B,T,num_cb*token_dim)
+        x = self.proj(x) # (B,T,token_dim)
         
         return x
 
