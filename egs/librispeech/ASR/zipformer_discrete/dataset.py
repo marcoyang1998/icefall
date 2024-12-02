@@ -37,8 +37,6 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
         self.num_tokens = num_tokens
         self.num_codebooks = num_codebooks
         self.frequency_size = frequency_size
-        if self.num_codebooks > 1 and self.frequency_size is not None:
-            self.frequency_size *= self.num_codebooks
         self.token_type = token_type
         self.input_transforms = ifnone(input_transforms, [])
         self.duplicate_tokens = duplicate_tokens

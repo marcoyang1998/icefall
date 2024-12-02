@@ -330,13 +330,7 @@ class AsrModel(nn.Module):
         )
 
         # Map tokens to vectors
-        import pdb; pdb.set_trace()
-        if len(x.shape) == 3:
-            B,T,num_cb = x.shape
-            x = self.token_embed(x) # (B,T,N,token_dim)
-            x = x.reshape(B,T,-1) # (B,T,N)
-        else:
-            x = self.token_embed(x)
+        x = self.token_embed(x)
 
         # Apply frequency mask
         if frequency_masks is not None:
