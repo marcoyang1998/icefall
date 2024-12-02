@@ -15,10 +15,9 @@ from torch.utils.data import DataLoader
 from lhotse import load_manifest, CutSet
 from lhotse.cut import MonoCut
 from lhotse.dataset import SimpleCutSampler, UnsupervisedWaveformDataset, DynamicBucketingSampler
-from lhotse.features.io import NumpyHdf5Writer
+from lhotse.features.io import LilcomChunkyWriter, NumpyHdf5Writer
 
 import whisper
-from whisper.audio import log_mel_spectrogram, pad_or_trim, N_FRAMES
 from typing import Union, Optional
 
 
@@ -96,10 +95,10 @@ def extract_embeddings(
     if params.num_jobs > 1:
         manifest = manifest[rank]
         output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.h5'
+        embedding_path = params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}'
     else:
         output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}.h5'
+        embedding_path =  params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}'
     
     device = torch.device("cuda", rank)
     
