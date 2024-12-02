@@ -548,6 +548,23 @@ def get_params() -> AttributeDict:
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(",")))
 
+class MvqEmbed(nn.Module):
+    def __init__(self, num_codebooks, num_tokens, token_dim):
+        super().__init__()
+        self.token_embed = nn.Embedding(
+            num_embeddings=num_tokens * num_codebooks +1,
+            embedding_dim=token_dim,
+            padding_idx=num_tokens,
+        )
+        self.proj = nn.Linear(num_codebooks * token_dim, token_dim)
+        
+    def forward(self, x):
+        B,T,_ = x.shape
+        x = self.token_embed(x) # (B,T,N,token_dim)
+        x = x.reshape(B,T,-1) # (B,T,N)
+        x = self.proj(x)
+        
+        return x
 
 def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # encoder_embed converts the input of shape (N, T, num_tokens)
@@ -564,16 +581,14 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
             embedding_dim=params.token_dim,
             padding_idx=params.num_tokens,
         )
-        embed_dim = params.token_dim
     else:
-        tokens_embed = nn.Embedding(
-            num_embeddings=params.num_tokens * params.num_codebooks +1,
-            embedding_dim=params.token_dim,
-            padding_idx=params.num_tokens,
+        tokens_embed = MvqEmbed(
+            num_codebooks=params.num_codebooks,
+            num_tokens=params.num_tokens,
+            token_dim=params.token_dim,
         )
-        embed_dim = params.token_dim * params.num_codebooks
     encoder_embed = Conv2dSubsampling(
-        in_channels=embed_dim,
+        in_channels=params.token_dim,
         out_channels=_to_int_tuple(params.encoder_dim)[0],
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
     )
@@ -806,7 +821,6 @@ def compute_loss(
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
     
-    import pdb; pdb.set_trace()
     tokens = batch["tokens"]
     # at entry, token is (N, T, C)
     assert tokens.ndim == 3
