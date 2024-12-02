@@ -24,7 +24,6 @@ def get_parser():
     parser.add_argument(
         "--quantizer-training-manifest",
         type=str,
-        required=True,
     )
     
     parser.add_argument(
@@ -88,7 +87,7 @@ def train_quantizer(args):
         bytes_per_frame=args.num_codebooks,
         device=device,
         phase_one_iters=20000,
-        phase_two_iters=10000,
+        phase_two_iters=20000,
     )
     
     if args.feature_type == "h5":
