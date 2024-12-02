@@ -1,8 +1,9 @@
 import math
 from typing import Optional, List, Callable, Dict, Any
 
-from lhotse import CutSet, validate
+from lhotse import MonoCut, CutSet, validate
 from lhotse.utils import compute_num_frames, ifnone
+from lhotse.dataset.collation import collate_custom_field
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -26,6 +27,7 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
         field: str,
         num_tokens: int,
         token_type: str,
+        num_codebooks: int = 1,
         frequency_size: Optional[int] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         duplicate_tokens: bool = True,
@@ -33,7 +35,10 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
         super().__init__()
         self.field = field
         self.num_tokens = num_tokens
+        self.num_codebooks = num_codebooks
         self.frequency_size = frequency_size
+        if self.num_codebooks > 1 and self.frequency_size is not None:
+            self.frequency_size *= self.num_codebooks
         self.token_type = token_type
         self.input_transforms = ifnone(input_transforms, [])
         self.duplicate_tokens = duplicate_tokens
@@ -80,6 +85,9 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
                 tokens, batch_first=True, padding_value=self.num_tokens
             )
             token_lens = torch.tensor(token_lens, dtype=torch.int64)
+        elif self.token_type == "mvq":
+            cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+            tokens, token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=self.num_tokens)
 
         if self.duplicate_tokens:
             if self.token_type in ("wavlm", "hubert"):
@@ -114,6 +122,13 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
                 data_dict["frequency_masks"] = frequency_masks
             else:
                 tokens = tnfm(tokens)
+                
+        if self.token_type == "mvq":
+            padding_mask = tokens == self.num_tokens
+            num_cb = tokens.size(2)
+            for i in range(num_cb):
+                tokens[:,:,i] += i * self.num_tokens
+            tokens = tokens.masked_fill(padding_mask, value=self.num_tokens * num_cb)
 
         data_dict["cuts"] = cuts
         data_dict["tokens"] = tokens

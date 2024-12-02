@@ -158,6 +158,11 @@ class LibriSpeechAsrDataModule:
             help="AudioSamples or PrecomputedFeatures",
         )
         group.add_argument(
+            "--token-type",
+            type=str,
+            default="hubert",
+        )
+        group.add_argument(
             "--duplicate-tokens",
             type=str2bool,
             default=True,
@@ -168,6 +173,11 @@ class LibriSpeechAsrDataModule:
             type=int,
             default=500,
             help="Number of k-means clusters",
+        )
+        group.add_argument(
+            "--num-codebooks",
+            type=int,
+            default=16,
         )
 
     def train_dataloaders(
@@ -198,7 +208,7 @@ class LibriSpeechAsrDataModule:
             logging.info(f"Num frame mask: {num_frame_masks}")
             input_transforms.append(
                 DiscretizedInputAugment(
-                    token_type="hubert",
+                    token_type=self.args.token_type,
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
                     tokens_mask_size=27,
@@ -215,7 +225,8 @@ class LibriSpeechAsrDataModule:
             num_tokens=self.args.num_tokens,
             duplicate_tokens=self.args.duplicate_tokens,
             frequency_size=80,
-            token_type="hubert",
+            num_codebooks=self.args.num_codebooks if self.args.token_type == "mvq" else 1,
+            token_type=self.args.token_type,
             input_transforms=input_transforms,
         )
 
@@ -263,7 +274,8 @@ class LibriSpeechAsrDataModule:
             field="discrete_tokens",
             duplicate_tokens=self.args.duplicate_tokens,
             num_tokens=self.args.num_tokens,
-            token_type="hubert",
+            num_codebooks=self.args.num_codebooks if self.args.token_type == "mvq" else 1,
+            token_type=self.args.token_type,
         )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -286,8 +298,9 @@ class LibriSpeechAsrDataModule:
         test = DiscretizedInputSpeechRecognitionDataset(
             field="discrete_tokens",
             num_tokens=self.args.num_tokens,
+            num_codebooks=self.args.num_codebooks if self.args.token_type == "mvq" else 1,
             duplicate_tokens=self.args.duplicate_tokens,
-            token_type="hubert",
+            token_type=self.args.token_type,
         )
         sampler = DynamicBucketingSampler(
             cuts,
