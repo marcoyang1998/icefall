@@ -320,7 +320,6 @@ class AsrModel(nn.Module):
               lm_scale * lm_probs + am_scale * am_probs +
               (1-lm_scale-am_scale) * combined_probs
         """
-        assert x.ndim == 2, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         assert y.num_axes == 2, y.num_axes
 
@@ -331,7 +330,13 @@ class AsrModel(nn.Module):
         )
 
         # Map tokens to vectors
-        x = self.token_embed(x)
+        import pdb; pdb.set_trace()
+        if len(x.shape) == 3:
+            B,T,num_cb = x.shape
+            x = self.token_embed(x) # (B,T,N,token_dim)
+            x = x.reshape(B,T,-1) # (B,T,N)
+        else:
+            x = self.token_embed(x)
 
         # Apply frequency mask
         if frequency_masks is not None:
