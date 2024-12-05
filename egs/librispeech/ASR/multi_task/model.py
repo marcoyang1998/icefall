@@ -15,6 +15,7 @@
 # limitations under the License.
 
 
+import logging
 import random
 import warnings
 from typing import Dict, Optional, Tuple
@@ -146,8 +147,11 @@ class PromptedAudioEncoder(nn.Module):
         """
         N = task_ids.size(0)
         # By p=0.1, use the universal prompt
-        mask = torch.rand(N) < self.universal_prompt_prob
-        task_ids[mask] = 0
+        if self.training:
+            mask = torch.rand(N) < self.universal_prompt_prob
+            task_ids[mask] = 0
+            if random.random() < 0.02:
+                logging.info(f"task ids: {task_ids}")
         soft_prompt = self.soft_prompt_embed(task_ids)
         soft_prompt = soft_prompt.reshape(N, self.soft_prompt_len, self.soft_prompt_dim)
         soft_prompt = self.prompt_proj(soft_prompt) # (N, soft_prompt_len, encoder_dim)
@@ -261,6 +265,35 @@ class PromptedAudioEncoder(nn.Module):
 
         return simple_loss, pruned_loss
 
+    def forward_encoder(
+        self,
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        task_ids: torch.Tensor,
+    ):
+        x, x_lens = self.encoder_embed(x, x_lens)
+
+        src_key_padding_mask = make_pad_mask(x_lens)
+        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+
+        # get the task prompts
+        if self.use_soft_prompt:
+            soft_prompt = self.forward_task_id(task_ids) # (N, soft_prompt_len, encoder_dim)
+        else:
+            soft_prompt = None
+
+        encoder_out, encoder_out_lens = self.encoder(
+            x,
+            x_lens,
+            src_key_padding_mask,
+            memory=soft_prompt,
+            memory_key_padding_mask=None,
+        )
+        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
+
+        assert torch.all(encoder_out_lens > 0)
+        return encoder_out, encoder_out_lens
+
     def forward(
         self,
         x: torch.Tensor,
@@ -317,28 +350,7 @@ class PromptedAudioEncoder(nn.Module):
         assert x.size(0) == x_lens.size(0) == y.dim0
         device = x.device
         
-        x, x_lens = self.encoder_embed(x, x_lens)
-
-        src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-
-        # get the task prompts
-        if self.use_soft_prompt:
-            soft_prompt = self.forward_task_id(task_ids) # (N, soft_prompt_len, encoder_dim)
-        else:
-            soft_prompt = None
-
-        encoder_out, encoder_out_lens = self.encoder(
-            x,
-            x_lens,
-            src_key_padding_mask,
-            memory=soft_prompt,
-            memory_key_padding_mask=None,
-        )
-        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
-
-        assert torch.all(encoder_out_lens > 0)
-
+        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens, task_ids)
         # Now for the decoder, i.e., the prediction network
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1]
