@@ -9,6 +9,7 @@ nj=15
 # run step 0 to step 5 by default
 stage=0
 stop_stage=5
+n_mels=128
 
 # Note: This script just prepare the minimal requirements that needed by a
 # transducer training with bpe units.
@@ -139,7 +140,7 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
   log "Stage 3: Compute fbank for librispeech"
   mkdir -p data/fbank
   if [ ! -e data/fbank/.librispeech.done ]; then
-    ./local/compute_fbank_librispeech.py
+    ./local/compute_fbank_librispeech.py --num-mel-bins $n_mels
     touch data/fbank/.librispeech.done
   fi
 
@@ -173,7 +174,7 @@ if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
   log "Stage 4: Compute fbank for musan"
   mkdir -p data/fbank
   if [ ! -e data/fbank/.musan.done ]; then
-    ./local/compute_fbank_musan.py
+    ./local/compute_fbank_musan.py --num-mel-bins $n_mels
     touch data/fbank/.musan.done
   fi
 fi

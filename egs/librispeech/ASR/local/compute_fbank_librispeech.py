@@ -67,6 +67,12 @@ def get_args():
         default=True,
         help="""Perturb speed with factor 0.9 and 1.1 on train subset.""",
     )
+    
+    parser.add_argument(
+        "--num-mel-bins",
+        type=int,
+        default=80,
+    )
 
     return parser.parse_args()
 
@@ -75,11 +81,11 @@ def compute_fbank_librispeech(
     bpe_model: Optional[str] = None,
     dataset: Optional[str] = None,
     perturb_speed: Optional[bool] = True,
+    num_mel_bins: Optional[int] = 80,
 ):
     src_dir = Path("data/manifests")
     output_dir = Path("data/fbank")
     num_jobs = min(15, os.cpu_count())
-    num_mel_bins = 80
 
     if bpe_model:
         logging.info(f"Loading {bpe_model}")
@@ -161,4 +167,5 @@ if __name__ == "__main__":
         bpe_model=args.bpe_model,
         dataset=args.dataset,
         perturb_speed=args.perturb_speed,
+        num_mel_bins=args.num_mel_bins,
     )
