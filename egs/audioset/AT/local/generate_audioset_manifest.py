@@ -65,12 +65,14 @@ def parse_csv(csv_file: str, id_mapping: Dict):
 
     mapping = {}
     with open(csv_file, "r") as fin:
-        reader = csv.reader(fin, delimiter=" ")
+        reader = csv.reader(fin, delimiter="\t")
         for i, row in enumerate(reader):
-            if i <= 2:
+            if i == 0:
                 continue
-            key = row[0].replace(",", "")
-            mapping[key] = name2id(row[-1])
+            key = row[0].split("/")[-1]
+            assert key not in mapping, f"Duplicate key: {key}"
+            # mapping[key] = name2id(row[1])
+            mapping[key] = row[1]
     return mapping
 
 
@@ -93,6 +95,12 @@ def get_parser():
         type=str,
         default="data/fbank",
     )
+    
+    parser.add_argument(
+        "--num-mel-bins",
+        type=int,
+        default=128,
+    )
 
     return parser
 
@@ -104,9 +112,9 @@ def main():
     dataset_dir = args.dataset_dir
     split = args.split
     feat_output_dir = args.feat_output_dir
+    num_mel_bins = args.num_mel_bins
 
     num_jobs = min(15, os.cpu_count())
-    num_mel_bins = 80
 
     if split in ["balanced", "unbalanced"]:
         csv_file = f"{dataset_dir}/{split}_train_segments.csv"
@@ -123,7 +131,7 @@ def main():
 
     new_cuts = []
     for i, audio in enumerate(audio_files):
-        cut_id = audio.split("/")[-1].split("_")[0]
+        cut_id = audio.split("/")[-1]
         recording = Recording.from_file(audio, cut_id)
         cut = MonoCut(
             id=cut_id,
@@ -164,7 +172,7 @@ def main():
             storage_type=LilcomChunkyWriter,
         )
 
-    manifest_output_dir = feat_output_dir + "/" + f"cuts_audioset_{split}.jsonl.gz"
+    manifest_output_dir = feat_output_dir + "/" + f"audioset_cuts_{split}.jsonl.gz"
 
     logging.info(f"Storing the manifest to {manifest_output_dir}")
     cuts.to_jsonl(manifest_output_dir)
