@@ -25,6 +25,7 @@ import csv
 import glob
 import logging
 import os
+from tqdm import tqdm
 from typing import Dict
 
 import torch
@@ -66,7 +67,7 @@ def parse_csv(csv_file: str, id_mapping: Dict):
     mapping = {}
     with open(csv_file, "r") as fin:
         reader = csv.reader(fin, delimiter="\t")
-        for i, row in enumerate(reader):
+        for i, row in tqdm(enumerate(reader)):
             if i == 0:
                 continue
             key = row[0].split("/")[-1]
@@ -114,10 +115,15 @@ def main():
     feat_output_dir = args.feat_output_dir
     num_mel_bins = args.num_mel_bins
 
-    num_jobs = min(15, os.cpu_count())
+    if split == "unbalanced":
+        num_jobs = min(30, os.cpu_count())
+    else:
+        num_jobs = min(15, os.cpu_count())
 
-    if split in ["balanced", "unbalanced"]:
+    if split == "balanced":
         csv_file = f"{dataset_dir}/{split}_train_segments.csv"
+    elif split == "unbalanced":
+        csv_file = f"{dataset_dir}/full_train_asedata_with_duration.csv"
     elif split == "eval":
         csv_file = f"{dataset_dir}/eval_segments.csv"
     else:
