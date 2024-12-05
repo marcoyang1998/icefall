@@ -259,6 +259,12 @@ class MultiTaskDataModule:
             default="balanced",
             choices=["balanced", "unbalanced"]
         )
+        
+        group.add_argument(
+            "--repeat-audioset",
+            type=int,
+            default=1,
+        )
 
     def train_dataloaders(
         self,
