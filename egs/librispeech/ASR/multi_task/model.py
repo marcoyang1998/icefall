@@ -22,14 +22,16 @@ from typing import Dict, Optional, Tuple
 import k2
 import torch
 import torch.nn as nn
-from encoder_interface import EncoderInterface
-from scaling import ScaledLinear, penalize_abs_values_gt
 from torch import Tensor
+import torch.nn.functional as F
 
+from asp import AttentiveStatisticsPooling
+from encoder_interface import EncoderInterface
+from scaling import ScaledLinear, penalize_abs_values_gt, SwooshR
 from icefall.utils import add_sos, make_pad_mask
 
 
-class PromptedTransducer(nn.Module):
+class PromptedAudioEncoder(nn.Module):
     """It implements https://arxiv.org/pdf/1211.3711.pdf
     "Sequence Transduction with Recurrent Neural Networks"
     """
@@ -38,18 +40,18 @@ class PromptedTransducer(nn.Module):
         self,
         encoder_embed: nn.Module,
         encoder: EncoderInterface,
-        text_encoder: EncoderInterface,
         decoder: nn.Module,
         joiner: nn.Module,
         encoder_dim: int,
         decoder_dim: int,
-        joiner_dim: int,
         vocab_size: int,
-        use_BERT: bool = True,
-        text_encoder_type: str = "BERT",
-        text_encoder_adapter: bool = False,
-        freeze_text_encoder: bool = True,
-        context_fuser: nn.Module = None,
+        use_soft_prompt: bool = False,
+        num_tasks: int = 5,
+        soft_prompt_len: int = 10,
+        soft_prompt_dim: int = 80,
+        universal_prompt_prob: float=0.1,
+        do_AT: bool = True,
+        do_SV: bool = True,
     ):
         """
         Args:
@@ -85,7 +87,6 @@ class PromptedTransducer(nn.Module):
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
-        self.text_encoder = text_encoder
         self.decoder = decoder
         self.joiner = joiner
 
@@ -100,67 +101,75 @@ class PromptedTransducer(nn.Module):
             initial_scale=0.25,
         )
 
-        self.use_BERT = use_BERT  # if the text encoder is a pre-trained BERT
-        self.context_fuser = context_fuser
-
-        assert text_encoder_type in (
-            "BERT",
-            "DistilBERT",
-            "BERT-UNCASED",
-        ), f"Unseen text_encoder type {text_encoder_type}"
-        self.text_encoder_dim = (
-            self.text_encoder.config.hidden_size
-            if text_encoder_type in ("BERT", "BERT-UNCASED")
-            else self.text_encoder.config.dim
-        )
-        self.freeze_text_encoder = freeze_text_encoder
-
-        if text_encoder_adapter:
-            self.text_encoder_adapter = nn.Sequential(
-                nn.Linear(self.text_encoder_dim, self.text_encoder_dim, bias=False),
-                nn.Tanh(),
+        self.num_tasks = num_tasks
+        self.soft_prompt_dim = soft_prompt_dim
+        self.soft_prompt_len = soft_prompt_len
+        
+        self.use_soft_prompt = use_soft_prompt
+        # +1 because we also want to have a universal prompt
+        # the universal prompt should have ids=0
+        if self.use_soft_prompt:
+            self.soft_prompt_embed = nn.Embedding((num_tasks+1), soft_prompt_len * soft_prompt_dim)
+            self.prompt_proj = nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Linear(soft_prompt_dim, encoder_dim),
+                SwooshR(),
             )
-        else:
-            self.text_encoder_adapter = None
 
-        self.style_prompt_embedding = nn.Parameter(
-            torch.full((self.text_encoder_dim,), 0.5)
-        )
+        # audio tagging
+        self.do_AT = do_AT
+        if self.do_AT:
+            self.audio_tagging_proj = nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Linear(encoder_dim, 527),
+            ) # 527 classes
+        
+        # speaker verification
+        self.do_SV = do_SV
+        if self.do_SV:
+            self.asp = AttentiveStatisticsPooling(channels=encoder_dim)
+            self.speaker_proj = nn.Linear(2 * encoder_dim, 192)
+            
+        self.universal_prompt_prob = universal_prompt_prob
+        
+        
+    def forward_task_id(
+        self, task_ids,
+    ):
+        """Produce the task specific soft prompt
 
-    def forward(
+        Args:
+            task_ids (torch.Tensor): task ids (N,)
+
+        Returns:
+            soft_prompt embeddings: (L,N,C), L is the soft_prompt length
+        """
+        N = task_ids.size(0)
+        # By p=0.1, use the universal prompt
+        mask = torch.rand(N) < self.universal_prompt_prob
+        task_ids[mask] = 0
+        soft_prompt = self.soft_prompt_embed(task_ids)
+        soft_prompt = soft_prompt.reshape(N, self.soft_prompt_len, self.soft_prompt_dim)
+        soft_prompt = self.prompt_proj(soft_prompt) # (N, soft_prompt_len, encoder_dim)
+        soft_prompt = soft_prompt.permute(1,0,2)
+        return soft_prompt
+
+    def forward_transducer(
         self,
-        x: torch.Tensor,
-        x_lens: torch.Tensor,
-        encoded_inputs: Dict,
-        style_lens: torch.Tensor,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
         y: k2.RaggedTensor,
+        y_lens: torch.Tensor,
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
-        use_pre_text: bool = True,
-    ) -> torch.Tensor:
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute Transducer loss.
         Args:
-          x:
-            A 3-D tensor of shape (N, T, C).
-          x_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-          x_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-          text:
-            A 2-D tensor of integer dtype containing prompt text, of shape (N, T).
-            It is exptected to contain the style prompt (first) and then the content
-            prompt.
-          text_lens:
-            A 1-D tensor of shape (N,). It contains the number of elements (bytes)
-            in `text` before padding, which will include the lengths of the
-            style plus the content prompt.
-          style_lens:
-            A 1-D tensor of shape (N,), containing the number of elements (bytes)
-            within each row of `text` that correspond to the style prompt (these
-            are expected to come first).
+          encoder_out:
+            Encoder output, of shape (N, T, C).
+          encoder_out_lens:
+            Encoder output lengths, of shape (N,).
           y:
             A ragged tensor with 2 axes [utt][label]. It contains labels of each
             utterance.
@@ -173,53 +182,8 @@ class PromptedTransducer(nn.Module):
           lm_scale:
             The scale to smooth the loss with lm (output of predictor network)
             part
-        Returns:
-          Return the transducer loss.
-
-        Note:
-           Regarding am_scale & lm_scale, it will make the loss-function one of
-           the form:
-              lm_scale * lm_probs + am_scale * am_probs +
-              (1-lm_scale-am_scale) * combined_probs
         """
-        if self.freeze_text_encoder:
-            self.text_encoder.eval()
-        assert x.ndim == 3, x.shape
-        assert x_lens.ndim == 1, x_lens.shape
-        assert y.num_axes == 2, y.num_axes
-
-        assert x.size(0) == x_lens.size(0) == y.dim0
-
-        x, x_lens = self.encoder_embed(x, x_lens)
-
-        src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-
-        # freeze the BERT text encoder
-
-        if use_pre_text:
-            memory, memory_key_padding_mask = self.encode_text(
-                encoded_inputs, style_lens=style_lens
-            )
-        else:
-            memory = None
-            memory_key_padding_mask = None
-
-        encoder_out, x_lens = self.encoder(
-            x,
-            x_lens,
-            src_key_padding_mask,
-            memory=memory,
-            memory_key_padding_mask=memory_key_padding_mask,
-        )
-        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
-
-        assert torch.all(x_lens > 0)
-
         # Now for the decoder, i.e., the prediction network
-        row_splits = y.shape.row_splits(1)
-        y_lens = row_splits[1:] - row_splits[:-1]
-
         blank_id = self.decoder.blank_id
         sos_y = add_sos(y, sos_id=blank_id)
 
@@ -240,10 +204,15 @@ class PromptedTransducer(nn.Module):
             device=encoder_out.device,
         )
         boundary[:, 2] = y_lens
-        boundary[:, 3] = x_lens
+        boundary[:, 3] = encoder_out_lens
 
         lm = self.simple_lm_proj(decoder_out)
         am = self.simple_am_proj(encoder_out)
+
+        # if self.training and random.random() < 0.25:
+        #    lm = penalize_abs_values_gt(lm, 100.0, 1.0e-04)
+        # if self.training and random.random() < 0.25:
+        #    am = penalize_abs_values_gt(am, 30.0, 1.0e-04)
 
         with torch.cuda.amp.autocast(enabled=False):
             simple_loss, (px_grad, py_grad) = k2.rnnt_loss_smoothed(
@@ -254,7 +223,7 @@ class PromptedTransducer(nn.Module):
                 lm_only_scale=lm_scale,
                 am_only_scale=am_scale,
                 boundary=boundary,
-                reduction="sum",
+                reduction="none",
                 return_grad=True,
             )
 
@@ -278,14 +247,7 @@ class PromptedTransducer(nn.Module):
 
         # project_input=False since we applied the decoder's input projections
         # prior to do_rnnt_pruning (this is an optimization for speed).
-        if self.context_fuser is not None and memory is not None:
-            memory = memory.permute(1, 0, 2)  # (T,N,C) -> (N,T,C)
-            context = self.context_fuser(memory, padding_mask=memory_key_padding_mask)
-            context = self.joiner.context_proj(context)
-        else:
-            context = None
-
-        logits = self.joiner(am_pruned, lm_pruned, context=context, project_input=False)
+        logits = self.joiner(am_pruned, lm_pruned, project_input=False)
 
         with torch.cuda.amp.autocast(enabled=False):
             pruned_loss = k2.rnnt_loss_pruned(
@@ -294,10 +256,122 @@ class PromptedTransducer(nn.Module):
                 ranges=ranges,
                 termination_symbol=blank_id,
                 boundary=boundary,
-                reduction="sum",
+                reduction="none",
             )
 
-        return (simple_loss, pruned_loss)
+        return simple_loss, pruned_loss
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_lens: torch.Tensor,
+        y: k2.RaggedTensor,
+        prune_range: int = 5,
+        am_scale: float = 0.0,
+        lm_scale: float = 0.0,
+        task_ids: torch.Tensor = None,
+        at_targets: torch.Tensor = None,
+        sv_targets: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+          x:
+            A 3-D tensor of shape (N, T, C).
+          x_lens:
+            A 1-D tensor of shape (N,). It contains the number of frames in `x`
+            before padding.
+          x_lens:
+            A 1-D tensor of shape (N,). It contains the number of frames in `x`
+            before padding.
+          text:
+            A 2-D tensor of integer dtype containing prompt text, of shape (N, T).
+            It is exptected to contain the style prompt (first) and then the content
+            prompt.
+          task_ids:
+            The task-id of each training sample (N,)
+          y:
+            A ragged tensor with 2 axes [utt][label]. It contains labels of each
+            utterance.
+          prune_range:
+            The prune range for rnnt loss, it means how many symbols(context)
+            we are considering for each frame to compute the loss.
+          am_scale:
+            The scale to smooth the loss with am (output of encoder network)
+            part
+          lm_scale:
+            The scale to smooth the loss with lm (output of predictor network)
+            part
+        Returns:
+          Return the transducer loss.
+
+        Note:
+           Regarding am_scale & lm_scale, it will make the loss-function one of
+           the form:
+              lm_scale * lm_probs + am_scale * am_probs +
+              (1-lm_scale-am_scale) * combined_probs
+        """
+        assert x.ndim == 3, x.shape
+        assert x_lens.ndim == 1, x_lens.shape
+        assert y.num_axes == 2, y.num_axes
+
+        assert x.size(0) == x_lens.size(0) == y.dim0
+        device = x.device
+        
+        x, x_lens = self.encoder_embed(x, x_lens)
+
+        src_key_padding_mask = make_pad_mask(x_lens)
+        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+
+        # get the task prompts
+        if self.use_soft_prompt:
+            soft_prompt = self.forward_task_id(task_ids) # (N, soft_prompt_len, encoder_dim)
+        else:
+            soft_prompt = None
+
+        encoder_out, encoder_out_lens = self.encoder(
+            x,
+            x_lens,
+            src_key_padding_mask,
+            memory=soft_prompt,
+            memory_key_padding_mask=None,
+        )
+        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
+
+        assert torch.all(encoder_out_lens > 0)
+
+        # Now for the decoder, i.e., the prediction network
+        row_splits = y.shape.row_splits(1)
+        y_lens = row_splits[1:] - row_splits[:-1]
+
+        # ASR loss
+        simple_loss, pruned_loss = self.forward_transducer(
+            encoder_out=encoder_out,
+            encoder_out_lens=encoder_out_lens,
+            y=y.to(device),
+            y_lens=y_lens,
+            prune_range=prune_range,
+            am_scale=am_scale,
+            lm_scale=lm_scale,
+        )
+        
+        # audio tagging
+        if self.do_AT:
+            at_loss = self.forward_audio_tagging(
+                encoder_out, encoder_out_lens, at_targets,
+            )
+        else:
+            at_loss = torch.empty(0)
+        
+        # speaker verification
+        if self.do_SV:
+            ecapa_embeddings = self.forward_speaker(
+                encoder_out, encoder_out_lens
+            )
+            sv_loss = 1 - F.cosine_similarity(ecapa_embeddings, sv_targets, dim=-1, eps=1e-6)
+        else:
+            sv_loss = torch.empty(0)
+        
+        return simple_loss, pruned_loss, at_loss, sv_loss
 
     def _add_style_indicator(self, memory: Tensor, style_lens: Tensor):
         """
@@ -355,38 +429,35 @@ class PromptedTransducer(nn.Module):
 
         return memory, memory_key_padding_mask
 
-    def encode_audio(
+
+    def forward_audio_tagging(
         self,
-        feature: Tensor,
-        feature_lens: Tensor,
-        memory: Optional[Tensor],
-        memory_key_padding_mask: Optional[Tensor],
-    ) -> Tuple[Tensor, Tensor]:
-        """Encode the input audio features
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+        target: torch.Tensor,
+    ):
+        # target: (N, num_events)
+        logits = self.audio_tagging_proj(encoder_out) # (N, T, num_classes)
+        padding_mask = make_pad_mask(encoder_out_lens) # (N,T)
+        logits[padding_mask] = 0
+        logits = logits.sum(dim=1)
+        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits) # (N, num_events)
+        
+        at_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
 
-        Args:
-            feature (Tensor): Input audio (N,T,C)
-            feature_lens (Tensor): Length of input audio (N,)
-            memory (Tensor): Embeddings from the text encoder
-            memory_key_padding_mask (Tensor): _description_
+        return at_loss
+    
+    def forward_speaker(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+    ):
+        encoder_out = encoder_out.permute(0,2,1)
+        encoder_out_lens = encoder_out_lens / torch.max(encoder_out_lens)
+        asp_embedding = self.asp(encoder_out, encoder_out_lens) # (N,C,T)
+        asp_embedding = asp_embedding.permute(0,2,1)
+        asp_embedding = self.speaker_proj(asp_embedding) # (N, 1, 192)
+        
+        return asp_embedding
 
-        Returns:
-            Tuple[Tensor, Tensor]: _description_
-        """
-        x, x_lens = self.encoder_embed(feature, feature_lens)
-        src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-
-        encoder_out, encoder_out_lens = self.encoder(
-            x=x,
-            x_lens=x_lens,
-            src_key_padding_mask=src_key_padding_mask,
-            memory=memory,
-            memory_key_padding_mask=memory_key_padding_mask,
-        )
-        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
-
-        return encoder_out, encoder_out_lens
-
-
-Transducer = PromptedTransducer  # for decoding
+Transducer = PromptedAudioEncoder # for decoding
