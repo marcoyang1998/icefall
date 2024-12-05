@@ -78,6 +78,8 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
+        at_KD: bool = False,
+        sv_KD: bool = False
     ):
         """
         k2 ASR IterableDataset constructor.
@@ -99,6 +101,9 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self.cut_transforms = ifnone(cut_transforms, [])
         self.input_transforms = ifnone(input_transforms, [])
         self.input_strategy = input_strategy
+        
+        self.at_KD = at_KD
+        self.sv_KD = sv_KD
 
         # This attribute is a workaround to constantly growing HDF5 memory
         # throughout the epoch. It regularly closes open file handles to
@@ -154,9 +159,14 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                 cuts_pre_mixed, "at_logits", pad_value=-100
             ) # (N,C)
         else:        
-            audio_events = [c.audio_event for c in cuts] # the label indices are in CED format
-            at_targets, _ = str2multihot(audio_events)
+            audio_events = [c.audio_event for c in cuts_pre_mixed] # the label indices are in CED format
+            at_targets, _ = str2multihot(audio_events) # (N,)
             
+        sv_targets = None
+        
+        # task ids
+        task_ids = [c.task_id for c in cuts_pre_mixed]
+        task_ids = torch.tensor(task_ids)
         
         batch = {
             "inputs": inputs,
@@ -169,7 +179,9 @@ class MultiTaskDataset(torch.utils.data.Dataset):
                     for supervision in cut.supervisions
                 ]
             ),
+            "task_ids": task_ids,
             "at_targets": at_targets,
+            "sv_targets": sv_targets,
         }
         # Update the 'supervisions' field with sequence_idx and start/num frames/samples
         batch["supervisions"].update(supervision_intervals)

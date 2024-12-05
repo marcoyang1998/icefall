@@ -41,6 +41,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
+from dataset import MultiTaskDataset
 from icefall.utils import str2bool
 
 
@@ -52,7 +53,7 @@ class _SeedWorkers:
         fix_random_seed(self.seed + worker_id)
 
 
-class LibriSpeechAsrDataModule:
+class MultiTaskDataModule:
     """
     DataModule for k2 ASR experiments.
     It assumes there is always one train and valid dataloader,
@@ -214,6 +215,50 @@ class LibriSpeechAsrDataModule:
             default="PrecomputedFeatures",
             help="AudioSamples or PrecomputedFeatures",
         )
+        
+        # KD related
+        group.add_argument(
+            "--at-KD",
+            type=str2bool,
+            default=False,
+            help="If load the logits instead of ground truth of audio events"
+        )
+        
+        group.add_argument(
+            "--sv-KD",
+            type=str2bool,
+            default=False,
+            help="If load speaker embedding instead of speaker identity"
+        )
+        
+        # multi task dataset related
+        group.add_argument(
+            "--use-voxceleb",
+            type=str2bool,
+            default=False,
+            help="If use voxceleb as training set. This will not affet the model params.",
+        )
+
+        group.add_argument(
+            "--voxceleb-subset",
+            type=str,
+            default="vox1",
+            choices=["vox1", "vox2", "only_vox2"],
+            help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
+        )
+        
+        group.add_argument(
+            "--use-audioset",
+            type=str2bool,
+            default=True,
+        )
+
+        group.add_argument(
+            "--audioset-subset",
+            type=str,
+            default="balanced",
+            choices=["balanced", "unbalanced"]
+        )
 
     def train_dataloaders(
         self,
@@ -279,11 +324,13 @@ class LibriSpeechAsrDataModule:
             logging.info("Disable SpecAugment")
 
         logging.info("About to create train dataset")
-        train = K2SpeechRecognitionDataset(
+        train = MultiTaskDataset(
             input_strategy=eval(self.args.input_strategy)(),
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
+            at_KD=self.args.at_KD,
+            sv_KD=self.args.sv_KD
         )
 
         if self.args.on_the_fly_feats:
@@ -297,11 +344,13 @@ class LibriSpeechAsrDataModule:
             # to be strict (e.g. could be randomized)
             # transforms = [PerturbSpeed(factors=[0.9, 1.1], p=2/3)] + transforms   # noqa
             # Drop feats to be on the safe side.
-            train = K2SpeechRecognitionDataset(
+            train = MultiTaskDataset(
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
+                at_KD=self.args.at_KD,
+                sv_KD=self.args.sv_KD
             )
 
         if self.args.bucketing_sampler:
@@ -355,15 +404,19 @@ class LibriSpeechAsrDataModule:
 
         logging.info("About to create dev dataset")
         if self.args.on_the_fly_feats:
-            validate = K2SpeechRecognitionDataset(
+            validate = MultiTaskDataset(
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 return_cuts=self.args.return_cuts,
+                at_KD=self.args.at_KD,
+                sv_KD=self.args.sv_KD
             )
         else:
-            validate = K2SpeechRecognitionDataset(
+            validate = MultiTaskDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
+                at_KD=self.args.at_KD,
+                sv_KD=self.args.sv_KD
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -383,11 +436,13 @@ class LibriSpeechAsrDataModule:
 
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
         logging.debug("About to create test dataset")
-        test = K2SpeechRecognitionDataset(
+        test = MultiTaskDataset(
             input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
+            at_KD=self.args.at_KD,
+            sv_KD=self.args.sv_KD
         )
         sampler = DynamicBucketingSampler(
             cuts,
@@ -490,3 +545,43 @@ class LibriSpeechAsrDataModule:
     def gigaspeech_test_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech test cuts")
         return load_manifest_lazy(self.args.manifest_dir / "cuts_TEST.jsonl.gz")
+    
+    @lru_cache()
+    def audioset_cuts(self) -> CutSet:
+        logging.info("About to get the audioset cuts.")
+        if self.args.audioset_subset == "full":
+            cuts = load_manifest_lazy(
+                self.args.manifest_dir / "audioset_cuts_full.jsonl.gz"
+            )
+        else:
+            cuts = load_manifest_lazy(
+                self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
+            )
+        return cuts
+
+    @lru_cache()
+    def audioset_eval_cuts(self) -> CutSet:
+        logging.info("About to get test-other cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
+        )
+
+    @lru_cache()
+    def voxceleb_cuts(self) -> CutSet:
+        # this should be used in KD
+        logging.info("About to get the voxceleb cuts.")
+        if self.args.voxceleb_subset == "only_vox2":
+            logging.info("Only get the voxceleb2 cuts.")
+            cuts = load_manifest_lazy(
+                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+            )
+            return cuts
+        cuts = load_manifest_lazy(
+            self.args.manifest_dir / "cuts_vox1_train-with-3-embeddings.jsonl.gz"
+        )
+        if self.args.voxceleb_subset == "vox2":
+            logging.info("Adding voxceleb2 cuts.")
+            cuts += load_manifest_lazy(
+                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+            )
+        return cuts
