@@ -826,8 +826,6 @@ def compute_loss(
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
     
     tokens = batch["tokens"]
-    # at entry, token is (N, T, C)
-    assert tokens.ndim == 3
     tokens = tokens.to(device)
 
     token_lens = batch["token_lens"].to(device)

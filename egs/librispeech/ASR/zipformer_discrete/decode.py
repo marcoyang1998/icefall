@@ -116,7 +116,7 @@ from beam_search import (
     greedy_search_batch,
     modified_beam_search,
 )
-from train import add_model_arguments, get_params, get_model
+from train_whisper_mvq import add_model_arguments, get_params, get_model
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -354,7 +354,7 @@ def decode_one_batch(
     """
     device = next(model.parameters()).device
     tokens = batch["tokens"]
-    assert tokens.ndim == 2
+    assert tokens.ndim >= 2
 
     tokens = tokens.to(device)
     # at entry, tokens is (N, T, C)
