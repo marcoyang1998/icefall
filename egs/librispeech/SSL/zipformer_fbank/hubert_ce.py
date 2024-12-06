@@ -18,7 +18,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import argparse
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -357,15 +356,15 @@ class HubertModel(nn.Module):
 
         return x, mask_indices
 
-    def forward_features(self, source: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, features: torch.Tensor, features_lens: torch.Tensor) -> torch.Tensor:
         if self.feature_grad_mult > 0:
-            features = self.feature_extractor(source)
+            features, feature_lens = self.feature_extractor(features, features_lens)
             if self.feature_grad_mult != 1.0:
                 features = GradMultiply.apply(features, self.feature_grad_mult)
         else:
             with torch.no_grad():
-                features = self.feature_extractor(source)
-        return features
+                features, feature_lens = self.feature_extractor(features, feature_lens)
+        return features, feature_lens
 
     def forward_targets(
         self,
@@ -393,109 +392,31 @@ class HubertModel(nn.Module):
         padding_mask = padding_mask.view(padding_mask.size(0), features.size(1), -1)
         padding_mask = padding_mask.all(-1)
         return padding_mask
-
-    def forward_old(
-        self,
-        source: torch.Tensor,
-        target_list: Optional[List[torch.Tensor]] = None,
-        padding_mask: Optional[torch.Tensor] = None,
-        mask: bool = True,
-        features_only: bool = False,
-        output_layer: Optional[int] = None,
-    ):
-        """output layer is 1-based"""
-        features = self.forward_features(source)
-        if target_list is not None:
-            features, target_list = self.forward_targets(features, target_list)
-
-        features_pen = features.float().pow(2).mean() 
-
-        features = features.transpose(1, 2)
-        features = self.layer_norm(features)
-        unmasked_features = features.clone()
-
-        if padding_mask is not None:
-            padding_mask = self.forward_padding_mask(features, padding_mask)
-
-        if self.post_extract_proj is not None:
-            features = self.post_extract_proj(features)
-
-        features = self.dropout_input(features)
-        unmasked_features = self.dropout_features(unmasked_features)
-
-        if mask:
-            x, mask_indices = self.apply_mask(features, padding_mask, target_list)
-        else:
-            x = features
-            mask_indices = None
-
-        # feature: (B, T, D), float
-        # target: (B, T), long
-        # x: (B, T, D), float -> (T, B, D), float
-        # padding_mask: (B, T), bool
-        # mask_indices: (B, T), bool
-        x = x.transpose(0, 1)
-        x, x_lens = self.encoder(x, (~padding_mask).sum(dim=-1))
-        x = x.transpose(0, 1)
-
-        if features_only:
-            return {"x": x, "padding_mask": padding_mask, "features": features}
-
-        if not self.skip_masked:
-            masked_indices = torch.logical_and(~padding_mask, mask_indices)
-            proj_x_m = self.final_proj(x[masked_indices])
-            proj_x_m /= self.logit_temp
-            logit_m_list = [proj_x_m for _ in range(len(target_list))]
-        else:
-            logit_m_list = [None for _ in target_list]
-
-        if not self.skip_nomask:
-            nomask_indices = torch.logical_and(~padding_mask, ~mask_indices)
-            proj_x_u = self.final_proj(x[nomask_indices])
-            proj_x_u /= self.logit_temp
-            logit_u_list = [proj_x_u for _ in range(len(target_list))]
-        else:
-            logit_u_list = [None for _ in target_list]
-
-        # result = {
-        #     "logit_m_list": logit_m_list,
-        #     "logit_u_list": logit_u_list,
-        #     "padding_mask": padding_mask,
-        #     "features_pen": features_pen,
-        # }
-        targ_m_list = target_list[0][masked_indices]
-        targ_m_list = targ_m_list.long()
-        targ_m_list = [targ_m_list for _ in range(len(target_list))]
-
-        targ_u_list = target_list[0][nomask_indices]
-        targ_u_list = targ_u_list.long()
-        targ_u_list = [targ_u_list for _ in range(len(target_list))]
-        return self.compute_loss(
-            logit_m_list, logit_u_list, targ_m_list, targ_u_list, features_pen
-        )
         
     # the co-training forward function
     def forward(
         self,
-        source: torch.Tensor,
+        feature: torch.Tensor,
+        feature_lens: torch.Tensor,
         target_list: Optional[List[torch.Tensor]] = None,
-        padding_mask: Optional[torch.Tensor] = None,
         mask: bool = True,
         features_only: bool = False,
         output_layer: Optional[int] = None,
     ):
         """output layer is 1-based"""
-        features = self.forward_features(source)
+        features, feature_lens = self.forward_features(feature, feature_lens)
         if target_list is not None:
+            features = features.permute(0,2,1) # (B,C,T)
             features, target_list = self.forward_targets(features, target_list)
 
-        features_pen = features.float().pow(2).mean()
+        features_pen = features.float().pow(2).mean() * 0.001
 
-        features = features.transpose(1, 2)
+        features = features.permute(0,2,1)
         features = self.layer_norm(features)
         
-        if padding_mask is not None:
-            padding_mask = self.forward_padding_mask(features, padding_mask)
+        # truncate padding_mask
+        padding_mask = make_pad_mask(feature_lens)
+        padding_mask = self.forward_padding_mask(features, padding_mask)
 
         if self.post_extract_proj is not None:
             features = self.post_extract_proj(features)
@@ -505,7 +426,7 @@ class HubertModel(nn.Module):
         
         if mask:
             x1, mask_indices1 = self.apply_mask(features, padding_mask, target_list)
-            x2, mask_indices2 = self.apply_mask(unmasked_features, padding_mask, target_list, mask_indices=~mask_indices1)
+            x2, mask_indices2 = self.apply_mask(unmasked_features, padding_mask, target_list)
             x = torch.cat([x1,x2]) # (B,T,D) -> (2B,T,D)
             mask_indices = torch.cat([mask_indices1, mask_indices2]) # (2B,T)
         else:
@@ -521,12 +442,11 @@ class HubertModel(nn.Module):
         # padding_mask: (2B, T), bool
         # mask_indices: (B, T), bool
         x = x.transpose(0, 1)
-        x, x_lens = self.encoder(x, (~padding_mask).sum(dim=-1))
+        x, x_lens = self.encoder(x, feature_lens)
         x = x.transpose(0, 1)
         
         if features_only:
-            return {"x": x, "padding_mask": padding_mask, "features": features}
-
+            return {"x": x, "x_lens": x_lens, "padding_mask": padding_mask, "features": features}
         
         # 1. Compute the normal hubert loss
         x_proj = self.final_proj(x)
@@ -572,20 +492,21 @@ class HubertModel(nn.Module):
     def extract_features(
         self,
         source: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
+        source_lens: torch.Tensor,
         mask: bool = False,
         ret_conv: bool = False,
         output_layer: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         res = self.forward(
             source,
-            padding_mask=padding_mask,
+            source_lens,
             mask=mask,
             features_only=True,
             output_layer=output_layer,
         )
         feature = res["features"] if ret_conv else res["x"]
-        return feature, res["padding_mask"]
+        feature_lens = res["x_lens"] 
+        return feature, feature_lens
 
     def get_logits(self, net_output, is_masked=True):
         if is_masked:

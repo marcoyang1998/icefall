@@ -51,7 +51,7 @@ import optim
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from hubert_multi_ce import HubertModel
+from hubert_ce import HubertModel
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
@@ -618,6 +618,21 @@ def get_parser():
         default=250000,
         help="max sample size to crop to for batching.",
     )
+    
+    # co-training related
+    parser.add_argument(
+        "--co-train-loss",
+        type=str,
+        choices=["ce", "kl"],
+        default="kl",
+    )
+    
+    parser.add_argument(
+        "--co-training-loss-scale",
+        type=float,
+        default=0.1,
+        help="Scale of the co-training loss"
+    )
 
     add_model_arguments(parser)
 
@@ -834,21 +849,17 @@ def compute_loss(
     assert feature.ndim == 3
     feature = feature.to(device)
     
-    audio = batch["audio"].to(device)
-    padding_mask = batch["padding_mask"].to(device)
+    feature_lens = batch["num_frames"].to(device)
+    
     kmeans = batch["kmeans"].to(device)
-    kmeans2 = batch["kmeans2"]
-    if kmeans2 is not None and params.num_proj_heads == 2:
-        kmeans2 = kmeans2.to(device)
-        target_list = [kmeans, kmeans2]
-    else:
-        target_list = [kmeans]
+    target_list = [kmeans]
 
     assert len(target_list) == params.num_proj_heads
     with torch.set_grad_enabled(is_training):
-        loss, num_masked_tokens, logging_output_list = model(
-            source=audio, target_list=target_list, padding_mask=padding_mask
+        hubert_loss, co_train_loss, num_masked_tokens, logging_output_list = model(
+            feature=feature, feature_lens=feature_lens, target_list=target_list
         )
+        loss = hubert_loss + params.co_training_loss_scale * co_train_loss
 
     assert loss.requires_grad == is_training
 
@@ -856,6 +867,11 @@ def compute_loss(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = num_masked_tokens
+    
+    # we use reduction=sum
+    info["loss"] = loss.detach().cpu().item()
+    info["hubert_loss"] = hubert_loss.detach().cpu().item()
+    info["co_train_loss"] = co_train_loss.detach().cpu().item()
     for logging_output, head_name in zip(logging_output_list, params.head_names):
         for item in logging_output:
             info[f"{head_name}_{item}"] = logging_output[item]
