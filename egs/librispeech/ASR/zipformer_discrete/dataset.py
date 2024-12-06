@@ -83,12 +83,20 @@ class DiscretizedInputSpeechRecognitionDataset(torch.utils.data.Dataset):
                 tokens, batch_first=True, padding_value=self.num_tokens
             )
             token_lens = torch.tensor(token_lens, dtype=torch.int64)
+        elif self.token_type == "mvq-unfold":
+            cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+            tokens, token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=self.num_tokens)
+            padding_mask = tokens[:,:,0] == self.num_tokens
+            num_codebooks = tokens.size(-1)
+            assert num_codebooks == 2
+            tokens = tokens[:,:,0] * 256 + tokens[:,:,1] # (B,T)
+            tokens = tokens.masked_fill(padding_mask, value=self.num_tokens)
         elif self.token_type == "mvq":
             cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
             tokens, token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=self.num_tokens)
 
         if self.duplicate_tokens:
-            if self.token_type in ("wavlm", "hubert"):
+            if self.token_type in ("wavlm", "hubert", "mvq-unfold"):
                 tokens = (
                     torch.nn.functional.interpolate(
                         tokens.unsqueeze(0).to(torch.float32),
