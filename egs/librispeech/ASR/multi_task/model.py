@@ -446,7 +446,8 @@ class PromptedAudioEncoder(nn.Module):
         self,
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
-        target: torch.Tensor,
+        target: torch.Tensor = None,
+        return_logits: bool = False,
     ):
         # target: (N, num_events)
         logits = self.audio_tagging_proj(encoder_out) # (N, T, num_classes)
@@ -454,6 +455,8 @@ class PromptedAudioEncoder(nn.Module):
         logits[padding_mask] = 0
         logits = logits.sum(dim=1)
         logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits) # (N, num_events)
+        if return_logits:
+            return logits
         
         at_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
 

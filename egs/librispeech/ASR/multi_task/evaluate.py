@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright    2023  Xiaomi Corp.        (authors: Xiaoyu Yang)
+# Copyright    2024  University of Cambridge        (authors: Xiaoyu Yang)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
 #
@@ -29,19 +30,20 @@ export CUDA_VISIBLE_DEVICES="0"
 """
 
 import argparse
+from functools import partial
 import logging
 from pathlib import Path
 from typing import Dict
 
 import torch
 import torch.nn as nn
-from at_datamodule import AudioSetATDatamodule
+from mtl_datamodule import MultiTaskDataModule
 
 try:
     from sklearn.metrics import average_precision_score
 except:
     raise ImportError(f"Please run\n" "pip3 install -U scikit-learn")
-from train import add_model_arguments, get_model, get_params, str2multihot
+from train import add_model_arguments, get_model, get_params
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -50,6 +52,8 @@ from icefall.checkpoint import (
     load_checkpoint,
 )
 from icefall.utils import AttributeDict, setup_logger, str2bool
+from dataset import str2multihot
+from utils import _add_dummy_embeddings_and_taskIDs
 
 
 def get_parser():
@@ -102,6 +106,12 @@ def get_parser():
         default="zipformer/exp",
         help="The experiment dir",
     )
+    
+    parser.add_argument(
+        "--use-universal-prompt",
+        type=str2bool,
+        default=False,
+    )
 
     add_model_arguments(parser)
 
@@ -119,18 +129,21 @@ def inference_one_batch(
 
     feature = feature.to(device)
     # at entry, feature is (N, T, C)
+    
+    label = batch["at_targets"]
+    task_ids = batch["task_ids"].int().to(device)
+    
+    if params.use_universal_prompt:
+        task_ids = (task_ids * 0).int()
 
     supervisions = batch["supervisions"]
-    audio_event = supervisions["audio_event"]
-
-    label, _ = str2multihot(audio_event)
-    label = label.detach().cpu()
-
     feature_lens = supervisions["num_frames"].to(device)
+    cuts = supervisions["cut"]
+    audio_events = [c.supervisions[0].audio_event for c in cuts]
 
-    encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens)
+    encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens, task_ids)
 
-    audio_logits = model.forward_audio_tagging(encoder_out, encoder_out_lens)
+    audio_logits = model.forward_audio_tagging(encoder_out, encoder_out_lens, return_logits=True)
     # convert to probabilities between 0-1
     audio_logits = audio_logits.sigmoid().detach().cpu()
 
@@ -175,11 +188,17 @@ def decode_dataset(
 @torch.no_grad()
 def main():
     parser = get_parser()
-    AudioSetATDatamodule.add_arguments(parser)
+    MultiTaskDataModule.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
     params = get_params()
+    
+    # ASR params
+    params.vocab_size = 500
+    params.blank_id = 0
+    params.context_size = 2
+    
     params.update(vars(args))
 
     params.res_dir = params.exp_dir / "inference_audio_tagging"
@@ -189,6 +208,9 @@ def main():
     else:
         params.suffix = f"epoch-{params.epoch}-avg-{params.avg}"
 
+    if params.use_universal_prompt:
+        params.suffix += "_use-universal-prompt"
+    
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
 
@@ -221,7 +243,6 @@ def main():
                     f" --iter {params.iter}, --avg {params.avg}"
                 )
             logging.info(f"averaging {filenames}")
-            model.to(device)
             model.load_state_dict(
                 average_checkpoints(filenames, device=device), strict=False
             )
@@ -234,9 +255,8 @@ def main():
                 if i >= 1:
                     filenames.append(f"{params.exp_dir}/epoch-{i}.pt")
             logging.info(f"averaging {filenames}")
-            model.to(device)
             model.load_state_dict(
-                average_checkpoints(filenames, device=device), strict=False
+                average_checkpoints(filenames), strict=False
             )
     else:
         if params.iter > 0:
@@ -259,12 +279,10 @@ def main():
                 "Calculating the averaged model over iteration checkpoints"
                 f" from {filename_start} (excluded) to {filename_end}"
             )
-            model.to(device)
             model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
-                    device=device,
                 ),
                 strict=False,
             )
@@ -278,12 +296,10 @@ def main():
                 f"Calculating the averaged model over epoch range from "
                 f"{start} (excluded) to {params.epoch}"
             )
-            model.to(device)
             model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
-                    device=device,
                 ),
                 strict=False,
             )
@@ -295,9 +311,10 @@ def main():
     logging.info(f"Number of model parameters: {num_param}")
 
     args.return_cuts = True
-    audioset = AudioSetATDatamodule(args)
+    audioset = MultiTaskDataModule(args)
 
     audioset_cuts = audioset.audioset_eval_cuts()
+    audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
 
     audioset_dl = audioset.valid_dataloaders(audioset_cuts)
 
