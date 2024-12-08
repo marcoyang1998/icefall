@@ -51,6 +51,7 @@ class PromptedAudioEncoder(nn.Module):
         soft_prompt_len: int = 10,
         soft_prompt_dim: int = 80,
         universal_prompt_prob: float=0.1,
+        do_ASR: bool = True,
         do_AT: bool = True,
         do_SV: bool = True,
     ):
@@ -84,23 +85,26 @@ class PromptedAudioEncoder(nn.Module):
         """
         super().__init__()
         assert isinstance(encoder, EncoderInterface), type(encoder)
-        assert hasattr(decoder, "blank_id")
+        # assert hasattr(decoder, "blank_id")
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
-        self.decoder = decoder
-        self.joiner = joiner
+        
+        self.do_ASR = do_ASR
+        if self.do_ASR:
+            self.decoder = decoder
+            self.joiner = joiner
 
-        self.simple_am_proj = ScaledLinear(
-            encoder_dim,
-            vocab_size,
-            initial_scale=0.25,
-        )
-        self.simple_lm_proj = ScaledLinear(
-            decoder_dim,
-            vocab_size,
-            initial_scale=0.25,
-        )
+            self.simple_am_proj = ScaledLinear(
+                encoder_dim,
+                vocab_size,
+                initial_scale=0.25,
+            )
+            self.simple_lm_proj = ScaledLinear(
+                decoder_dim,
+                vocab_size,
+                initial_scale=0.25,
+            )
 
         self.num_tasks = num_tasks
         self.soft_prompt_dim = soft_prompt_dim
@@ -356,15 +360,19 @@ class PromptedAudioEncoder(nn.Module):
         y_lens = row_splits[1:] - row_splits[:-1]
 
         # ASR loss
-        simple_loss, pruned_loss = self.forward_transducer(
-            encoder_out=encoder_out,
-            encoder_out_lens=encoder_out_lens,
-            y=y.to(device),
-            y_lens=y_lens,
-            prune_range=prune_range,
-            am_scale=am_scale,
-            lm_scale=lm_scale,
-        )
+        if self.do_ASR:
+            simple_loss, pruned_loss = self.forward_transducer(
+                encoder_out=encoder_out,
+                encoder_out_lens=encoder_out_lens,
+                y=y.to(device),
+                y_lens=y_lens,
+                prune_range=prune_range,
+                am_scale=am_scale,
+                lm_scale=lm_scale,
+            )
+        else:
+            simple_loss = torch.empty(0)
+            pruned_loss = torch.empty(0)
         
         # audio tagging
         if self.do_AT:
