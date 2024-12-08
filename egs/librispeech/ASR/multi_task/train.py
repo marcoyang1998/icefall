@@ -83,7 +83,7 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_dummy_embeddings_and_taskIDs, add_dummy_text, MetricsTracker
+from utils import _add_dummy_embeddings_and_taskIDs, MetricsTracker
 
 from zipformer import Zipformer2
 
@@ -306,6 +306,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="If True, use CTC head.",
     )
 
+    parser.add_argument(
+        "--do-asr",
+        type=str2bool,
+        default=True,
+    )
+    
     parser.add_argument(
         "--do-audio-tagging",
         type=str2bool,
@@ -739,16 +745,12 @@ def get_joiner_model(params: AttributeDict) -> nn.Module:
 
 
 def get_model(params: AttributeDict) -> nn.Module:
-    assert params.use_transducer or params.use_ctc, (
-        f"At least one of them should be True, "
-        f"but got params.use_transducer={params.use_transducer}, "
-        f"params.use_ctc={params.use_ctc}"
-    )
+    assert (params.do_asr or params.do_audio_tagging or params.do_speaker_verification)
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
-    if params.use_transducer:
+    if params.use_transducer and params.do_asr:
         decoder = get_decoder_model(params)
         joiner = get_joiner_model(params)
     else:
@@ -763,6 +765,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
         decoder_dim=params.decoder_dim,
         vocab_size=params.vocab_size,
+        do_ASR=params.do_asr,
         do_AT=params.do_audio_tagging,
         do_SV=params.do_speaker_verification,
         use_soft_prompt=params.use_soft_prompt,
@@ -1000,37 +1003,35 @@ def compute_loss(
         loss = 0.0
 
         # ASR loss 
-        mask = task_ids == 1 # ASR=1
-        simple_loss = (simple_loss * mask).sum()
-        pruned_loss = (pruned_loss * mask).sum()
+        if params.do_asr:
+            mask = task_ids == 1 # ASR=1
+            simple_loss = (simple_loss * mask).sum()
+            pruned_loss = (pruned_loss * mask).sum()
+            
+            s = params.simple_loss_scale
+            # take down the scale on the simple loss from 1.0 at the start
+            # to params.simple_loss scale by warm_step.
+            simple_loss_scale = (
+                s
+                if batch_idx_train >= warm_step
+                else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
+            )
+            pruned_loss_scale = (
+                1.0
+                if batch_idx_train >= warm_step
+                else 0.1 + 0.9 * (batch_idx_train / warm_step)
+            )
+            loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
         
         # at loss
-        mask = task_ids == 2 # AT=2
-        audio_tagging_loss = (audio_tagging_loss.sum(dim=-1) * mask).sum() # this also works if mask is all False
-            
-        # TODO: add SV loss
-        sv_loss = 0.0
-        
-        # add up the losses
-        s = params.simple_loss_scale
-        # take down the scale on the simple loss from 1.0 at the start
-        # to params.simple_loss scale by warm_step.
-        simple_loss_scale = (
-            s
-            if batch_idx_train >= warm_step
-            else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
-        )
-        pruned_loss_scale = (
-            1.0
-            if batch_idx_train >= warm_step
-            else 0.1 + 0.9 * (batch_idx_train / warm_step)
-        )
-        loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
-
         if params.do_audio_tagging:
+            mask = task_ids == 2 # AT=2
+            audio_tagging_loss = (audio_tagging_loss.sum(dim=-1) * mask).sum() # this also works if mask is all False
             loss += params.audio_tagging_loss_scale * audio_tagging_loss
             
         if params.do_speaker_verification:
+            # TODO: add SV loss
+            sv_loss = 0.0
             loss += params.speaker_verification_loss_scale * sv_loss
 
     assert loss.requires_grad == is_training
@@ -1043,7 +1044,7 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.use_transducer:
+    if params.do_asr:
         info["simple_loss"] = simple_loss.detach().cpu().item()
         info["pruned_loss"] = pruned_loss.detach().cpu().item()
     if params.do_audio_tagging:
@@ -1398,15 +1399,16 @@ def run(rank, world_size, args):
 
     train_cuts = []
     train_cuts_lens = []
-    if not params.full_libri: 
-        librispeech_cuts = librispeech.train_clean_100_cuts()
-        librispeech_cuts_len = 28539 * 3
-    else:
-        librispeech_cuts = librispeech.train_all_shuf_cuts()
-        librispeech_cuts_len = 281239 * 3
-    librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
-    train_cuts.append(librispeech_cuts)
-    train_cuts_lens.append(librispeech_cuts_len)
+    if params.do_asr:
+        if not params.full_libri: 
+            librispeech_cuts = librispeech.train_clean_100_cuts()
+            librispeech_cuts_len = 28539 * 3
+        else:
+            librispeech_cuts = librispeech.train_all_shuf_cuts()
+            librispeech_cuts_len = 281239 * 3
+        librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
+        train_cuts.append(librispeech_cuts)
+        train_cuts_lens.append(librispeech_cuts_len)
 
     if params.use_audioset and params.do_audio_tagging:
         logging.info(f"Getting audioset cuts")
@@ -1422,6 +1424,8 @@ def run(rank, world_size, args):
         train_cuts.append(audioset_cuts)
         train_cuts_lens.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
         
+    assert len(train_cuts) >= 1, "At least one task should be done!"
+    
     if len(train_cuts) > 1:
         logging.info(f"Using mux to combine data")
         logging.info(f"Training cuts: {train_cuts}")
@@ -1431,10 +1435,9 @@ def run(rank, world_size, args):
             weights=train_cuts_lens,
             stop_early=params.stop_early,
         )
-
-        logging.info(train_cuts)
     else:
         train_cuts = train_cuts[0]
+    logging.info(train_cuts)
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1470,14 +1473,15 @@ def run(rank, world_size, args):
     valid_dls = []
     
     # valid dataloaders
-    ls_valid_cuts = librispeech.dev_clean_cuts()
-    ls_valid_cuts += librispeech.dev_other_cuts()
-    ls_valid_cuts = ls_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
-    asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts)
-    valid_sets.append("ASR_ls")
-    valid_dls.append(asr_valid_dl)
+    if params.do_asr:
+        ls_valid_cuts = librispeech.dev_clean_cuts()
+        ls_valid_cuts += librispeech.dev_other_cuts()
+        ls_valid_cuts = ls_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
+        asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts)
+        valid_sets.append("ASR_ls")
+        valid_dls.append(asr_valid_dl)
      
-    if params.use_audioset:
+    if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts)
@@ -1485,15 +1489,6 @@ def run(rank, world_size, args):
         valid_dls.append(at_valid_dl)
 
     logging.info(f"Validation sets: {valid_sets}")
-
-    # if not params.print_diagnostics:
-    #     scan_pessimistic_batches_for_oom(
-    #         model=model,
-    #         train_dl=train_dl,
-    #         optimizer=optimizer,
-    #         sp=sp,
-    #         params=params,
-    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
