@@ -45,22 +45,33 @@ def get_parser():
         default="data/fbank",
     )
     
+    parser.add_argument(
+        "--num-mel-bins",
+        type=int,
+        default=80,
+    )
+    
     return parser
 
 def main():
     parser = get_parser()
     args = parser.parse_args()
+    logging.info(vars(args))
     
     dataset = args.dataset
     part = args.part
-    dataset_dir = f"download/voxceleb/{dataset}_{part}_wav"
+    if dataset == "vox1":
+        dataset_dir = f"download/voxceleb/{dataset}_{part}_wav"
+    elif dataset == "vox2":
+        dataset_dir = f"download/voxceleb/{dataset}_{part}_aac"
+    else:
+        raise NotImplementedError()
     manifest_output_dir = args.manifest_output_dir
     feat_output_dir = args.feat_output_dir
     
     num_jobs = 15
-    num_mel_bins = 80
+    num_mel_bins = args.num_mel_bins
     
-    import pdb; pdb.set_trace()
     if "vox1" in dataset_dir:
         audio_files = glob.glob(f"{dataset_dir}/*/*/*/*.wav")
         dataset = "vox1"
