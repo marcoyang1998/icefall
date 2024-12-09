@@ -1,3 +1,4 @@
+# Copyright      2021  Piotr Żelasko
 # Copyright      2023  Xiaomi Corporation     (Author: Yifan Yang)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
@@ -16,20 +17,15 @@
 
 
 import argparse
-import inspect
 import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
-from lhotse import CutSet, load_manifest, load_manifest_lazy
-from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
-    DiscretizedInputAugment,
-    DynamicBucketingSampler,
-    SimpleCutSampler,
-)
-from dataset import DiscretizedInputSpeechRecognitionDataset
+from dataset import HubertDataset
+from lhotse import CutSet, load_manifest_lazy
+from lhotse.dataset import DynamicBucketingSampler, SimpleCutSampler
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
@@ -44,20 +40,19 @@ class _SeedWorkers:
         fix_random_seed(self.seed + worker_id)
 
 
-class LibriSpeechAsrDataModule:
+class LibriSpeechDataModule:
     """
-    DataModule for k2 ASR experiments.
+    DataModule for SSL experiments.
     It assumes there is always one train and valid dataloader,
     but there can be multiple test dataloaders (e.g. LibriSpeech test-clean
     and test-other).
 
-    It contains all the common data pipeline modules used in ASR
+    It contains all the common data pipeline modules used in SSL
     experiments, e.g.:
     - dynamic batch size,
     - bucketing samplers,
-    - augmentation,
 
-    This class should be derived for specific corpora used in ASR tasks.
+    This class should be derived for specific corpora used in SSL tasks.
     """
 
     def __init__(self, args: argparse.Namespace):
@@ -66,29 +61,27 @@ class LibriSpeechAsrDataModule:
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser):
         group = parser.add_argument_group(
-            title="ASR data related options",
+            title="SSL data related options",
             description="These options are used for the preparation of "
             "PyTorch DataLoaders from Lhotse CutSet's -- they control the "
-            "effective batch sizes, sampling strategies, applied data "
-            "augmentations, etc.",
+            "effective batch sizes, sampling strategies.",
         )
         group.add_argument(
             "--full-libri",
             type=str2bool,
             default=True,
-            help="""Used only when --mini-libri is False.When enabled,
-            use 960h LibriSpeech. Otherwise, use 100h subset.""",
+            help="When enabled use 960h LibriSpeech. " "Otherwise, use 100h subset.",
         )
 
         group.add_argument(
             "--manifest-dir",
             type=Path,
-            default=Path("data/fbank"),
+            default=Path("data/kmeans"),
             help="Path to directory with train/valid/test cuts.",
         )
         group.add_argument(
             "--max-duration",
-            type=int,
+            type=float,
             default=200.0,
             help="Maximum pooled recordings duration (seconds) in a "
             "single batch. You can reduce it if it causes CUDA OOM.",
@@ -121,14 +114,6 @@ class LibriSpeechAsrDataModule:
             help="Whether to drop last batch. Used by sampler.",
         )
         group.add_argument(
-            "--return-cuts",
-            type=str2bool,
-            default=True,
-            help="When enabled, each batch will have the "
-            "field: batch['supervisions']['cut'] with the cuts that "
-            "were used to construct it.",
-        )
-        group.add_argument(
             "--num-workers",
             type=int,
             default=2,
@@ -136,53 +121,28 @@ class LibriSpeechAsrDataModule:
             "collect the batches.",
         )
         group.add_argument(
-            "--enable-spec-aug",
+            "--do-normalize",
             type=str2bool,
             default=True,
-            help="When enabled, use SpecAugment for training dataset.",
-        )
-
-        group.add_argument(
-            "--spec-aug-time-warp-factor",
-            type=int,
-            default=80,
-            help="Used only when --enable-spec-aug is True. "
-            "It specifies the factor for time warping in SpecAugment. "
-            "Larger values mean more warping. "
-            "A value less than 1 means to disable time warp.",
+            help="whether to normalize the data",
         )
         group.add_argument(
-            "--input-strategy",
-            type=str,
-            default="AudioSamples",
-            help="AudioSamples or PrecomputedFeatures",
-        )
-        group.add_argument(
-            "--token-type",
-            type=str,
-            default="hubert",
-        )
-        group.add_argument(
-            "--duplicate-tokens",
+            "--random-crop",
             type=str2bool,
             default=True,
-            help="If true, repeat every token twice",
-        )
-        group.add_argument(
-            "--num-tokens",
-            type=int,
-            default=500,
-            help="Number of k-means clusters",
-        )
-        group.add_argument(
-            "--num-codebooks",
-            type=int,
-            default=16,
+            help="always crop from the beginning if false",
         )
 
     def train_dataloaders(
         self,
         cuts_train: CutSet,
+        max_sample_size: Optional[int] = None,
+        sample_rate: float = 16000,
+        label_rate: float = 50,
+        random_crop: bool = True,
+        pad_audio: bool = False,
+        num_classes: list = [504],
+        do_normalize: bool = True,
         sampler_state_dict: Optional[Dict[str, Any]] = None,
     ) -> DataLoader:
         """
@@ -192,42 +152,15 @@ class LibriSpeechAsrDataModule:
           sampler_state_dict:
             The state dict for the training sampler.
         """
-        input_transforms = []
-        if self.args.enable_spec_aug:
-            logging.info("Enable DiscretizedInputAugment")
-            logging.info(f"Time warp factor: {self.args.spec_aug_time_warp_factor}")
-            # Set the value of num_frame_masks according to Lhotse's version.
-            # In different Lhotse's versions, the default of num_frame_masks is
-            # different.
-            num_frame_masks = 10
-            num_frame_masks_parameter = inspect.signature(
-                DiscretizedInputAugment.__init__
-            ).parameters["num_frame_masks"]
-            if num_frame_masks_parameter.default == 1:
-                num_frame_masks = 2
-            logging.info(f"Num frame mask: {num_frame_masks}")
-            input_transforms.append(
-                DiscretizedInputAugment(
-                    token_type=self.args.token_type,
-                    time_warp_factor=self.args.spec_aug_time_warp_factor,
-                    num_frame_masks=num_frame_masks,
-                    tokens_mask_size=27,
-                    num_token_masks=2,
-                    frames_mask_size=100,
-                )
-            )
-        else:
-            logging.info("Disable DiscretizedInputAugment")
-
         logging.info("About to create train dataset")
-        train = DiscretizedInputSpeechRecognitionDataset(
-            field="discrete_tokens",
-            num_tokens=self.args.num_tokens,
-            duplicate_tokens=self.args.duplicate_tokens,
-            frequency_size=80,
-            num_codebooks=self.args.num_codebooks if self.args.token_type == "mvq" else 1,
-            token_type=self.args.token_type,
-            input_transforms=input_transforms,
+        train = HubertDataset(
+            max_sample_size=max_sample_size,
+            sample_rate=sample_rate,
+            label_rate=label_rate,
+            random_crop=random_crop,
+            pad_audio=pad_audio,
+            num_classes=num_classes,
+            do_normalize=do_normalize,
         )
 
         if self.args.bucketing_sampler:
@@ -268,14 +201,26 @@ class LibriSpeechAsrDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+    def valid_dataloaders(
+        self,
+        cuts_valid: CutSet,
+        max_sample_size: Optional[int] = None,
+        sample_rate: float = 16000,
+        label_rate: float = 50,
+        random_crop: bool = True,
+        pad_audio: bool = False,
+        num_classes: list = [504],
+        do_normalize: bool = True,
+    ) -> DataLoader:
         logging.info("About to create dev dataset")
-        validate = DiscretizedInputSpeechRecognitionDataset(
-            field="discrete_tokens",
-            duplicate_tokens=self.args.duplicate_tokens,
-            num_tokens=self.args.num_tokens,
-            num_codebooks=self.args.num_codebooks if self.args.token_type == "mvq" else 1,
-            token_type=self.args.token_type,
+        validate = HubertDataset(
+            max_sample_size=max_sample_size,
+            sample_rate=sample_rate,
+            label_rate=label_rate,
+            random_crop=random_crop,
+            pad_audio=pad_audio,
+            num_classes=num_classes,
+            do_normalize=do_normalize,
         )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -293,14 +238,24 @@ class LibriSpeechAsrDataModule:
 
         return valid_dl
 
-    def test_dataloaders(self, cuts: CutSet) -> DataLoader:
+    def test_dataloaders(
+        self,
+        cuts: CutSet,
+        sample_rate: float = 16000,
+        label_rate: float = 50,
+        random_crop: bool = True,
+        pad_audio: bool = False,
+        num_classes: list = [504],
+        do_normalize: bool = True,
+    ) -> DataLoader:
         logging.debug("About to create test dataset")
-        test = DiscretizedInputSpeechRecognitionDataset(
-            field="discrete_tokens",
-            num_tokens=self.args.num_tokens,
-            num_codebooks=self.args.num_codebooks if self.args.token_type == "mvq" else 1,
-            duplicate_tokens=self.args.duplicate_tokens,
-            token_type=self.args.token_type,
+        test = HubertDataset(
+            sample_rate=sample_rate,
+            label_rate=label_rate,
+            random_crop=random_crop,
+            pad_audio=pad_audio,
+            num_classes=num_classes,
+            do_normalize=do_normalize,
         )
         sampler = DynamicBucketingSampler(
             cuts,
@@ -336,15 +291,25 @@ class LibriSpeechAsrDataModule:
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_train-other-500.jsonl.gz"
         )
-    
+
     @lru_cache()
     def train_all_shuf_cuts(self) -> CutSet:
         logging.info(
             "About to get the shuffled train-clean-100, \
             train-clean-360 and train-other-500 cuts"
         )
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
+        train_clean_100_cuts = self.train_clean_100_cuts()
+        train_clean_360_cuts = self.train_clean_360_cuts()
+        train_other_500_cuts = self.train_other_500_cuts()
+        return CutSet.mux(
+            train_clean_100_cuts,
+            train_clean_360_cuts,
+            train_other_500_cuts,
+            weights=[
+                28539,  # len(train_clean_100_cuts)
+                104014,  # len(train_clean_360_cuts)
+                148688,  # len(train_other_500_cuts)
+            ],
         )
 
     @lru_cache()
@@ -374,13 +339,3 @@ class LibriSpeechAsrDataModule:
         return load_manifest_lazy(
             self.args.manifest_dir / "librispeech_cuts_test-other.jsonl.gz"
         )
-    
-    @lru_cache()
-    def gigaspeech_dev_cuts(self) -> CutSet:
-        logging.info("About to get Gigaspeech dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
-
-    @lru_cache()
-    def gigaspeech_test_cuts(self) -> CutSet:
-        logging.info("About to get Gigaspeech test cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_test.jsonl.gz")
