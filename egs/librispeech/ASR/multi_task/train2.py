@@ -719,7 +719,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         chunk_size=_to_int_tuple(params.chunk_size),
         left_context_frames=_to_int_tuple(params.left_context_frames),
         memory_dim=params.memory_dim,
-        memory_dropout_rate=params.memory_dropout_rate,
+        memory_dropout_rate=params.universal_prompt_prob,
     )
     return encoder
 
@@ -772,7 +772,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         soft_prompt_dim=params.soft_prompt_dim,
         soft_prompt_len=params.soft_prompt_len,
         num_tasks=params.num_tasks,
-        universal_prompt_prob=params.universal_prompt_prob,
+        universal_prompt_prob=params.universal_prompt_prob, # this one doesn't take effect
     )
     return model
 

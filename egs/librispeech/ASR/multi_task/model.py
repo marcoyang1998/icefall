@@ -151,11 +151,11 @@ class PromptedAudioEncoder(nn.Module):
         """
         N = task_ids.size(0)
         # By p=0.1, use the universal prompt
-        if self.training:
-            mask = torch.rand(N) < self.universal_prompt_prob
-            task_ids[mask] = 0
-            if random.random() < 0.02:
-                logging.info(f"task ids: {task_ids}")
+        # if self.training:
+        #     mask = torch.rand(N) < self.universal_prompt_prob
+        #     task_ids[mask] = 0
+        if random.random() < 0.02:
+            logging.info(f"task ids: {task_ids}")
         soft_prompt = self.soft_prompt_embed(task_ids)
         soft_prompt = soft_prompt.reshape(N, self.soft_prompt_len, self.soft_prompt_dim)
         soft_prompt = self.prompt_proj(soft_prompt) # (N, soft_prompt_len, encoder_dim)

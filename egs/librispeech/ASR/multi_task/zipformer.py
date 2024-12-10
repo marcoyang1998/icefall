@@ -348,14 +348,14 @@ class Zipformer2(EncoderInterface):
         else:
             attn_mask = self._get_attn_mask(x, chunk_size, left_context_chunks)
 
-        # if self.training and memory is not None:
-        #     batch_size = x.shape[1]
-        #     # setting memory to zero should be equivalent to not using the
-        #     # memory input at all, since the Attention module has no biases.
-        #     memory = memory * (
-        #         torch.rand(batch_size, 1, device=memory.device)
-        #         > self.memory_dropout_rate
-        #     )
+        if self.training and memory is not None:
+            batch_size = x.shape[1]
+            # setting memory to zero should be equivalent to not using the
+            # memory input at all, since the Attention module has no biases.
+            memory = memory * (
+                torch.rand(batch_size, 1, device=memory.device)
+                > self.memory_dropout_rate
+            )
 
         for i, module in enumerate(self.encoders):
             ds = self.downsampling_factor[i]
