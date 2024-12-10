@@ -156,7 +156,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         
         if self.at_KD:
             at_targets = collate_custom_field(
-                cuts_pre_mixed, "at_logits", pad_value=-100
+                cuts_pre_mixed, "beats_embedding", pad_value=-100
             ) # (N,C)
         else:        
             audio_events = [c.supervisions[0].audio_event for c in cuts_pre_mixed] # the label indices are in CED format

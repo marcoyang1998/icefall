@@ -37,8 +37,8 @@ def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
         #     c.whisper_embedding = whisper_dummy_embedding
         # if not c.has_custom("ecapa_embedding"):
         #     c.ecapa_embedding = ecapa_dummy_embedding
-        # if not c.has_custom("beats_embedding"):
-        #     c.beats_embedding = beats_dummy_embedding
+        if not c.has_custom("beats_embedding"):
+            c.beats_embedding = beats_dummy_embedding
         if not c.supervisions[0].has_custom("audio_event"):
             c.supervisions[0].audio_event = "0"
         if c.supervisions[0].text is None:
