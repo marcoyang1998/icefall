@@ -454,7 +454,8 @@ def decode_one_batch(
     task_ids = batch["task_ids"].int().to(device)
     
     if params.use_universal_prompt:
-        task_ids = (task_ids * 0).int()
+        # task_ids = (task_ids * 0).int()
+        task_ids = None
 
     if params.causal:
         # this seems to cause insertions at the end of the utterance if used with zipformer.
@@ -1054,9 +1055,9 @@ def main():
     librispeech = MultiTaskDataModule(args)
 
     test_clean_cuts = librispeech.test_clean_cuts()
-    test_clean_cuts = test_clean_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
+    test_clean_cuts = test_clean_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=1
     test_other_cuts = librispeech.test_other_cuts()
-    test_other_cuts = test_other_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
+    test_other_cuts = test_other_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=1
 
     test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
     test_other_dl = librispeech.test_dataloaders(test_other_cuts)

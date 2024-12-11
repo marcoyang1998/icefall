@@ -281,7 +281,7 @@ class PromptedAudioEncoder(nn.Module):
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
         # get the task prompts
-        if self.use_soft_prompt:
+        if self.use_soft_prompt and task_ids is not None:
             soft_prompt = self.forward_task_id(task_ids) # (N, soft_prompt_len, encoder_dim)
         else:
             soft_prompt = None
