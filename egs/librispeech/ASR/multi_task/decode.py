@@ -1055,9 +1055,9 @@ def main():
     librispeech = MultiTaskDataModule(args)
 
     test_clean_cuts = librispeech.test_clean_cuts()
-    test_clean_cuts = test_clean_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=1
+    test_clean_cuts = test_clean_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
     test_other_cuts = librispeech.test_other_cuts()
-    test_other_cuts = test_other_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=1
+    test_other_cuts = test_other_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
 
     test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
     test_other_dl = librispeech.test_dataloaders(test_other_cuts)

@@ -134,7 +134,8 @@ def inference_one_batch(
     task_ids = batch["task_ids"].int().to(device)
     
     if params.use_universal_prompt:
-        task_ids = (task_ids * 0).int()
+        # task_ids = (task_ids * 0).int()
+        task_ids = None
 
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
@@ -244,7 +245,7 @@ def main():
                 )
             logging.info(f"averaging {filenames}")
             model.load_state_dict(
-                average_checkpoints(filenames, device=device), strict=False
+                average_checkpoints(filenames, device=device), strict=True
             )
         elif params.avg == 1:
             load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
@@ -256,7 +257,7 @@ def main():
                     filenames.append(f"{params.exp_dir}/epoch-{i}.pt")
             logging.info(f"averaging {filenames}")
             model.load_state_dict(
-                average_checkpoints(filenames), strict=False
+                average_checkpoints(filenames), strict=True
             )
     else:
         if params.iter > 0:
@@ -284,7 +285,7 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                 ),
-                strict=False,
+                strict=True,
             )
         else:
             assert params.avg > 0, params.avg
@@ -301,7 +302,7 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                 ),
-                strict=False,
+                strict=True,
             )
 
     model.to(device)

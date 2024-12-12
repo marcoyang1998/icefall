@@ -1290,7 +1290,7 @@ def train_one_epoch(
                 )
                 if tb_writer is not None:
                     valid_info.write_summary(
-                        tb_writer, "train/valid_", params.batch_idx_train
+                        tb_writer, f"train/valid_${valid_set}", params.batch_idx_train
                     )
             model.train()
 
