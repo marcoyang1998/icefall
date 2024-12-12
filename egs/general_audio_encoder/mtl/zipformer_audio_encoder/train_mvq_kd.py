@@ -65,14 +65,11 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from asr_datamodule import LibriSpeechAsrDataModule
-from decoder import Decoder
-from joiner import Joiner
-from lhotse.cut import Cut, MonoCut
+from mtl_datamodule import MultiTaskDataModule
+from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from lhotse.dataset.collation import collate_custom_field
-from model import AsrModel
+from model import AsrKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -244,25 +241,31 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "be converted to a number of chunks.  If splitting into chunks, "
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
-
+    
+    # MVQ distillation related
     parser.add_argument(
-        "--use-transducer",
-        type=str2bool,
-        default=True,
-        help="If True, use Transducer head.",
-    )
-
-    parser.add_argument(
-        "--use-ctc",
-        type=str2bool,
-        default=False,
-        help="If True, use CTC head.",
+        "--distillation-layer",
+        type=int,
+        default=-1,
     )
     
     parser.add_argument(
-        "--token-dim",
+        "--distillation-delta",
         type=int,
-        default=80,
+        default=0,
+    )
+    
+    parser.add_argument(
+        "--teacher-frame-ratio",
+        type=int,
+        default=2,
+        help="The frame rate ratio between teacher and student"
+    )
+    
+    parser.add_argument(
+        "--num-codebooks",
+        type=int,
+        default=8,
     )
 
 
@@ -361,53 +364,6 @@ def get_parser():
         default=600,
         help="Reference batch duration for purposes of adjusting batch counts for setting various "
         "schedules inside the model",
-    )
-
-    parser.add_argument(
-        "--context-size",
-        type=int,
-        default=2,
-        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
-    )
-
-    parser.add_argument(
-        "--prune-range",
-        type=int,
-        default=5,
-        help="The prune range for rnnt loss, it means how many symbols(context)"
-        "we are using to compute the loss",
-    )
-
-    parser.add_argument(
-        "--lm-scale",
-        type=float,
-        default=0.25,
-        help="The scale to smooth the loss with lm "
-        "(output of prediction network) part.",
-    )
-
-    parser.add_argument(
-        "--am-scale",
-        type=float,
-        default=0.0,
-        help="The scale to smooth the loss with am (output of encoder network)" "part.",
-    )
-
-    parser.add_argument(
-        "--simple-loss-scale",
-        type=float,
-        default=0.5,
-        help="To get pruning ranges, we will calculate a simple version"
-        "loss(joiner is just addition), this simple loss also uses for"
-        "training (as a regularization item). We will scale the simple loss"
-        "with this parameter before adding to the final loss.",
-    )
-
-    parser.add_argument(
-        "--ctc-loss-scale",
-        type=float,
-        default=0.2,
-        help="Scale for CTC loss.",
     )
 
     parser.add_argument(
@@ -513,8 +469,8 @@ def get_params() -> AttributeDict:
 
         - valid_interval:  Run validation if batch_idx % valid_interval is 0
 
-        - token_dim: The model input dim. It has to match the one used
-                       in computing tokens.
+        - feature_dim: The model input dim. It has to match the one used
+                       in computing features.
 
         - subsampling_factor:  The subsampling factor for the model.
 
@@ -536,6 +492,7 @@ def get_params() -> AttributeDict:
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
+            "feature_dim": 128,
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
@@ -548,55 +505,22 @@ def get_params() -> AttributeDict:
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(",")))
 
-class MvqEmbed(nn.Module):
-    def __init__(self, num_codebooks, num_tokens, token_dim):
-        # This module simply unfolds the multi-codebook tokens 
-        # and concatenates all token embeddings, then project
-        # back to a single-token dimension
-        super().__init__()
-        self.token_embed = nn.Embedding(
-            num_embeddings=num_tokens * num_codebooks +1,
-            embedding_dim=token_dim,
-            padding_idx=num_tokens,
-        )
-        self.proj = nn.Linear(num_codebooks * token_dim, token_dim)
-        
-    def forward(self, x):
-        # x: (B,T,num_cb)
-        B,T,_ = x.shape
-        x = self.token_embed(x) # (B,T,num_cb,token_dim)
-        x = x.reshape(B,T,-1) # (B,T,num_cb*token_dim)
-        x = self.proj(x) # (B,T,token_dim)
-        
-        return x
 
 def get_encoder_embed(params: AttributeDict) -> nn.Module:
-    # encoder_embed converts the input of shape (N, T, num_tokens)
+    # encoder_embed converts the input of shape (N, T, num_features)
     # to the shape (N, (T - 7) // 2, encoder_dims).
     # That is, it does two things simultaneously:
     #   (1) subsampling: T -> (T - 7) // 2
-    #   (2) embedding: num_tokens -> encoder_dims
+    #   (2) embedding: num_features -> encoder_dims
     # In the normal configuration, we will downsample once more at the end
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
-    if params.token_type != "mvq":
-        tokens_embed = nn.Embedding(
-            num_embeddings=params.num_tokens+1,
-            embedding_dim=params.token_dim,
-            padding_idx=params.num_tokens,
-        )
-    else:
-        tokens_embed = MvqEmbed(
-            num_codebooks=params.num_codebooks,
-            num_tokens=params.num_tokens,
-            token_dim=params.token_dim,
-        )
     encoder_embed = Conv2dSubsampling(
-        in_channels=params.token_dim,
+        in_channels=params.feature_dim,
         out_channels=_to_int_tuple(params.encoder_dim)[0],
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
     )
-    return tokens_embed, encoder_embed
+    return encoder_embed
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
@@ -622,54 +546,19 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 
-def get_decoder_model(params: AttributeDict) -> nn.Module:
-    decoder = Decoder(
-        vocab_size=params.vocab_size,
-        decoder_dim=params.decoder_dim,
-        blank_id=params.blank_id,
-        context_size=params.context_size,
-    )
-    return decoder
-
-
-def get_joiner_model(params: AttributeDict) -> nn.Module:
-    joiner = Joiner(
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        decoder_dim=params.decoder_dim,
-        joiner_dim=params.joiner_dim,
-        vocab_size=params.vocab_size,
-    )
-    return joiner
-
-
 def get_model(params: AttributeDict) -> nn.Module:
-    assert params.use_transducer or params.use_ctc, (
-        f"At least one of them should be True, "
-        f"but got params.use_transducer={params.use_transducer}, "
-        f"params.use_ctc={params.use_ctc}"
-    )
 
-    token_embed, encoder_embed = get_encoder_embed(params)
+    encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
-    if params.use_transducer:
-        decoder = get_decoder_model(params)
-        joiner = get_joiner_model(params)
-    else:
-        decoder = None
-        joiner = None
-
-    model = AsrModel(
-        token_embed=token_embed,
+    model = AsrKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
-        decoder=decoder,
-        joiner=joiner,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        decoder_dim=params.decoder_dim,
-        vocab_size=params.vocab_size,
-        use_transducer=params.use_transducer,
-        use_ctc=params.use_ctc,
+        num_codebooks=params.num_codebooks,
+        distillation_layer=params.distillation_layer,
+        distillation_delta=params.distillation_delta,
+        teacher_frame_ratio=params.teacher_frame_ratio,
     )
     return model
 
@@ -789,14 +678,6 @@ def save_checkpoint(
         best_valid_filename = params.exp_dir / "best-valid-loss.pt"
         copyfile(src=filename, dst=best_valid_filename)
 
-def extract_codebook_indexes(batch):
-    cuts = batch["supervisions"]["cut"]
-    # -100 is identical to ignore_value in CE loss computation.
-    cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
-    codebook_indexes, codebook_indexes_lens = collate_custom_field(
-        cuts_pre_mixed, "codebook_indexes", pad_value=-100
-    )
-    return codebook_indexes, codebook_indexes_lens
 
 def compute_loss(
     params: AttributeDict,
@@ -824,71 +705,41 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
+    feature = batch["inputs"]
+    # at entry, feature is (N, T, C)
+    assert feature.ndim == 3
+    feature = feature.to(device)
+
+    supervisions = batch["supervisions"]
+    feature_lens = supervisions["num_frames"].to(device)
     
-    tokens = batch["tokens"]
-    tokens = tokens.to(device)
+    mvq_tokens = batch["cb_indexes"].to(device)
 
-    token_lens = batch["token_lens"].to(device)
-
-    frequency_masks = (
-        batch["frequency_masks"].to(device)
-        if "frequency_masks" in batch.keys()
-        else None
-    )
-
-    batch_idx_train = params.batch_idx_train
-    warm_step = params.warm_step
-
-    texts = [c.supervisions[0].text for c in batch["cuts"]]
-    y = sp.encode(texts, out_type=int)
-    y = k2.RaggedTensor(y)
+    # texts = batch["supervisions"]["text"]
+    # y = sp.encode(texts, out_type=int)
+    # y = k2.RaggedTensor(y)
 
     with torch.set_grad_enabled(is_training):
-        simple_loss, pruned_loss, ctc_loss = model(
-            x=tokens,
-            x_lens=token_lens,
-            frequency_masks=frequency_masks,
-            y=y,
-            prune_range=params.prune_range,
-            am_scale=params.am_scale,
-            lm_scale=params.lm_scale,
+        mvq_loss = model(
+            x=feature,
+            x_lens=feature_lens,
+            codebook_indexes=mvq_tokens,
         )
 
         loss = 0.0
 
-        if params.use_transducer:
-            s = params.simple_loss_scale
-            # take down the scale on the simple loss from 1.0 at the start
-            # to params.simple_loss scale by warm_step.
-            simple_loss_scale = (
-                s
-                if batch_idx_train >= warm_step
-                else 1.0 - (batch_idx_train / warm_step) * (1.0 - s)
-            )
-            pruned_loss_scale = (
-                1.0
-                if batch_idx_train >= warm_step
-                else 0.1 + 0.9 * (batch_idx_train / warm_step)
-            )
-            loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
-
-        if params.use_ctc:
-            loss += params.ctc_loss_scale * ctc_loss
+        loss += mvq_loss
 
     assert loss.requires_grad == is_training
 
     info = MetricsTracker()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        info["frames"] = (token_lens // params.subsampling_factor).sum().item()
+        info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.use_transducer:
-        info["simple_loss"] = simple_loss.detach().cpu().item()
-        info["pruned_loss"] = pruned_loss.detach().cpu().item()
-    if params.use_ctc:
-        info["ctc_loss"] = ctc_loss.detach().cpu().item()
+    info["mvq_loss"] = mvq_loss.detach().cpu().item()
 
     return loss, info
 
@@ -996,7 +847,7 @@ def train_one_epoch(
             set_batch_count(model, get_adjusted_batch_count(params))
 
         params.batch_idx_train += 1
-        batch_size = len(batch["cuts"])
+        batch_size = len(batch["supervisions"]["text"])
 
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
@@ -1162,16 +1013,6 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
-
-    if not params.use_transducer:
-        params.ctc_loss_scale = 1.0
-
     logging.info(params)
 
     logging.info("About to create model")
@@ -1179,6 +1020,9 @@ def run(rank, world_size, args):
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
+
+    # sp is None
+    sp = None
 
     assert params.save_every_n >= params.average_period
     model_avg: Optional[nn.Module] = None
@@ -1218,19 +1062,19 @@ def run(rank, world_size, args):
 
     if params.print_diagnostics:
         opts = diagnostics.TensorDiagnosticOptions(
-            2**22
+            512
         )  # allow 4 megabytes per sub-module
         diagnostic = diagnostics.attach_diagnostics(model, opts)
 
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    librispeech = LibriSpeechAsrDataModule(args)
+    librispeech = MultiTaskDataModule(args)
 
     if not params.full_libri:
-        train_cuts = librispeech.train_clean_100_cuts() # 100h
+        train_cuts = librispeech.train_clean_100_cuts()
     else:
-        train_cuts = librispeech.train_all_shuf_cuts() # full libri
+        train_cuts = librispeech.train_all_shuf_cuts()
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1247,29 +1091,9 @@ def run(rank, world_size, args):
             # )
             return False
 
-        # In pruned RNN-T, we require that T >= S
-        # where T is the number of token frames after subsampling
-        # and S is the number of tokens in the utterance
-
-        # In ./zipformer.py, the conv module uses the following expression
-        # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
-
-        if T < len(tokens):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. "
-                f"Number of frames (before subsampling): {c.num_frames}. "
-                f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
-                f"Tokens: {tokens}. "
-                f"Number of tokens: {len(tokens)}"
-            )
-            return False
-
         return True
 
-    # train_cuts = train_cuts.filter(remove_short_and_long_utt)
+    train_cuts = train_cuts.filter(remove_short_and_long_utt)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1286,14 +1110,14 @@ def run(rank, world_size, args):
     valid_cuts += librispeech.dev_other_cuts()
     valid_dl = librispeech.valid_dataloaders(valid_cuts)
 
-    if 0 and not params.print_diagnostics:
-        scan_pessimistic_batches_for_oom(
-            model=model,
-            train_dl=train_dl,
-            optimizer=optimizer,
-            sp=sp,
-            params=params,
-        )
+    # if not params.print_diagnostics:
+    #     scan_pessimistic_batches_for_oom(
+    #         model=model,
+    #         train_dl=train_dl,
+    #         optimizer=optimizer,
+    #         sp=sp,
+    #         params=params,
+    #     )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
@@ -1369,14 +1193,14 @@ def display_and_save_batch(
     logging.info(f"Saving batch to {filename}")
     torch.save(batch, filename)
 
-    tokens = batch["tokens"]
+    supervisions = batch["supervisions"]
+    features = batch["inputs"]
 
-    logging.info(f"tokens shape: {tokens.shape}")
+    logging.info(f"features shape: {features.shape}")
 
-    texts = [c.supervisions[0].text for c in batch["cuts"]]
-    y = sp.encode(texts, out_type=int)
-    num_tokens = sum(len(i) for i in y)
-    logging.info(f"num tokens: {num_tokens}")
+    # y = sp.encode(supervisions["text"], out_type=int)
+    # num_tokens = sum(len(i) for i in y)
+    # logging.info(f"num tokens: {num_tokens}")
 
 
 def scan_pessimistic_batches_for_oom(
@@ -1423,7 +1247,7 @@ def scan_pessimistic_batches_for_oom(
 
 def main():
     parser = get_parser()
-    LibriSpeechAsrDataModule.add_arguments(parser)
+    MultiTaskDataModule.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 

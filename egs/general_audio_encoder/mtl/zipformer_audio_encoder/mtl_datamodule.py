@@ -205,7 +205,7 @@ class MultiTaskDataModule:
         group.add_argument(
             "--spec-aug-time-warp-factor",
             type=int,
-            default=80,
+            default=-1,
             help="Used only when --enable-spec-aug is True. "
             "It specifies the factor for time warping in SpecAugment. "
             "Larger values mean more warping. "
@@ -261,7 +261,7 @@ class MultiTaskDataModule:
         group.add_argument(
             "--use-audioset",
             type=str2bool,
-            default=True,
+            default=False,
         )
 
         group.add_argument(
