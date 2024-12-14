@@ -105,12 +105,6 @@ def get_parser():
         default="zipformer/exp",
         help="The experiment dir",
     )
-    
-    parser.add_argument(
-        "--use-universal-prompt",
-        type=str2bool,
-        default=False,
-    )
 
     add_model_arguments(parser)
 
@@ -204,8 +198,15 @@ def main():
     else:
         params.suffix = f"epoch-{params.epoch}-avg-{params.avg}"
 
-    if params.use_universal_prompt:
-        params.suffix += "_use-universal-prompt"
+    if params.causal:
+        assert (
+            "," not in params.chunk_size
+        ), "chunk_size should be one value in decoding."
+        assert (
+            "," not in params.left_context_frames
+        ), "left_context_frames should be one value in decoding."
+        params.suffix += f"_chunk-{params.chunk_size}"
+        params.suffix += f"_left-context-{params.left_context_frames}"
     
     if params.use_averaged_model:
         params.suffix += "-use-averaged-model"
