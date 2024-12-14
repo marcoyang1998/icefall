@@ -92,7 +92,6 @@ from icefall.checkpoint import (
 )
 from icefall.dist import cleanup_dist, setup_dist
 from icefall.env import get_env_info
-from icefall.err import raise_grad_scale_is_too_small_error
 from icefall.hooks import register_inf_check_hooks
 from icefall.utils import (
     AttributeDict,
@@ -582,7 +581,7 @@ def get_params() -> AttributeDict:
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
-            "feature_dim": 80,
+            "feature_dim": 128,
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
@@ -794,6 +793,7 @@ def load_model_params(
             ]
             assert set(src_keys) == set(dst_keys)  # two sets should match exactly
             for key in src_keys:
+                assert dst_state_dict[key].shape == src_state_dict[key].shape
                 dst_state_dict[key] = src_state_dict.pop(key)
 
         model.load_state_dict(dst_state_dict, strict=strict)
@@ -1124,7 +1124,9 @@ def train_one_epoch(
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
                 save_bad_model()
-                raise_grad_scale_is_too_small_error(cur_grad_scale)
+                raise RuntimeError(
+                    f"grad_scale is too small, exiting: {cur_grad_scale}"
+                )
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
