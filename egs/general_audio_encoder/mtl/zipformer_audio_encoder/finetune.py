@@ -100,6 +100,7 @@ from icefall.utils import (
     setup_logger,
     str2bool,
 )
+from utils import compare_model
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
@@ -164,6 +165,18 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="Fine-tuning from which checkpoint (path to a .pt file)",
+    )
+    
+    parser.add_argument(
+        "--freeze-encoder",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--encoder-lr-scale",
+        type=float,
+        default=1.0,
     )
 
 
@@ -515,7 +528,7 @@ def get_parser():
     parser.add_argument(
         "--use-fp16",
         type=str2bool,
-        default=False,
+        default=True,
         help="Whether to use half precision training.",
     )
 
@@ -682,6 +695,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
+        
     )
     return model
 
@@ -900,6 +914,7 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
+            freeze_encoder=params.freeze_encoder,
         )
         simple_loss, pruned_loss, ctc_loss = losses[:3]
 
@@ -1241,7 +1256,6 @@ def run(rank, world_size, args):
 
     # load model parameters for model fine-tuning
     if params.do_finetune:
-        import pdb; pdb.set_trace()
         assert params.start_epoch == 1, "Fine-tune must start from epoch 1"
         modules = params.init_modules.split(",") if params.init_modules else None
         checkpoints = load_model_params(
@@ -1250,6 +1264,7 @@ def run(rank, world_size, args):
         # Need to update the model_avg if use initialisation
         if rank == 0:
             # model_avg is only used with rank 0
+            compare_model(model.state_dict(), model_avg.state_dict())
             model_avg = copy.deepcopy(model).to(torch.float64)
     else:
         # resuming training
@@ -1258,6 +1273,12 @@ def run(rank, world_size, args):
             params=params, model=model, model_avg=model_avg
         )
 
+    # Setting the encoder lr scale
+    logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
+    if params.encoder_lr_scale != 1.0:
+        model.encoder.lr_scale = params.encoder_lr_scale
+        model.encoder_embed.lr_scale = params.encoder_lr_scale
+    
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
@@ -1345,7 +1366,7 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict
+        train_cuts, sampler_state_dict=sampler_state_dict, world_size=world_size, rank=rank
     )
 
     valid_cuts = librispeech.dev_clean_cuts()
@@ -1353,7 +1374,7 @@ def run(rank, world_size, args):
 
     valid_sets = ["librispeech"]
     valid_dls = [
-        librispeech.valid_dataloaders(valid_cuts),
+        librispeech.valid_dataloaders(valid_cuts, world_size=world_size, rank=rank),
     ]
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)

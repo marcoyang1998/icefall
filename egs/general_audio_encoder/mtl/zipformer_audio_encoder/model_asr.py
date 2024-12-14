@@ -103,27 +103,9 @@ class AsrModel(nn.Module):
                 nn.Linear(encoder_dim, vocab_size),
                 nn.LogSoftmax(dim=-1),
             )
-            
-        self.enable_distillation = enable_distillation
-        if enable_distillation:
-            self.distillation_layer = distillation_layer
-            # the frame ratio between the teacher and student
-            # if larger than one, we are basically having more than one set of
-            # codebooks for each frame
-            self.teacher_frame_ratio = teacher_frame_ratio 
-            self.distillation_delta = distillation_delta
-            from multi_quantization.prediction import JointCodebookLoss
-            
-            self.codebook_loss_net = JointCodebookLoss(
-                predictor_channels=encoder_dim,
-                num_codebooks=num_codebooks * self.teacher_frame_ratio,
-                is_joint=False,
-            )
-        else:
-            self.codebook_loss_net = None
 
     def forward_encoder(
-        self, x: torch.Tensor, x_lens: torch.Tensor
+        self, x: torch.Tensor, x_lens: torch.Tensor, freeze_encoder: bool=False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute encoder outputs.
         Args:
@@ -140,13 +122,16 @@ class AsrModel(nn.Module):
             Encoder output lengths, of shape (N,).
         """
         # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
-        x, x_lens = self.encoder_embed(x, x_lens)
-        # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
-        encoder_out, encoder_out_lens, all_hidden_states = self.encoder(x, x_lens)
+        with torch.set_grad_enabled((not freeze_encoder) and self.training):
+            x, x_lens = self.encoder_embed(x, x_lens)
+            src_key_padding_mask = make_pad_mask(x_lens)
+            x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+            encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
+            encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
-        return encoder_out, encoder_out_lens, all_hidden_states
+        return encoder_out, encoder_out_lens
 
     def forward_ctc(
         self,
@@ -289,10 +274,10 @@ class AsrModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         y: k2.RaggedTensor,
-        codebook_indexes: torch.Tensor = None,
         prune_range: int = 5,
         am_scale: float = 0.0,
         lm_scale: float = 0.0,
+        freeze_encoder: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -330,7 +315,11 @@ class AsrModel(nn.Module):
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
 
         # Compute encoder outputs
-        encoder_out, encoder_out_lens, all_hidden_states = self.forward_encoder(x, x_lens)
+        encoder_out, encoder_out_lens = self.forward_encoder(
+            x, 
+            x_lens, 
+            freeze_encoder=freeze_encoder
+        )
 
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1]
@@ -361,64 +350,5 @@ class AsrModel(nn.Module):
             )
         else:
             ctc_loss = torch.empty(0)
-            
-        if self.enable_distillation and self.training:
-            middle_layer_output = all_hidden_states[self.distillation_layer]
-            if codebook_indexes.shape[1] != middle_layer_output.shape[1]:
-                codebook_indexes = self.concat_successive_codebook_indexes(
-                    middle_layer_output, codebook_indexes, ratio=self.teacher_frame_ratio
-                )
-            if self.distillation_delta > 0:
-                codebook_indexes = codebook_indexes[:,:-self.distillation_delta, :]
-                middle_layer_output = middle_layer_output[:, self.distillation_delta:, :]
-                truncated_padding_mask = make_pad_mask(encoder_out_lens - self.distillation_delta)
-                codebook_indexes = codebook_indexes.masked_fill(truncated_padding_mask.unsqueeze(-1), value=-100)
-                
-            codebook_loss = self.codebook_loss_net(
-                middle_layer_output.float(), codebook_indexes
-            )
-        else:
-            codebook_loss = torch.empty(0)
         
-        if self.enable_distillation:
-            return simple_loss, pruned_loss, ctc_loss, codebook_loss
-        else:
-            return simple_loss, pruned_loss, ctc_loss
-
-    @staticmethod
-    def concat_successive_codebook_indexes(middle_layer_output, codebook_indexes, ratio=2):
-        # Output rate of hubert is 50 frames per second,
-        # while that of current encoder is 25.
-        # Following code handling two issues:
-        # 1.
-        #   Roughly speaking, to generate another frame output,
-        #   hubert needes extra two frames,
-        #   while current encoder needs extra four frames.
-        #   Suppose there are only extra three frames provided,
-        #   hubert will generate another frame while current encoder does nothing.
-        # 2.
-        #   codebook loss is a frame-wise loss, to enalbe 25 frames studnet output
-        #   learns from 50 frames teacher output, two successive frames of teacher model
-        #   output is concatenated together.
-        t_expected = middle_layer_output.shape[1]
-        N, T, C = codebook_indexes.shape # C should be 256
-        
-        # Handling issue 1.
-        if T >= t_expected * ratio:
-            codebook_indexes = codebook_indexes[:, : t_expected * ratio, :]
-        else:
-            assert t_expected * ratio - T <= 5, (T, t_expected, ratio)
-            diff = t_expected * ratio - T
-            codebook_indexes = torch.cat(
-                [
-                    codebook_indexes,
-                    torch.full((N,diff,C), -100).to(codebook_indexes.device).to(codebook_indexes.dtype)
-                ]
-            )
-        assert codebook_indexes.size(1) == middle_layer_output.size(1) * ratio
-        
-        # Handling issue 2.
-        codebook_indexes = codebook_indexes.reshape(N, t_expected, C * ratio)
-        assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
-        return codebook_indexes
-    
+        return simple_loss, pruned_loss, ctc_loss
