@@ -1039,6 +1039,7 @@ def run(rank, world_size, args):
     if world_size > 1:
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        logging.info(f"Rank: {rank}")
 
     optimizer = ScaledAdam(
         get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
@@ -1103,12 +1104,12 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict
+        train_cuts, sampler_state_dict=sampler_state_dict, world_size=world_size, rank=rank,
     )
 
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
-    valid_dl = librispeech.valid_dataloaders(valid_cuts)
+    valid_dl = librispeech.valid_dataloaders(valid_cuts, world_size=world_size, rank=rank)
 
     # if not params.print_diagnostics:
     #     scan_pessimistic_batches_for_oom(

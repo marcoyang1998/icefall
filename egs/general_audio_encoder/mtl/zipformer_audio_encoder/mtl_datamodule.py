@@ -201,6 +201,12 @@ class MultiTaskDataModule:
             default=True,
             help="When enabled, use SpecAugment for training dataset.",
         )
+        
+        group.add_argument(
+            "--time-mask-ratio",
+            type=float,
+            default=1.0,
+        )
 
         group.add_argument(
             "--spec-aug-time-warp-factor",
@@ -298,6 +304,8 @@ class MultiTaskDataModule:
         cuts_train: Union[CutSet, Dict[str, CutSet]],
         sampler_state_dict: Optional[Dict[str, Any]] = None,
         sampling_weight: List[int] = None,
+        world_size: int = None,
+        rank: int = None,
     ) -> DataLoader:
         """
         Args:
@@ -344,7 +352,12 @@ class MultiTaskDataModule:
             ).parameters["num_frame_masks"]
             if num_frame_masks_parameter.default == 1:
                 num_frame_masks = 2
-            logging.info(f"Num frame mask: {num_frame_masks}")
+            num_frame_masks = int(10 * self.args.time_mask_ratio)
+            max_frames_mask_fraction = 0.15 * self.args.time_mask_ratio
+            logging.info(
+                f"num_frame_masks: {num_frame_masks}, "
+                f"max_frames_mask_fraction: {max_frames_mask_fraction}"
+            )
             input_transforms.append(
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
@@ -352,6 +365,7 @@ class MultiTaskDataModule:
                     features_mask_size=27,
                     num_feature_masks=2,
                     frames_mask_size=100,
+                    max_frames_mask_fraction=max_frames_mask_fraction
                 )
             )
         else:
@@ -399,6 +413,8 @@ class MultiTaskDataModule:
                 buffer_size=self.args.num_buckets * 2000,
                 shuffle_buffer_size=self.args.num_buckets * 5000,
                 drop_last=self.args.drop_last,
+                world_size=world_size,
+                rank=rank,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
@@ -428,6 +444,8 @@ class MultiTaskDataModule:
                         buffer_size=self.args.num_buckets * 2000,
                         shuffle_buffer_size=self.args.num_buckets * 5000,
                         drop_last=self.args.drop_last,
+                        world_size=world_size,
+                        rank=rank,
                     )
                 else:
                     if self.args.at_weighted_sampler:
@@ -439,6 +457,8 @@ class MultiTaskDataModule:
                             max_duration=md,
                             shuffle=False,  # do not support shuffle
                             drop_last=self.args.drop_last,
+                            world_size=world_size,
+                            rank=rank,
                         )
                     else:
                         sampler = DynamicBucketingSampler(
@@ -449,13 +469,15 @@ class MultiTaskDataModule:
                             buffer_size=self.args.num_buckets * 2000,
                             shuffle_buffer_size=self.args.num_buckets * 5000,
                             drop_last=self.args.drop_last,
+                            world_size=world_size,
+                            rank=rank,
                         )
                     
                 samplers.append(sampler)
             
             train_sampler = ZipSampler(
                 *samplers,
-                merge_batches=True
+                merge_batches=True,
             )
         else:
             logging.info("Using SimpleCutSampler.")
@@ -486,7 +508,12 @@ class MultiTaskDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+    def valid_dataloaders(
+        self, 
+        cuts_valid: CutSet,
+        world_size: int = None,
+        rank: int = None,
+    ) -> DataLoader:
         transforms = []
         if self.args.concatenate_cuts:
             transforms = [
@@ -515,6 +542,8 @@ class MultiTaskDataModule:
             cuts_valid,
             max_duration=self.args.max_duration,
             shuffle=False,
+            world_size=world_size,
+            rank=rank,
         )
         logging.info("About to create dev dataloader")
         valid_dl = DataLoader(
@@ -527,7 +556,12 @@ class MultiTaskDataModule:
 
         return valid_dl
 
-    def test_dataloaders(self, cuts: CutSet) -> DataLoader:
+    def test_dataloaders(
+        self,
+        cuts: CutSet,
+        world_size: int = None,
+        rank: int = None,
+    ) -> DataLoader:
         logging.debug("About to create test dataset")
         test = MultiTaskKDDataset(
             input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
@@ -541,6 +575,8 @@ class MultiTaskDataModule:
             cuts,
             max_duration=self.args.max_duration,
             shuffle=False,
+            world_size=world_size,
+            rank=rank,
         )
         logging.debug("About to create test dataloader")
         test_dl = DataLoader(
