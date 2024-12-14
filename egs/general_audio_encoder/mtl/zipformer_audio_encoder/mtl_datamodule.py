@@ -363,8 +363,8 @@ class MultiTaskDataModule:
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
-            at_KD=True,
-            sv_KD=True
+            at_KD=self.args.at_KD,
+            sv_KD=self.args.sv_KD,
         )
 
         if self.args.on_the_fly_feats:

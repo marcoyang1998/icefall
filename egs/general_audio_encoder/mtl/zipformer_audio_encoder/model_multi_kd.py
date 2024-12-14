@@ -2,6 +2,8 @@
 #                                                       Wei Kang,
 #                                                       Zengwei Yao)
 #
+# Copyright    2024 University of Cambridge      (authors: Xiaoyu Yang)
+#
 # See ../../../../LICENSE for clarification regarding multiple authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +22,8 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from multi_quantization.prediction import JointCodebookLoss
 
 from icefall.utils import make_pad_mask
 
@@ -34,7 +38,7 @@ class MultiKDModel(nn.Module):
         distillation_layer: int=9,
         distillation_delta: int=0,
         teacher_frame_ratio: int = 2,
-        num_event: int = 527
+        num_events: int = 527
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -80,13 +84,18 @@ class MultiKDModel(nn.Module):
         # codebooks for each frame
         self.teacher_frame_ratio = teacher_frame_ratio 
         self.distillation_delta = distillation_delta
-        from multi_quantization.prediction import JointCodebookLoss
         
         self.codebook_loss_net = JointCodebookLoss(
             predictor_channels=encoder_dim,
             num_codebooks=num_codebooks * self.teacher_frame_ratio,
             is_joint=False,
+            reduction="none",
         )
+        
+        self.audio_tagging_proj = self.audio_tagging_proj = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Linear(encoder_dim, num_events),
+        ) # 527 classes
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -123,7 +132,8 @@ class MultiKDModel(nn.Module):
         self,
         x: torch.Tensor,
         x_lens: torch.Tensor,
-        codebook_indexes: torch.Tensor,
+        codebook_indexes: torch.Tensor = None,
+        at_targets: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -147,10 +157,29 @@ class MultiKDModel(nn.Module):
         """
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
+        assert codebook_indexes is not None or at_targets is not None
 
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
+        if codebook_indexes is not None:
+            codebook_loss = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes)
+        else:
+            codebook_loss = None
+        
+        if at_targets is not None:
+            at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
+        else:
+            at_loss = None
+        
+        return codebook_loss, at_loss
+
+    def forward_codebook_loss(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+        codebook_indexes: torch.Tensor,
+    ):
         # align the encoder features with the codebook indexes
         if codebook_indexes.shape[1] != encoder_out.shape[1]:
             codebook_indexes = self.concat_successive_codebook_indexes(
@@ -162,14 +191,33 @@ class MultiKDModel(nn.Module):
             truncated_padding_mask = make_pad_mask(encoder_out_lens - self.distillation_delta)
             codebook_indexes = codebook_indexes.masked_fill(truncated_padding_mask.unsqueeze(-1), value=-100)
             
-        codebook_loss = self.codebook_loss_net(
-            encoder_out.float(), codebook_indexes
-        )
+        N,T,_ = encoder_out.shape
+        codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
+        codebook_loss = codebook_loss.reshape(N,T,-1)
+        codebook_loss = codebook_loss.sum(dim=(1,2))
         
         return codebook_loss
 
-    def
+    def forward_audio_tagging(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+        target: torch.Tensor = None,
+        return_logits: bool = False,
+    ):
+        # target: (N, num_events)
+        logits = self.audio_tagging_proj(encoder_out) # (N, T, num_classes)
+        padding_mask = make_pad_mask(encoder_out_lens) # (N,T)
+        logits[padding_mask] = 0
+        logits = logits.sum(dim=1)
+        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(logits) # (N, num_events)
+        if return_logits:
+            return logits
+        
+        at_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
 
+        return at_loss
+    
     @staticmethod
     def concat_successive_codebook_indexes(middle_layer_output, codebook_indexes, ratio=2):
         # Output rate of hubert is 50 frames per second,

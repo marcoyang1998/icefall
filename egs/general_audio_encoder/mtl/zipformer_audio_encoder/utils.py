@@ -1,3 +1,4 @@
+import logging
 import collections
 from typing import List, Tuple
 from lhotse.array import Array, TemporalArray
@@ -17,6 +18,11 @@ def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
     }
     whisper_dummy_embedding = TemporalArray.from_dict(whisper_embedding_dict)
     
+    whisper_cb_indexes_dict = {
+        'array': {'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_whisper_codebook_indexes_1510.h5', 'storage_key': 'dummy_whisper_codebook_indexes_1510', 'shape': [1510, 16]}, 'temporal_dim': 0, 'frame_shift': 0.02, 'start': 0
+    }
+    whisper_cb_indexes = TemporalArray.from_dict(whisper_cb_indexes_dict)
+    
     beats_embedding_dict = {
         'storage_type': 'numpy_hdf5', 'storage_path': 'data/dummy_embeddings/dummy_beats_embedding.h5', 'storage_key': 'dummy_beats_embedding', 'shape': [527]
     }
@@ -35,19 +41,30 @@ def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
     def add_embeddings(c):
         # if not c.has_custom("whisper_embedding"):
         #     c.whisper_embedding = whisper_dummy_embedding
+        if not c.has_custom("codebook_indexes"):
+            c.codebook_indexes = whisper_cb_indexes
+        
         # if not c.has_custom("ecapa_embedding"):
         #     c.ecapa_embedding = ecapa_dummy_embedding
-        # if not c.has_custom("beats_embedding"):
-        #     c.beats_embedding = beats_dummy_embedding
+        if not c.has_custom("beats_embedding"):
+            c.beats_embedding = beats_dummy_embedding
         # if not c.supervisions[0].has_custom("audio_event"):
         #     c.supervisions[0].audio_event = "0"
-        # if c.supervisions[0].text is None:
-        #     c.supervisions[0].text = "Dummy text added as a place holder. Please ignore this if possible."
+        if c.supervisions[0].text is None:
+            c.supervisions[0].text = "Dummy text added as a place holder. Please ignore this if possible."
         c.task_id = task_ID
         return c
     
     c = add_embeddings(c)
     return c
+
+def compare_model(state_dict1, state_dict2):
+    assert state_dict1.keys() == state_dict2.keys()
+    for key in state_dict1.keys():
+        if torch.all(state_dict1[key] == state_dict2[key]):
+            logging.info(f"Param: {key} is the same as new state dict")
+        else:
+            logging.info(f"Param: {key} is updated from new state dict")
 
 class MetricsTracker(collections.defaultdict):
     def __init__(self):
