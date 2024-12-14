@@ -82,6 +82,7 @@ class MultiKDModel(nn.Module):
         # the frame ratio between the teacher and student
         # if larger than one, we are basically having more than one set of
         # codebooks for each frame
+        self.num_codebooks= num_codebooks
         self.teacher_frame_ratio = teacher_frame_ratio 
         self.distillation_delta = distillation_delta
         
@@ -194,7 +195,9 @@ class MultiKDModel(nn.Module):
         N,T,_ = encoder_out.shape
         codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
-        codebook_loss = codebook_loss.sum(dim=(1,2))
+        num_cb = codebook_loss.size(-1)
+        # normalize the loss by the number of codebooks
+        codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb
         
         return codebook_loss
 
