@@ -279,6 +279,7 @@ def main():
     else:
         out_path = params.exp_dir / f"epoch-{params.epoch}-avg-{params.avg}.pt"
         torch.save({"model": model.state_dict()}, out_path)
+    logging.info(f"Model saved to: {out_path}")
 
     logging.info("Done!")
 
