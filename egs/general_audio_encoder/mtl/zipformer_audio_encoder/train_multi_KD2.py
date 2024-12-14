@@ -66,7 +66,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule import MultiTaskDataModule
+from kd_datamodule2 import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
@@ -875,6 +875,7 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
+    
     feature = batch["inputs"]
     # at entry, feature is (N, T, C)
     assert feature.ndim == 3
@@ -882,19 +883,18 @@ def compute_loss(
 
     supervisions = batch["supervisions"]
     cuts = supervisions["cut"]
+    task = batch["task_name"] # either asr or audio_tagging
     feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
     
-    if random.random() < 0.02 and is_training:
-        for t in range(1, params.num_tasks+1):
-            duration = sum([c.duration for c in cuts if c.task_id == t])
-            logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
-            logging.info(f"Total duration of task {t}: {duration}")
-
     # mvq tokens
-    mvq_tokens = batch["cb_indexes"].to(device)
+    mvq_tokens = batch["cb_indexes"]
+    if mvq_tokens is not None:
+        mvq_tokens = mvq_tokens.to(device)
     # audio tagging label
-    at_targets = batch["at_targets"].to(device) # the label indices are in CED format
+    at_targets = batch["at_targets"] # the label indices are in CED format
+    if at_targets is not None:
+        at_targets = at_targets.to(device)
     
     with torch.set_grad_enabled(is_training):
         mvq_loss, audio_tagging_loss = model(
@@ -905,19 +905,20 @@ def compute_loss(
         )
 
         loss = 0.0
-
         # task_id=1: ASR data
         # task_id=2: AT data
 
         # MVQ loss 
-        if params.do_mvq:
+        if params.do_mvq and task == "asr":
             mask = task_ids == 1 # ASR=1
+            # assert mask.all()
             mvq_loss = (mvq_loss * mask).sum()
             loss += mvq_loss
             
         # AT loss
-        if params.do_audio_tagging:
+        if params.do_audio_tagging and task == "audio_tagging":
             mask = task_ids == 2 # AT=2
+            # assert mask.all()
             audio_tagging_loss = (audio_tagging_loss.sum(dim=-1) * mask).sum() # this also works if mask is all False
             loss += params.audio_tagging_loss_scale * audio_tagging_loss
 
@@ -931,9 +932,9 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.do_mvq:
+    if params.do_mvq and task == "asr":
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
-    if params.do_audio_tagging:
+    if params.do_audio_tagging and task == "audio_tagging":
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
     return loss, info
@@ -952,6 +953,9 @@ def compute_validation_loss(
     tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
+        if isinstance(batch, list):
+            assert len(batch) == 1, len(batch)
+            batch = batch[0]
         loss, loss_info = compute_loss(
             params=params,
             model=model,
@@ -1038,37 +1042,57 @@ def train_one_epoch(
             rank=0,
         )
 
-    for batch_idx, batch in enumerate(train_dl):
+    for batch_idx, batches in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
+            
+        if random.random() < 1:
+            cuts_list = [sub_batch["supervisions"]["cut"] for sub_batch in batches]
+            batch_sizes = [len(cuts) for cuts in cuts_list]
+            batch_duration = [sum([c.duration for c in cuts]) for cuts in cuts_list]
+            logging.info(f"Batch sizes: {batch_sizes}; Batch duration: {batch_duration}")
 
-        params.batch_idx_train += 1
-        batch_size = len(batch["supervisions"]["text"])
+        num_batches = len(batches)
+        batch_size = sum([len(sub_batch["supervisions"]["cut"]) for sub_batch in batches])
+        loss_info = MetricsTracker()
+        for i, batch in enumerate(batches):
+            try:
+                with torch.cuda.amp.autocast(enabled=params.use_fp16):
+                    loss, cur_loss_info = compute_loss(
+                        params=params,
+                        model=model,
+                        sp=sp,
+                        batch=batch,
+                        is_training=True,
+                    )
 
-        try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
-                loss, loss_info = compute_loss(
-                    params=params,
-                    model=model,
-                    sp=sp,
-                    batch=batch,
-                    is_training=True,
-                )
-            # summary stats
-            tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
+                # NOTE: We use reduction==sum and loss is computed over utterances
+                # in the batch and there is no normalization to it so far.
+                scaler.scale(loss).backward()
+                for k in cur_loss_info:
+                    if k in loss_info:
+                        loss_info[k] += cur_loss_info[k]
+                    else:
+                        loss_info[k] = cur_loss_info[k]
+                    
+                if i == num_batches - 1: 
+                    # went through all batch for all tasks
+                    params.batch_idx_train += 1
+                    scheduler.step_batch(params.batch_idx_train)
 
-            # NOTE: We use reduction==sum and loss is computed over utterances
-            # in the batch and there is no normalization to it so far.
-            scaler.scale(loss).backward()
-            scheduler.step_batch(params.batch_idx_train)
-
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-        except:  # noqa
-            save_bad_model()
-            display_and_save_batch(batch, params=params, sp=sp)
-            raise
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    
+                    # summary stats
+                    tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
+                else:
+                    continue
+                
+            except:  # noqa
+                save_bad_model()
+                display_and_save_batch(batch, params=params, sp=sp)
+                raise
 
         if params.print_diagnostics and batch_idx == 5:
             return
@@ -1274,6 +1298,7 @@ def run(rank, world_size, args):
 
     train_cuts = {}
     data_sampling_weight = []
+    dataset_order = []
     if params.use_librispeech:
         if not params.full_libri: 
             librispeech_cuts = librispeech.train_clean_100_cuts()
@@ -1286,6 +1311,7 @@ def run(rank, world_size, args):
         librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
         train_cuts["cuts_asr"] = librispeech_cuts
         data_sampling_weight.append(librispeech_cuts_len * params.repeat_librispeech)
+        dataset_order.append("asr")
 
     if params.use_audioset and params.do_audio_tagging:
         logging.info(f"Getting audioset cuts")
@@ -1303,6 +1329,7 @@ def run(rank, world_size, args):
         audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
         train_cuts["cuts_audioset"] = audioset_cuts
         data_sampling_weight.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
+        dataset_order.append("audio_tagging")
         
     assert len(train_cuts) >= 1, "At least one task should be done!"
     
@@ -1331,6 +1358,7 @@ def run(rank, world_size, args):
             train_cuts = train_cuts[0]
         assert isinstance(train_cuts, CutSet), type(train_cuts)
     
+    # filter the training set
     if not params.at_weighted_sampler:
         for k, cuts in train_cuts.items():
             train_cuts[k] = cuts.filter(remove_short_and_long_utt)
@@ -1346,7 +1374,10 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict, sampling_weight=data_sampling_weight
+        train_cuts, 
+        sampler_state_dict=sampler_state_dict, 
+        sampling_weight=data_sampling_weight,
+        dataset_order=dataset_order,
     )
 
     valid_sets = []
@@ -1357,14 +1388,14 @@ def run(rank, world_size, args):
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
-        asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts)
+        asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, dataset_order=["asr"])
         valid_sets.append("ASR_ls")
         valid_dls.append(asr_valid_dl)
      
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
-        at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts)
+        at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, dataset_order=["audio_tagging"])
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
 
