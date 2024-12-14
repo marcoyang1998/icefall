@@ -34,7 +34,9 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
     To use it with a PyTorch DataLoader, set ``batch_size=None``
     and provide a :class:`SimpleCutSampler` sampler.
 
-    Each item in this dataset is a dict of:
+    Unlike normal datasets, this dataset prepares a list of batches, each for
+    a specific task.
+    Each item in this dataset is a list of dict of:
 
     .. code-block::
 
@@ -79,7 +81,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
         at_KD: bool = False,
-        sv_KD: bool = False
+        sv_KD: bool = False,
+        dataset_order: str = "asr,audio_tagging",
     ):
         """
         IterableDataset constructor.
@@ -94,6 +97,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             Examples: normalization, SpecAugment, etc.
         :param input_strategy: Converts cuts into a collated batch of audio/features.
             By default, reads pre-computed features from disk.
+        :param dataset_order: A list of strings, representing the order of the sampler
         """
         super().__init__()
         # Initialize the fields
@@ -104,6 +108,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         self.at_KD = at_KD
         self.sv_KD = sv_KD
+        self.dataset_order = dataset_order
 
         # This attribute is a workaround to constantly growing HDF5 memory
         # throughout the epoch. It regularly closes open file handles to
@@ -112,15 +117,21 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, cuts_lists: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
-        Return a new batch, with the batch size automatically determined using the constraints
-        of max_duration and max_cuts.
+        Return a list of new batch, with the batch size automatically determined using the constraints
+        of max_duration and max_cuts. Each item in the list is a batch for a certain task, the order 
+        is pre-defined. 
         """
         # validate_for_asr(cuts)
-        assert isinstance(cuts_lists, list), type(cuts_lists)
+        if not isinstance(cuts_lists, tuple):
+            cuts_lists = [cuts_lists]
+        
+        # assert isinstance(cuts_lists, list), type(cuts_lists)
+        assert len(cuts_lists) == len(self.dataset_order)
         
         self.hdf5_fix.update()
         
-        for i, cuts in enumerate(cuts_lists):
+        batch_list = []
+        for task, cuts in zip(self.dataset_order, cuts_lists):
             # Sort the cuts by duration so that the first one determines the batch time dimensions.
             cuts = cuts.sort_by_duration(ascending=False)
 
@@ -156,27 +167,30 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
             cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
             
-            # MVQ tokens
-            if i == 0:
+            if task == "asr":
+                # MVQ tokens
                 mvq_tokens, mvq_token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=-100)
                 at_targets = None
                 sv_targets = None
+                task_name = "asr"
+            elif task == "audio_tagging":
+                mvq_tokens, mvq_token_lens = None, None
+                if self.at_KD:
+                    at_targets = collate_custom_field(
+                        cuts_pre_mixed, "beats_embedding", pad_value=-100
+                    ) # (N,C)
+                else:        
+                    audio_events = [c.supervisions[0].audio_event for c in cuts_pre_mixed] # the label indices are in CED format
+                    at_targets, _ = str2multihot(audio_events) # (N, num_events)
+                sv_targets = None
+                task_name = "audio_tagging"
+            elif task == "sv":
+                raise NotImplementedError(f"SV is not supported yet")
             
             # task ids
             task_ids = [c.task_id for c in cuts_pre_mixed]
+            assert len(set(task_ids)) == 1, "This batch contains data from more than one task!"
             task_ids = torch.tensor(task_ids)
-            
-            if self.at_KD:
-                at_targets = collate_custom_field(
-                    cuts_pre_mixed, "beats_embedding", pad_value=-100
-                ) # (N,C)
-            else:        
-                audio_events = [c.supervisions[0].audio_event for c in cuts_pre_mixed] # the label indices are in CED format
-                at_targets, _ = str2multihot(audio_events) # (N, num_events)
-                
-            sv_targets = None
-            
-            
             
             batch = {
                 "inputs": inputs,
@@ -194,6 +208,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
                 "task_ids": task_ids,
                 "at_targets": at_targets,
                 "sv_targets": sv_targets,
+                "task_name": task_name,
             }
             # Update the 'supervisions' field with sequence_idx and start/num frames/samples
             batch["supervisions"].update(supervision_intervals)
@@ -201,8 +216,9 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
                 batch["supervisions"]["cut"] = [
                     cut for cut in cuts for sup in cut.supervisions
                 ]
+            batch_list.append(batch)
 
-            return batch
+        return batch_list
 
 
 def validate_for_asr(cuts: CutSet) -> None:

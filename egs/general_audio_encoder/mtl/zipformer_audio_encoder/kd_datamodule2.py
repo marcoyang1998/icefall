@@ -316,6 +316,7 @@ class MultiTaskDataModule:
         cuts_train: Union[CutSet, Dict[str, CutSet]],
         sampler_state_dict: Optional[Dict[str, Any]] = None,
         sampling_weight: List[int] = None,
+        dataset_order: List[str] = "asr,audio_tagging"
     ) -> DataLoader:
         """
         Args:
@@ -382,7 +383,8 @@ class MultiTaskDataModule:
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
             at_KD=True,
-            sv_KD=True
+            sv_KD=True,
+            dataset_order=dataset_order,
         )
 
         if self.args.on_the_fly_feats:
@@ -402,7 +404,8 @@ class MultiTaskDataModule:
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                dataset_order=dataset_order,
             )
 
         if self.args.bucketing_sampler:
@@ -471,9 +474,11 @@ class MultiTaskDataModule:
                     
                 samplers.append(sampler)
             
+            # NOTE: merge_batches is set to false because we expect
+            # deal with batch for each task individually
             train_sampler = ZipSampler(
                 *samplers,
-                merge_batches=True
+                merge_batches=False,
             )
         else:
             logging.info("Using SimpleCutSampler.")
@@ -504,7 +509,7 @@ class MultiTaskDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+    def valid_dataloaders(self, cuts_valid: CutSet, dataset_order: List[str]) -> DataLoader:
         transforms = []
         if self.args.concatenate_cuts:
             transforms = [
@@ -520,14 +525,16 @@ class MultiTaskDataModule:
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                dataset_order=dataset_order,
             )
         else:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                dataset_order=dataset_order,
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -546,6 +553,7 @@ class MultiTaskDataModule:
         return valid_dl
 
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
+        # TODO: adapt test dataloaders for a list of batches
         logging.debug("About to create test dataset")
         test = MultiTaskKDDataset(
             input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
@@ -553,7 +561,7 @@ class MultiTaskDataModule:
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
             at_KD=self.args.at_KD,
-            sv_KD=self.args.sv_KD
+            sv_KD=self.args.sv_KD,
         )
         sampler = DynamicBucketingSampler(
             cuts,
