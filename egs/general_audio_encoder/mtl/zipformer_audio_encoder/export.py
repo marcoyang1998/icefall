@@ -108,22 +108,13 @@ import torch.nn as nn
 
 from train_mvq_kd import add_model_arguments, get_model, get_params
 
-from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (
     average_checkpoints,
     average_checkpoints_with_averaged_model,
     find_checkpoints,
     load_checkpoint,
 )
-from icefall.lexicon import Lexicon
-from icefall.utils import (
-    AttributeDict,
-    make_pad_mask,
-    setup_logger,
-    store_transcripts,
-    str2bool,
-    write_error_stats,
-)
+from icefall.utils import str2bool
 
 LOG_EPS = math.log(1e-10)
 
@@ -187,7 +178,6 @@ def get_parser():
 @torch.no_grad()
 def main():
     parser = get_parser()
-    LmScorer.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
@@ -281,13 +271,14 @@ def main():
                 ),
             )
 
-    import pdb; pdb.set_trace()
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
     if params.iter > 0:
-        torch.save({"model": model.state_dict()}, params.exp_dir / f"iter-{params.iter}-avg-{params.avg}.pt")
+        out_path = params.exp_dir / f"iter-{params.iter}-avg-{params.avg}.pt"
+        torch.save({"model": model.state_dict()}, out_path)
     else:
-        torch.save({"model": model.state_dict()}, params.exp_dir / f"epoch-{params.epoch}-avg-{params.avg}.pt")
+        out_path = params.exp_dir / f"epoch-{params.epoch}-avg-{params.avg}.pt"
+        torch.save({"model": model.state_dict()}, out_path)
 
     logging.info("Done!")
 
