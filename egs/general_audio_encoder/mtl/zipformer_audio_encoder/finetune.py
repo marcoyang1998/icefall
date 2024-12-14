@@ -58,6 +58,7 @@ import copy
 import logging
 import warnings
 from pathlib import Path
+import random
 from shutil import copyfile
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -171,6 +172,14 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         "--freeze-encoder",
         type=str2bool,
         default=False,
+        help="Freeze the encoder of the model. If true, freeze-encoder-steps won't be used"
+    )
+    
+    parser.add_argument(
+        "--freeze-encoder-steps",
+        type=int,
+        default=-1,
+        help="For this number of steps, freeze the encoder. If set, freeze-encoder cannot be true"
     )
     
     parser.add_argument(
@@ -905,7 +914,16 @@ def compute_loss(
     texts = batch["supervisions"]["text"]
     y = sp.encode(texts, out_type=int)
     y = k2.RaggedTensor(y)
-
+    
+    if params.freeze_encoder_steps > 0:
+        freeze_encoder = batch_idx_train < params.freeze_encoder_steps
+        if random.random() < 0.01 and is_training:
+            logging.info(f"Step: {batch_idx_train}. Freeze encoder: {freeze_encoder}")
+        if batch_idx_train == params.freeze_encoder_steps:
+            logging.info(f"Reaching {params.freeze_encoder_steps}. Freeze encoder: {freeze_encoder}.")
+    else:
+        freeze_encoder = params.freeze_encoder
+    
     with torch.set_grad_enabled(is_training):
         losses = model(
             x=feature,
@@ -914,7 +932,7 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
-            freeze_encoder=params.freeze_encoder,
+            freeze_encoder=freeze_encoder,
         )
         simple_loss, pruned_loss, ctc_loss = losses[:3]
 
@@ -1278,6 +1296,14 @@ def run(rank, world_size, args):
     if params.encoder_lr_scale != 1.0:
         model.encoder.lr_scale = params.encoder_lr_scale
         model.encoder_embed.lr_scale = params.encoder_lr_scale
+    
+    # Check the freezing encoder configuration
+    if params.freeze_encoder_steps > 0:
+        logging.info(f"Freeze the encoder for {params.freeze_encoder_steps} steps")
+        assert not params.freeze_encoder
+    if params.freeze_encoder:
+        logging.info(f"Freeze the encoder for the whole training")
+        assert params.freeze_encoder_steps < 0
     
     model.to(device)
     if world_size > 1:
