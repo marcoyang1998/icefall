@@ -1306,6 +1306,9 @@ def run(rank, world_size, args):
         
     assert len(train_cuts) >= 1, "At least one task should be done!"
     
+    logging.info(train_cuts)
+    logging.info(data_sampling_weight)
+    
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 1.0 or c.duration > 20.0:
             # logging.warning(
@@ -1331,12 +1334,11 @@ def run(rank, world_size, args):
             train_cuts = train_cuts[0]
         assert isinstance(train_cuts, CutSet), type(train_cuts)
     
+    # If we filter the data and use weighted_sampler, the number of cuts
+    # will be smaller, and won't match the sampling weight
     if not params.at_weighted_sampler:
         for k, cuts in train_cuts.items():
             train_cuts[k] = cuts.filter(remove_short_and_long_utt)
-    
-    logging.info(train_cuts)
-    logging.info(data_sampling_weight)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1346,7 +1348,7 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict, sampling_weight=data_sampling_weight
+        train_cuts, sampler_state_dict=sampler_state_dict, sampling_weight=data_sampling_weight, world_size=world_size, rank=rank,
     )
 
     valid_sets = []
@@ -1357,14 +1359,14 @@ def run(rank, world_size, args):
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
-        asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts)
+        asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_ls")
         valid_dls.append(asr_valid_dl)
      
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
-        at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts)
+        at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
 
