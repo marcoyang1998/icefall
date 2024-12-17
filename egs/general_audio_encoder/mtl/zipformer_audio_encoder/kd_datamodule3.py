@@ -44,7 +44,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
-from dataset import MultiTaskKDDataset
+from dataset2 import MultiTaskKDDataset
 from icefall.utils import str2bool
 
 
@@ -201,12 +201,6 @@ class MultiTaskDataModule:
             default=True,
             help="When enabled, use SpecAugment for training dataset.",
         )
-        
-        group.add_argument(
-            "--time-mask-ratio",
-            type=float,
-            default=1.0,
-        )
 
         group.add_argument(
             "--spec-aug-time-warp-factor",
@@ -233,7 +227,22 @@ class MultiTaskDataModule:
             help="AudioSamples or PrecomputedFeatures",
         )
         
-        # ASR related
+        # KD related
+        group.add_argument(
+            "--at-KD",
+            type=str2bool,
+            default=True,
+            help="If load the logits instead of ground truth of audio events"
+        )
+        
+        group.add_argument(
+            "--sv-KD",
+            type=str2bool,
+            default=False,
+            help="If load speaker embedding instead of speaker identity"
+        )
+        
+        # multi task dataset related
         group.add_argument(
             "--use-librispeech",
             type=str2bool,
@@ -259,22 +268,12 @@ class MultiTaskDataModule:
             choices=["xs", "s", "m", "l", "xl"]
         )
         
-        # KD related
         group.add_argument(
-            "--at-KD",
+            "--use-wenetspeech",
             type=str2bool,
             default=False,
-            help="If load the logits instead of ground truth of audio events"
         )
         
-        group.add_argument(
-            "--sv-KD",
-            type=str2bool,
-            default=False,
-            help="If load speaker embedding instead of speaker identity"
-        )
-        
-        # multi task dataset related
         group.add_argument(
             "--use-voxceleb",
             type=str2bool,
@@ -378,12 +377,7 @@ class MultiTaskDataModule:
             ).parameters["num_frame_masks"]
             if num_frame_masks_parameter.default == 1:
                 num_frame_masks = 2
-            num_frame_masks = int(10 * self.args.time_mask_ratio)
-            max_frames_mask_fraction = 0.15 * self.args.time_mask_ratio
-            logging.info(
-                f"num_frame_masks: {num_frame_masks}, "
-                f"max_frames_mask_fraction: {max_frames_mask_fraction}"
-            )
+            logging.info(f"Num frame mask: {num_frame_masks}")
             input_transforms.append(
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
@@ -391,7 +385,6 @@ class MultiTaskDataModule:
                     features_mask_size=27,
                     num_feature_masks=2,
                     frames_mask_size=100,
-                    max_frames_mask_fraction=max_frames_mask_fraction
                 )
             )
         else:
@@ -403,8 +396,8 @@ class MultiTaskDataModule:
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
-            at_KD=self.args.at_KD,
-            sv_KD=self.args.sv_KD,
+            at_KD=True,
+            sv_KD=True
         )
 
         if self.args.on_the_fly_feats:
@@ -424,7 +417,9 @@ class MultiTaskDataModule:
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                world_size=world_size,
+                rank=rank,
             )
 
         if self.args.bucketing_sampler:
@@ -461,7 +456,7 @@ class MultiTaskDataModule:
                 # each cutset, as they will be higher likely to be exhausted at the same
                 # time
                 md = self.args.max_duration * sampling_weight[i]/ sum(sampling_weight)
-                logging.info(f"max duration for {name}: {md}")
+                logging.info(f"Max duration for {name}: {md}")
                 if "audioset" not in name:
                     sampler = DynamicBucketingSampler(
                         cuts,
@@ -504,7 +499,7 @@ class MultiTaskDataModule:
             
             train_sampler = ZipSampler(
                 *samplers,
-                merge_batches=True,
+                merge_batches=True
             )
         else:
             logging.info("Using SimpleCutSampler.")
@@ -512,6 +507,8 @@ class MultiTaskDataModule:
                 cuts_train,
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
+                world_size=world_size,
+                rank=rank,
             )
         logging.info("About to create train dataloader")
 
@@ -536,7 +533,7 @@ class MultiTaskDataModule:
         return train_dl
 
     def valid_dataloaders(
-        self, 
+        self,
         cuts_valid: CutSet,
         world_size: int = None,
         rank: int = None,
@@ -690,8 +687,8 @@ class MultiTaskDataModule:
     @lru_cache()
     def gigaspeech_subset_small_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech subset-S cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "cuts_S.jsonl.gz")
-
+        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_S.jsonl.gz")
+    
     @lru_cache()
     def gigaspeech_train_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech training cuts")
@@ -707,7 +704,7 @@ class MultiTaskDataModule:
                 break
         
         return all_cuts
-    
+
     @lru_cache()
     def gigaspeech_dev_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech dev cuts")

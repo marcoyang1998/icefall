@@ -82,7 +82,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         sv_KD: bool = False
     ):
         """
-        k2 ASR IterableDataset constructor.
+        IterableDataset constructor.
 
         :param return_cuts: When ``True``, will additionally return a "cut" field in each batch with the Cut
             objects used to create that batch.
@@ -154,22 +154,18 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
         
-        if self.at_KD:
-            at_targets = collate_custom_field(
-                cuts_pre_mixed, "beats_embedding", pad_value=-100
-            ) # (N,C)
-        else:        
-            audio_events = [c.supervisions[0].audio_event for c in cuts_pre_mixed] # the label indices are in CED format
-            at_targets, _ = str2multihot(audio_events) # (N, num_events)
-            
-        sv_targets = None
+        # MVQ tokens
+        cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+        mvq_tokens, mvq_token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=-100)
         
-        # task ids
-        task_ids = [c.task_id for c in cuts_pre_mixed]
-        task_ids = torch.tensor(task_ids)
+        at_targets = None
+        sv_targets = None
+        task_ids = None
         
         batch = {
             "inputs": inputs,
+            "cb_indexes": mvq_tokens,
+            "cb_indexes_len": mvq_token_lens,
             "supervisions": default_collate(
                 [
                     {
