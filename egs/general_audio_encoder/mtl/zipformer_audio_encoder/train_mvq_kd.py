@@ -57,7 +57,7 @@ import logging
 import warnings
 from pathlib import Path
 from shutil import copyfile
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, List
 
 import k2
 import optim
@@ -66,7 +66,7 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 from mtl_datamodule import MultiTaskDataModule
-from lhotse.cut import Cut
+from lhotse.cut import Cut, CutSet
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model import AsrKDModel
@@ -430,6 +430,12 @@ def get_parser():
         default=True,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--stop-early",
+        type=str2bool,
+        default=True,
+    )
 
     add_model_arguments(parser)
 
@@ -785,7 +791,8 @@ def train_one_epoch(
     scheduler: LRSchedulerType,
     sp: spm.SentencePieceProcessor,
     train_dl: torch.utils.data.DataLoader,
-    valid_dl: torch.utils.data.DataLoader,
+    valid_sets: List[str],
+    valid_dls: List[torch.utils.data.DataLoader],
     scaler: GradScaler,
     model_avg: Optional[nn.Module] = None,
     tb_writer: Optional[SummaryWriter] = None,
@@ -956,19 +963,24 @@ def train_one_epoch(
                     )
 
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
-            logging.info("Computing validation loss")
-            valid_info = compute_validation_loss(
-                params=params,
-                model=model,
-                sp=sp,
-                valid_dl=valid_dl,
-                world_size=world_size,
-            )
-            model.train()
-            logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
-            logging.info(
-                f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-            )
+            for valid_set, valid_dl in zip(valid_sets, valid_dls):
+                logging.info("Computing validation loss")
+                valid_info = compute_validation_loss(
+                    params=params,
+                    model=model,
+                    sp=sp,
+                    valid_dl=valid_dl,
+                    world_size=world_size,
+                )
+            
+                logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
+                logging.info(
+                    f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+                )
+                if tb_writer is not None:
+                    valid_info.write_summary(
+                        tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
+                    )
             if tb_writer is not None:
                 valid_info.write_summary(
                     tb_writer, "train/valid_", params.batch_idx_train
@@ -1072,11 +1084,38 @@ def run(rank, world_size, args):
 
     librispeech = MultiTaskDataModule(args)
 
-    if not params.full_libri:
-        train_cuts = librispeech.train_clean_100_cuts()
-    else:
-        train_cuts = librispeech.train_all_shuf_cuts()
+    train_cuts = {}
+    data_sampling_weight = []
+    if params.use_librispeech:
+        if not params.full_libri: 
+            librispeech_cuts = librispeech.train_clean_100_cuts()
+            librispeech_cuts_len = 100 # the duration
+        else:
+            librispeech_cuts = librispeech.train_all_shuf_cuts()
+            librispeech_cuts_len = 960
+        if params.repeat_librispeech > 1:
+            librispeech_cuts = librispeech_cuts.repeat(params.repeat_librispeech)
+        # librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
+        train_cuts["cuts_asr_libri"] = librispeech_cuts
+        data_sampling_weight.append(librispeech_cuts_len * params.repeat_librispeech)
 
+    if params.use_gigaspeech:
+        gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
+        gigaspeech_cuts_len = {
+            "s": 250,
+            "m": 1000,
+            "l": 2500,
+            "xl": 10000,
+        }
+        # gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
+        train_cuts["cuts_asr_giga"] = gigaspeech_cuts
+        data_sampling_weight.append(gigaspeech_cuts_len[params.gigaspeech_subset])
+
+    assert len(train_cuts) >= 1, "At least one task should be done!"
+    
+    logging.info(train_cuts)
+    logging.info(data_sampling_weight)
+    
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
         #
@@ -1094,7 +1133,27 @@ def run(rank, world_size, args):
 
         return True
 
-    train_cuts = train_cuts.filter(remove_short_and_long_utt)
+    # If we filter the data and use weighted_sampler, the number of cuts
+    # will be smaller, and won't match the sampling weight
+    if not params.at_weighted_sampler:
+        for k, cuts in train_cuts.items():
+            train_cuts[k] = cuts.filter(remove_short_and_long_utt)
+    
+    if params.bucketing_sampler:
+        assert params.zip_sampler == False
+        train_cuts = [item[1] for item in train_cuts.items()]
+        if len(train_cuts) > 1:
+            logging.info(f"Using mux to combine data")
+            logging.info(f"Training cuts: {train_cuts}")
+            logging.info(f"Training cuts: {data_sampling_weight}")
+            train_cuts = CutSet.mux(
+                *train_cuts,
+                weights=data_sampling_weight,
+                stop_early=params.stop_early,
+            )
+        else:
+            train_cuts = train_cuts[0]
+        assert isinstance(train_cuts, CutSet), type(train_cuts)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1104,12 +1163,25 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict, world_size=world_size, rank=rank,
+        train_cuts, sampler_state_dict=sampler_state_dict, sampling_weight=data_sampling_weight, world_size=world_size, rank=rank,
     )
 
-    valid_cuts = librispeech.dev_clean_cuts()
-    valid_cuts += librispeech.dev_other_cuts()
-    valid_dl = librispeech.valid_dataloaders(valid_cuts, world_size=world_size, rank=rank)
+    valid_sets = []
+    valid_dls = []
+    
+    # valid dataloaders
+    if params.use_librispeech:
+        ls_valid_cuts = librispeech.dev_clean_cuts()
+        ls_valid_cuts += librispeech.dev_other_cuts()
+        asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ASR_ls")
+        valid_dls.append(asr_ls_valid_dl)
+        
+    if params.use_gigaspeech:
+        giga_dev_cuts = librispeech.gigaspeech_dev_cuts()
+        asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ASR_giga")
+        valid_dls.append(asr_giga_valid_dl)
 
     # if not params.print_diagnostics:
     #     scan_pessimistic_batches_for_oom(
@@ -1143,7 +1215,8 @@ def run(rank, world_size, args):
             scheduler=scheduler,
             sp=sp,
             train_dl=train_dl,
-            valid_dl=valid_dl,
+            valid_sets=valid_sets,
+            valid_dls=valid_dls,
             scaler=scaler,
             tb_writer=tb_writer,
             world_size=world_size,
