@@ -275,6 +275,26 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--wenetspeech-subset",
+            type=str,
+            default="M",
+            choices=["S", "M", "L"]
+        )
+        
+        group.add_argument(
+            "--use-libriheavy",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--libriheavy-subset",
+            type=str,
+            default="medium",
+            choices=["small", "medium", "large"]
+        )
+        
+        group.add_argument(
             "--use-voxceleb",
             type=str2bool,
             default=False,
@@ -714,6 +734,36 @@ class MultiTaskDataModule:
     def gigaspeech_test_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech test cuts")
         return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_test.jsonl.gz")
+    
+    @lru_cache()
+    def libriheavy_train_cuts(self) -> CutSet:
+        logging.info(f"About to get {self.args.libriheavy_subset} subset cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
+        )
+    
+    @lru_cache()
+    def wenetspeech_train_cuts(self) -> CutSet:
+        logging.info(f"About to get wenetspeech {self.args.wenetspeech_subset} cuts")
+        cuts_train = load_manifest_lazy(
+            self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+        )
+        return cuts_train
+
+    @lru_cache()
+    def wenetspeech_valid_cuts(self) -> CutSet:
+        logging.info("About to get dev cuts")
+        return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_DEV.jsonl.gz")
+
+    @lru_cache()
+    def wenetspeech_test_net_cuts(self) -> List[CutSet]:
+        logging.info("About to get TEST_NET cuts")
+        return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_TEST_NET.jsonl.gz")
+
+    @lru_cache()
+    def wenetspeech_test_meeting_cuts(self) -> CutSet:
+        logging.info("About to get TEST_MEETING cuts")
+        return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_TEST_MEETING.jsonl.gz")
     
     @lru_cache()
     def audioset_cuts(self) -> CutSet:
