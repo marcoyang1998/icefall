@@ -4,7 +4,8 @@
 #                                                       Mingshuang Luo,
 #                                                       Zengwei Yao,
 #                                                       Daniel Povey)
-#
+# 
+# Copyright    2024  University of Cambridge  (authors: Xiaoyu Yang,
 # See ../../../../LICENSE for clarification regarding multiple authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -66,7 +67,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule import MultiTaskDataModule
+from kd_datamodule3 import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
@@ -1168,7 +1169,7 @@ def train_one_epoch(
                 )
                 if tb_writer is not None:
                     valid_info.write_summary(
-                        tb_writer, f"train/valid_${valid_set}", params.batch_idx_train
+                        tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
                     )
             model.train()
 
@@ -1272,21 +1273,99 @@ def run(rank, world_size, args):
 
     librispeech = MultiTaskDataModule(args)
 
+    # When using zip sampler to combine speech and audio data
+    # we distribute the max-duration to each sampler according to their
+    # total duration
     train_cuts = {}
-    data_sampling_weight = []
+    train_cuts_duration = []
+    
+    # NOTE: We combine all the ASR data together, and use one sampler.
+    # We use CutSet.mux to sample with weight, the weight is the number 
+    # of training samples (NOT the total duration)!
+    asr_training_cuts = []
+    asr_training_cuts_lens = []
+    asr_training_cuts_duration = []
     if params.use_librispeech:
         if not params.full_libri: 
             librispeech_cuts = librispeech.train_clean_100_cuts()
-            librispeech_cuts_len = 100
+            librispeech_cuts_len = 85617 # n_cuts
+            librispeech_cuts_duration = 100
         else:
             librispeech_cuts = librispeech.train_all_shuf_cuts()
-            librispeech_cuts_len = 960
-        if params.repeat_librispeech > 1:
-            librispeech_cuts = librispeech_cuts.repeat(params.repeat_librispeech)
+            librispeech_cuts_len = 281239
+            librispeech_cuts_duration = 960
         librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
-        train_cuts["cuts_asr"] = librispeech_cuts
-        data_sampling_weight.append(librispeech_cuts_len * params.repeat_librispeech)
-
+        asr_training_cuts.append(librispeech_cuts)
+        asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
+        asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
+        
+    
+    if params.use_gigaspeech:
+        gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
+        gigaspeech_cuts_len = {
+            "s": 210012, # 250 hrs
+            "m": 859493, # 1000 hrs
+            "l": 2152879, # 2500 hrs
+            "xl": 8611516 # 10000 hrs
+        }
+        gigaspeech_cuts_duration = {
+            "s": 250, # 250 hrs
+            "m": 1000, # 1000 hrs
+            "l": 2500, # 2500 hrs
+            "xl": 10000 # 10000 hrs
+        }
+        gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
+        asr_training_cuts.append(gigaspeech_cuts)
+        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
+        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
+        
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts_len = {
+            "S": 151600,
+            "M": 1514500,
+            "L": 15145000, # TODO: update this number
+        }
+        wenetspeech_cuts_duration = {
+            "S": 100,
+            "M": 1000,
+            "L": 10000,
+        }
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
+        asr_training_cuts.append(wenetspeech_cuts)
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+    
+    if params.use_libriheavy:
+        libriheavy_cuts = librispeech.libriheavy_train_cuts()
+        libriheavy_cuts_len = {
+            "small": 122512 * 0.8, # 122512
+            "medium": 1050000 * 0.8, # 1093040
+        }
+        libriheavy_cuts_duration = {
+            "small": 500 * 0.8,
+            "medium": 4154 * 0.8,
+        }
+        libriheavy_cuts = libriheavy_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
+        asr_training_cuts.append(libriheavy_cuts)
+        asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
+        asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
+    
+    # combine the asr data into a BIG cut
+    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+    if len(asr_training_cuts) > 1:
+        asr_training_cuts = CutSet.mux(
+            *asr_training_cuts,
+            weights=asr_training_cuts_lens,
+            stop_early=True,
+        )
+    else:
+        asr_training_cuts = asr_training_cuts[0]
+    
+    train_cuts["cuts_asr"] = asr_training_cuts
+    train_cuts_duration.append(sum(asr_training_cuts_duration))
+    
+    # audio data
     if params.use_audioset and params.do_audio_tagging:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1:
@@ -1296,21 +1375,27 @@ def run(rank, world_size, args):
             )
         else:
             audioset_cuts = librispeech.audioset_cuts()
+        
         audioset_cuts_lens = {
+            "balanced": 21155,
+            "full": 1904746,
+        }
+        audioset_cuts_duration = {
             "balanced": 50,
-            "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5000,
+            "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
+        num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         train_cuts["cuts_audioset"] = audioset_cuts
-        data_sampling_weight.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
+        train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
         
     assert len(train_cuts) >= 1, "At least one task should be done!"
     
     logging.info(train_cuts)
-    logging.info(data_sampling_weight)
+    logging.info(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 1.0 or c.duration > 20.0:
+        if c.duration < 0.98 or c.duration > 21.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )
@@ -1318,27 +1403,29 @@ def run(rank, world_size, args):
 
         return True
     
+    # If we filter the data and use weighted_sampler, the number of cuts
+    # will be smaller, and won't match the sampling weight
+    if not params.at_weighted_sampler:
+        for k, cuts in train_cuts.items():
+            train_cuts[k] = cuts.filter(remove_short_and_long_utt)
+    
+    # Combine the ASR and audio data together
     if params.bucketing_sampler:
         assert params.zip_sampler == False
         train_cuts = [item[1] for item in train_cuts.items()]
         if len(train_cuts) > 1:
             logging.info(f"Using mux to combine data")
             logging.info(f"Training cuts: {train_cuts}")
-            logging.info(f"Training cuts: {data_sampling_weight}")
+            train_cuts_lens = [sum(asr_training_cuts_lens), num_audio_cuts] 
+            logging.info(f"Training cuts lens: {train_cuts_lens}")
             train_cuts = CutSet.mux(
                 *train_cuts,
-                weights=data_sampling_weight,
+                weights=train_cuts_lens,
                 stop_early=params.stop_early,
             )
         else:
             train_cuts = train_cuts[0]
         assert isinstance(train_cuts, CutSet), type(train_cuts)
-    
-    # If we filter the data and use weighted_sampler, the number of cuts
-    # will be smaller, and won't match the sampling weight
-    if not params.at_weighted_sampler:
-        for k, cuts in train_cuts.items():
-            train_cuts[k] = cuts.filter(remove_short_and_long_utt)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1348,7 +1435,11 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict, sampling_weight=data_sampling_weight, world_size=world_size, rank=rank,
+        train_cuts, 
+        sampler_state_dict=sampler_state_dict, 
+        sampling_weight=train_cuts_duration, 
+        world_size=world_size,
+        rank=rank,
     )
 
     valid_sets = []
@@ -1359,9 +1450,20 @@ def run(rank, world_size, args):
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
-        asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
+        asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_ls")
-        valid_dls.append(asr_valid_dl)
+        valid_dls.append(asr_ls_valid_dl)
+        
+    if params.use_gigaspeech:
+        giga_dev_cuts = librispeech.gigaspeech_dev_cuts()
+        giga_dev_cuts = giga_dev_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
+        asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ASR_giga")
+        valid_dls.append(asr_giga_valid_dl)
+    
+    if params.use_wenetspeech:
+        # TODO: add the wenetspeech valid cuts
+        pass
      
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
