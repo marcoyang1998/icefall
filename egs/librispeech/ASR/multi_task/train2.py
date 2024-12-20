@@ -54,6 +54,7 @@ It supports training with:
 import argparse
 import copy
 import logging
+import os
 from functools import partial
 import random
 import warnings
@@ -81,6 +82,7 @@ from subsampling import Conv2dSubsampling
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 
 from utils import _add_dummy_embeddings_and_taskIDs, MetricsTracker
@@ -94,7 +96,11 @@ from icefall.checkpoint import (
     save_checkpoint_with_global_batch_idx,
     update_averaged_model,
 )
-from icefall.dist import cleanup_dist, setup_dist
+from icefall.dist import (
+    cleanup_dist,
+    get_rank,
+    get_world_size,
+)
 from icefall.env import get_env_info
 from icefall.hooks import register_inf_check_hooks
 from icefall.utils import (
@@ -597,6 +603,12 @@ def get_parser():
         type=str2bool,
         default=False,
         help="Whether to use half precision training.",
+    )
+    
+    parser.add_argument(
+        "--use-multi-node",
+        type=str2bool,
+        default=True,
     )
 
     parser.add_argument(
@@ -1300,6 +1312,16 @@ def train_one_epoch(
         params.best_train_epoch = params.cur_epoch
         params.best_train_loss = params.train_loss
 
+def setup_distributed():
+    """Setup distributed training environment."""
+    dist.init_process_group(
+        backend="nccl",  # 推荐 NCCL 后端
+        init_method="env://",  # 使用环境变量设置
+    )
+    rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(rank)  # 当前进程绑定到对应的 GPU
+    return rank
+
 
 def run(rank, world_size, args):
     """
@@ -1318,7 +1340,7 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        setup_dist(rank, world_size, params.master_port)
+        rank = setup_distributed()
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1427,7 +1449,7 @@ def run(rank, world_size, args):
             audioset_cuts = librispeech.audioset_cuts()
         audioset_cuts_lens = {
             "balanced": 50,
-            "full": 500 if params.at_weighted_sampler else 5000,
+            "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5000,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
         train_cuts["cuts_audioset"] = audioset_cuts
@@ -1480,7 +1502,9 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict, sampling_weight=train_cuts_lens
+        train_cuts, 
+        sampler_state_dict=sampler_state_dict,
+        sampling_weight=train_cuts_lens,
     )
 
     valid_sets = []
@@ -1553,7 +1577,7 @@ def run(rank, world_size, args):
     logging.info("Done!")
 
     if world_size > 1:
-        torch.distributed.barrier()
+        # torch.distributed.barrier()
         cleanup_dist()
 
 
@@ -1637,6 +1661,15 @@ def main():
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
+    if args.use_multi_node:
+        # for multi-node multi-GPU training
+        rank = get_rank()
+        world_size = get_world_size()
+        args.world_size = world_size
+        print(f"rank: {rank}, world_size: {world_size}")
+        run(rank=rank, world_size=world_size, args=args)
+        return
+    
     world_size = args.world_size
     assert world_size >= 1
     if world_size > 1:
