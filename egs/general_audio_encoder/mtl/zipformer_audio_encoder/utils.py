@@ -1,11 +1,22 @@
 import logging
 import collections
+import os
 from typing import List, Tuple
 from lhotse.array import Array, TemporalArray
 
 import torch
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
+
+def setup_distributed():
+    """Setup distributed training environment."""
+    dist.init_process_group(
+        backend="nccl",  # 推荐 NCCL 后端
+        init_method="env://",  # 使用环境变量设置
+    )
+    rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(rank)  # 当前进程绑定到对应的 GPU
+    return rank
 
 def add_dummy_text(c):
     if c.supervisions[0].text is None:
@@ -52,7 +63,8 @@ def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
         #     c.supervisions[0].audio_event = "0"
         if c.supervisions[0].text is None:
             c.supervisions[0].text = "Dummy text added as a place holder. Please ignore this if possible."
-        c.task_id = task_ID
+        if task_ID is not None:
+            c.task_id = task_ID
         return c
     
     c = add_embeddings(c)
