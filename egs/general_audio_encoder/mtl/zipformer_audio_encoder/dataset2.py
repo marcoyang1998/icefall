@@ -115,7 +115,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         Return a new batch, with the batch size automatically determined using the constraints
         of max_duration and max_cuts.
         """
-        # validate_for_asr(cuts)
+        validate_multi_kd(cuts)
 
         self.hdf5_fix.update()
 
@@ -197,22 +197,13 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         return batch
 
 
-def validate_for_asr(cuts: CutSet) -> None:
-    validate(cuts)
-    tol = 2e-3  # 1ms
+def validate_multi_kd(cuts: CutSet) -> None:
     for cut in cuts:
-        for supervision in cut.supervisions:
-            assert supervision.start >= -tol, (
-                f"Supervisions starting before the cut are not supported for ASR"
-                f" (sup id: {supervision.id}, cut id: {cut.id})"
-            )
-
-            # Supervision start time is relative to Cut ...
-            # https://lhotse.readthedocs.io/en/v0.10_e/cuts.html
-            #
-            # 'supervision.end' is end of supervision inside the Cut
-            assert supervision.end <= cut.duration + tol, (
-                f"Supervisions ending after the cut "
-                f"are not supported for ASR"
-                f" (sup id: {supervision.id}, cut id: {cut.id})"
-            )
+        assert cut.has_features, cut
+        assert cut.has_custom("task_id")
+        if cut.task_id == 1: 
+            # speech cuts, should have codebook indexes
+            assert cut.codebook_indexes.array.storage_key != "dummy_whisper_codebook_indexes_1510"
+        elif cut.task_id == 2:
+            # audio cuts, should have audio logits
+            assert cut.beats_embedding.storage_key != "dummy_beats_embedding"
