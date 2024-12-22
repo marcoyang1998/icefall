@@ -256,6 +256,13 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--gigaspeech-subset",
+            type=str,
+            default="m",
+            choices=["xs", "s", "m", "l", "xl"]
+        )
+        
+        group.add_argument(
             "--use-wenetspeech",
             type=str2bool,
             default=False,
@@ -673,7 +680,14 @@ class MultiTaskDataModule:
     @lru_cache()
     def gigaspeech_subset_small_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech subset-S cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "cuts_S.jsonl.gz")
+        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_S.jsonl.gz")
+    
+    @lru_cache()
+    def gigaspeech_train_cuts(self) -> CutSet:
+        logging.info("About to get Gigaspeech training cuts")
+        gigaspeech_list = ["xs", "s", "m", "l", "xl"]
+        
+        return load_manifest_lazy(self.args.manifest_dir / f"gigaspeech_cuts_{self.args.gigaspeech_subset}.jsonl.gz")
 
     @lru_cache()
     def gigaspeech_dev_cuts(self) -> CutSet:

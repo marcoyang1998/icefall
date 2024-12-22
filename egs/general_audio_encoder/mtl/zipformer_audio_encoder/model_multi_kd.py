@@ -93,7 +93,7 @@ class MultiKDModel(nn.Module):
             reduction="none",
         )
         
-        self.audio_tagging_proj = self.audio_tagging_proj = nn.Sequential(
+        self.audio_tagging_proj = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(encoder_dim, num_events),
         ) # 527 classes

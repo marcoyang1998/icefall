@@ -44,7 +44,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
-from dataset import MultiTaskKDDataset
+from dataset import MultiTaskDataset
 from icefall.utils import str2bool
 
 
@@ -260,6 +260,13 @@ class MultiTaskDataModule:
         )
         
         # KD related
+        group.add_argument(
+            "--mvq-KD",
+            type=str2bool,
+            default=False,
+            help="If load the codebook indexes instead of ground truth of audio events"
+        )
+        
         group.add_argument(
             "--at-KD",
             type=str2bool,
