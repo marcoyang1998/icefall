@@ -70,6 +70,10 @@ def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
     c = add_embeddings(c)
     return c
 
+def _add_task_id(task_id, c):
+    c.task_id = task_id
+    return c
+
 def compare_model(state_dict1, state_dict2):
     assert state_dict1.keys() == state_dict2.keys()
     for key in state_dict1.keys():
