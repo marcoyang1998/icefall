@@ -1089,10 +1089,10 @@ def run(rank, world_size, args):
     if params.use_librispeech:
         if not params.full_libri: 
             librispeech_cuts = librispeech.train_clean_100_cuts()
-            librispeech_cuts_len = 100 # the duration
+            librispeech_cuts_len = 85617 # 100 # the duration
         else:
             librispeech_cuts = librispeech.train_all_shuf_cuts()
-            librispeech_cuts_len = 960
+            librispeech_cuts_len = 281239 # 960 hrs
         if params.repeat_librispeech > 1:
             librispeech_cuts = librispeech_cuts.repeat(params.repeat_librispeech)
         # librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
@@ -1102,10 +1102,10 @@ def run(rank, world_size, args):
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
-            "s": 250,
-            "m": 1000,
-            "l": 2500,
-            "xl": 10000,
+            "s": 210012, # 250 hrs
+            "m": 859493, # 1000 hrs
+            "l": 2152879, # 2500 hrs
+            "xl": 8611516 # 10000 hrs
         }
         # gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
         train_cuts["cuts_asr_giga"] = gigaspeech_cuts
