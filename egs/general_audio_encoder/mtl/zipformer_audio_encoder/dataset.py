@@ -1,7 +1,9 @@
+import math
 from typing import Callable, Dict, List, Union
 
 import torch
 from torch.utils.data.dataloader import DataLoader, default_collate
+import numpy as np
 
 from lhotse import validate
 from lhotse.cut import CutSet, MonoCut
@@ -24,7 +26,7 @@ def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     return out, labels
 
 
-class MultiTaskKDDataset(torch.utils.data.Dataset):
+class MultiTaskDataset(torch.utils.data.Dataset):
     """
     The PyTorch Dataset for the multi task speech and audio processing.
 
@@ -78,6 +80,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
+        mvq_KD: bool = False,
         at_KD: bool = False,
         sv_KD: bool = False
     ):
@@ -102,8 +105,12 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.input_transforms = ifnone(input_transforms, [])
         self.input_strategy = input_strategy
         
+        self.mvq_KD = mvq_KD
         self.at_KD = at_KD
         self.sv_KD = sv_KD
+        
+        self.dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
+        self.dummy_audio_logits = torch.ones(527) * 0.5
 
         # This attribute is a workaround to constantly growing HDF5 memory
         # throughout the epoch. It regularly closes open file handles to
@@ -115,7 +122,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         Return a new batch, with the batch size automatically determined using the constraints
         of max_duration and max_cuts.
         """
-        # validate_for_asr(cuts)
+        validate_multi_kd(cuts)
 
         self.hdf5_fix.update()
 
@@ -151,16 +158,40 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         segments = torch.stack(list(supervision_intervals.values()), dim=1)
         for tnfm in self.input_transforms:
             inputs = tnfm(inputs, supervision_segments=segments)
-
-        cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
         
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
-        mvq_tokens, mvq_token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=-100)
+        if self.mvq_KD:
+            mvq_tokens, mvq_token_lens = _collate_custom_field(
+                cuts_pre_mixed,
+                "codebook_indexes",
+                dummy=self.dummy_codebook_indexes,
+                temporal_array=True,
+                pad_value=-100,
+            )
+        else:
+            mvq_tokens = None
+            mvq_token_lens = None
         
-        at_targets = None
+        if self.at_KD:
+            at_targets = _collate_custom_field(
+                cuts_pre_mixed, "beats_embedding", dummy=self.dummy_audio_logits, temporal_array=False
+            ) # (N,C)
+        else:        
+            audio_events = [
+                c.supervisions[0].audio_event if hasattr(c.supervisions[0], "audio_event") 
+                else "0" for c in cuts_pre_mixed
+            ] # the label indices are in CED format
+            at_targets, _ = str2multihot(audio_events) # (N, num_events)
+            
+        # TODO: SV targets
         sv_targets = None
-        task_ids = None
+        
+        # task ids
+        task_ids = [c.task_id for c in cuts_pre_mixed]
+        task_ids = torch.tensor(task_ids)
+        
+        dummy_text = "This is dummy text."
         
         batch = {
             "inputs": inputs,
@@ -169,7 +200,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             "supervisions": default_collate(
                 [
                     {
-                        "text": supervision.text,
+                        "text": supervision.text if supervision.text is not None else dummy_text,
                     }
                     for sequence_idx, cut in enumerate(cuts)
                     for supervision in cut.supervisions
@@ -189,22 +220,92 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         return batch
 
 
-def validate_for_asr(cuts: CutSet) -> None:
-    validate(cuts)
-    tol = 2e-3  # 1ms
+def validate_multi_kd(cuts: CutSet) -> None:
     for cut in cuts:
-        for supervision in cut.supervisions:
-            assert supervision.start >= -tol, (
-                f"Supervisions starting before the cut are not supported for ASR"
-                f" (sup id: {supervision.id}, cut id: {cut.id})"
+        assert cut.has_features, cut
+        assert cut.has_custom("task_id")
+        if cut.task_id == 1: 
+            # speech cuts, should have codebook indexes
+            assert cut.codebook_indexes.array.storage_key != "dummy_whisper_codebook_indexes_1510"
+        elif cut.task_id == 2:
+            # audio cuts, should have audio logits
+            assert cut.beats_embedding.storage_key != "dummy_beats_embedding"
+            
+def _collate_custom_field(
+    cuts: CutSet, 
+    field: str,
+    dummy: np.array = None,
+    temporal_array: bool = True,
+    pad_value=None,
+):
+    
+    # by default, we assert the frame_shift is 0.02
+    if temporal_array:
+        max_frames = [int(c.duration * 50) for c in cuts]
+        
+        temporal_dim = 0
+        pad_value = -100
+        arrs = [
+            torch.from_numpy(c.load_custom(field)) if c.has_custom(field) else dummy for c in cuts
+        ]
+        for i, arr in enumerate(arrs):
+            arrs[i] = arr[:max_frames[i],:]
+        
+        arr_lens = torch.tensor(
+            [a.shape[temporal_dim] for a in arrs], dtype=torch.int32
+        )   
+        largest_arr = max(arrs, key=torch.numel)
+        maxlen = largest_arr.shape[temporal_dim]
+        collated_shape = (len(arrs), *largest_arr.shape)
+        dtype = largest_arr.dtype
+        if any(d == dtype for d in (torch.uint8, torch.int8, torch.int16, torch.int32)):
+            dtype = torch.int64
+        tensors = pad_value * torch.ones(collated_shape, dtype=dtype)
+        for aidx, a in enumerate(arrs):
+            alen = a.shape[temporal_dim]
+            # Construct an index expression such as tensors[:, :alen, :, :] programmatically;
+            # All indices are set to ':', besides temporal dim which is determined on pad_direction.
+            
+            temporal_slice = slice(0, alen)
+            indices = (aidx,) + tuple(
+                temporal_slice if i == temporal_dim else slice(None, None, None)
+                for i in range(len(a.shape))
             )
+            tensors[indices] = a
 
-            # Supervision start time is relative to Cut ...
-            # https://lhotse.readthedocs.io/en/v0.10_e/cuts.html
-            #
-            # 'supervision.end' is end of supervision inside the Cut
-            assert supervision.end <= cut.duration + tol, (
-                f"Supervisions ending after the cut "
-                f"are not supported for ASR"
-                f" (sup id: {supervision.id}, cut id: {cut.id})"
-            )
+        return tensors, arr_lens
+    else:
+        all_arrays = [torch.from_numpy(c.load_custom(field)) if c.has_custom(field) else dummy for c in cuts]
+        return torch.stack(all_arrays)
+            
+        
+if __name__=="__main__":
+    from functools import partial
+    from utils import _add_dummy_embeddings_and_taskIDs
+    from lhotse import load_manifest
+    
+    dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
+    dummy_audio_logits = torch.ones(527) * 0.5
+    
+    cuts = load_manifest("debug.jsonl.gz")
+    cut_ids = [c.task_id for c in cuts]
+    
+    augmented_cuts = cuts.map(partial(_add_dummy_embeddings_and_taskIDs, None))
+    cuts = load_manifest("debug.jsonl.gz")
+    
+    gt_mvq_tokens, gt_mvq_token_lens = collate_custom_field(augmented_cuts, "codebook_indexes", pad_value=-100)
+    mvq_tokens, mvq_token_lens = _collate_custom_field(
+        cuts,
+        "codebook_indexes",
+        dummy=dummy_codebook_indexes,
+        temporal_array=True,
+        pad_value=-100
+    )
+    import pdb; pdb.set_trace()
+    print(gt_mvq_tokens)
+    
+    gt_beats_embed = collate_custom_field(augmented_cuts, "beats_embedding")
+    beats_embed = _collate_custom_field(cuts, "beats_embedding", dummy=dummy_audio_logits, temporal_array=False)
+    
+    print(beats_embed)
+
