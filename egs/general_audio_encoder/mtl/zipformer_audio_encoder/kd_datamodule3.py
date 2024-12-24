@@ -433,13 +433,11 @@ class MultiTaskDataModule:
             # Drop feats to be on the safe side.
             train = MultiTaskKDDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
-                world_size=world_size,
-                rank=rank,
             )
 
         if self.args.bucketing_sampler:
@@ -452,7 +450,7 @@ class MultiTaskDataModule:
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
                 buffer_size=self.args.num_buckets * 2000,
-                shuffle_buffer_size=self.args.num_buckets * 5000,
+                shuffle_buffer_size=self.args.num_buckets * 1000,
                 drop_last=self.args.drop_last,
                 world_size=world_size,
                 rank=rank,
@@ -484,7 +482,7 @@ class MultiTaskDataModule:
                         shuffle=self.args.shuffle,
                         num_buckets=self.args.num_buckets,
                         buffer_size=self.args.num_buckets * 2000,
-                        shuffle_buffer_size=self.args.num_buckets * 5000,
+                        shuffle_buffer_size=self.args.num_buckets * 1000,
                         drop_last=self.args.drop_last,
                         world_size=world_size,
                         rank=rank,
@@ -503,13 +501,15 @@ class MultiTaskDataModule:
                             rank=rank,
                         )
                     else:
+                        # there is no need to use a large bucket for audio tagging
+                        # as the duration of cuts are quite similar
                         sampler = DynamicBucketingSampler(
                             cuts,
                             max_duration=md,
                             shuffle=self.args.shuffle,
-                            num_buckets=self.args.num_buckets,
-                            buffer_size=self.args.num_buckets * 2000,
-                            shuffle_buffer_size=self.args.num_buckets * 5000,
+                            num_buckets=5,
+                            buffer_size=10000,
+                            shuffle_buffer_size=10000,
                             drop_last=self.args.drop_last,
                             world_size=world_size,
                             rank=rank,
@@ -570,7 +570,7 @@ class MultiTaskDataModule:
         if self.args.on_the_fly_feats:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
@@ -608,7 +608,7 @@ class MultiTaskDataModule:
     ) -> DataLoader:
         logging.debug("About to create test dataset")
         test = MultiTaskKDDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
+            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128)))
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
@@ -746,14 +746,20 @@ class MultiTaskDataModule:
     def wenetspeech_train_cuts(self) -> CutSet:
         logging.info(f"About to get wenetspeech {self.args.wenetspeech_subset} cuts")
         cuts_train = load_manifest_lazy(
-            self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+            self.args.manifest_dir / f"wenetspeech_cuts_{self.args.wenetspeech_subset}.jsonl.gz"
         )
+        if self.args.on_the_fly_feats:
+            cuts_train = cuts_train.drop_features()
         return cuts_train
 
     @lru_cache()
     def wenetspeech_valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_DEV.jsonl.gz")
+        
+        cuts = load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_DEV.jsonl.gz")
+        if self.args.on_the_fly_feats:
+            cuts_train = cuts.drop_features()
+        return cuts
 
     @lru_cache()
     def wenetspeech_test_net_cuts(self) -> List[CutSet]:
