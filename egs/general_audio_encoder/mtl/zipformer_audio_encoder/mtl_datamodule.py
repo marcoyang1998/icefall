@@ -405,11 +405,12 @@ class MultiTaskDataModule:
             logging.info("Disable SpecAugment")
 
         logging.info("About to create train dataset")
-        train = MultiTaskKDDataset(
+        train = MultiTaskDataset(
             input_strategy=eval(self.args.input_strategy)(),
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
+            mvq_KD=self.args.mvq_KD,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD,
         )
@@ -425,11 +426,12 @@ class MultiTaskDataModule:
             # to be strict (e.g. could be randomized)
             # transforms = [PerturbSpeed(factors=[0.9, 1.1], p=2/3)] + transforms   # noqa
             # Drop feats to be on the safe side.
-            train = MultiTaskKDDataset(
+            train = MultiTaskDataset(
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
+                mvq_KD=self.args.mvq_KD,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
             )
@@ -558,17 +560,19 @@ class MultiTaskDataModule:
 
         logging.info("About to create dev dataset")
         if self.args.on_the_fly_feats:
-            validate = MultiTaskKDDataset(
+            validate = MultiTaskDataset(
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 return_cuts=self.args.return_cuts,
+                mvq_KD=self.args.mvq_KD,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
             )
         else:
-            validate = MultiTaskKDDataset(
+            validate = MultiTaskDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
+                mvq_KD=self.args.mvq_KD,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
             )
@@ -597,11 +601,12 @@ class MultiTaskDataModule:
         rank: int = None,
     ) -> DataLoader:
         logging.debug("About to create test dataset")
-        test = MultiTaskKDDataset(
+        test = MultiTaskDataset(
             input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
+            mvq_KD=self.args.mvq_KD,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD
         )

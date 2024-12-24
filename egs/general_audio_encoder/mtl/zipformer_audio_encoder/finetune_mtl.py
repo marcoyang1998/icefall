@@ -58,6 +58,7 @@ import copy
 import logging
 import warnings
 from pathlib import Path
+from functools import partial
 import random
 from shutil import copyfile
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -74,7 +75,7 @@ from joiner import Joiner
 from lhotse.cut import Cut, CutSet
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_asr import AsrModel
+from model_asr import MultiTaskModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -91,17 +92,25 @@ from icefall.checkpoint import (
     save_checkpoint_with_global_batch_idx,
     update_averaged_model,
 )
-from icefall.dist import cleanup_dist, setup_dist
+from icefall.dist import (
+    cleanup_dist,
+    get_rank,
+    get_world_size,
+)
 from icefall.env import get_env_info
 from icefall.hooks import register_inf_check_hooks
 from icefall.utils import (
     AttributeDict,
-    MetricsTracker,
     get_parameter_groups_with_lrs,
     setup_logger,
     str2bool,
 )
-from utils import compare_model
+from utils import (
+    compare_model,
+    MetricsTracker,
+    _add_task_id,
+    setup_distributed,   
+)
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
@@ -323,6 +332,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If True, use CTC head.",
     )
+    
+    parser.add_argument(
+        "--num-events",
+        type=int,
+        default=527,
+    )
 
 
 def get_parser():
@@ -533,6 +548,12 @@ def get_parser():
             model_avg * ((batch_idx_train - average_period) / batch_idx_train)`.
         """,
     )
+    
+    parser.add_argument(
+        "--use-multi-node",
+        type=str2bool,
+        default=True,
+    )
 
     parser.add_argument(
         "--use-fp16",
@@ -694,7 +715,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         decoder = None
         joiner = None
 
-    model = AsrModel(
+    model = MultiTaskModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
@@ -704,6 +725,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
+        num_event=params.num_events,
         
     )
     return model
@@ -906,7 +928,16 @@ def compute_loss(
     feature = feature.to(device)
 
     supervisions = batch["supervisions"]
+    cuts = supervisions["cut"]
     feature_lens = supervisions["num_frames"].to(device)
+    
+    task_ids = batch["task_ids"].int().to(device)
+    
+    if random.random() < 0.02 and is_training:
+        for t in range(1, params.num_tasks+1):
+            duration = sum([c.duration for c in cuts if c.task_id == t])
+            logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
+            logging.info(f"Total duration of task {t}: {duration}")
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
@@ -914,6 +945,10 @@ def compute_loss(
     texts = batch["supervisions"]["text"]
     y = sp.encode(texts, out_type=int)
     y = k2.RaggedTensor(y)
+    
+    at_targets = batch["at_targets"]
+    if at_targets is not None:
+        at_targets = at_targets.to(device)
     
     if params.freeze_encoder_steps > 0:
         freeze_encoder = batch_idx_train < params.freeze_encoder_steps
@@ -932,12 +967,15 @@ def compute_loss(
             prune_range=params.prune_range,
             am_scale=params.am_scale,
             lm_scale=params.lm_scale,
+            at_targets=at_targets,
             freeze_encoder=freeze_encoder,
         )
-        simple_loss, pruned_loss, ctc_loss = losses[:3]
+        simple_loss, pruned_loss, ctc_loss, audio_tagging_loss = losses[:4]
 
         loss = 0.0
 
+        # ASR related loss
+        asr_mask = task_ids == 1
         if params.use_transducer:
             s = params.simple_loss_scale
             # take down the scale on the simple loss from 1.0 at the start
@@ -952,10 +990,19 @@ def compute_loss(
                 if batch_idx_train >= warm_step
                 else 0.1 + 0.9 * (batch_idx_train / warm_step)
             )
+            
+            simple_loss = (simple_loss * asr_mask).sum()
+            pruned_loss = (pruned_loss * asr_mask).sum()
+            
             loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
 
         if params.use_ctc:
+            ctc_loss = (ctc_loss * asr_mask).sum()
             loss += params.ctc_loss_scale * ctc_loss
+        
+        at_mask = task_ids == 2
+        audio_tagging_loss = (audio_tagging_loss * at_mask).sum()
+        loss += params.audio_tagging_loss_scale * audio_tagging_loss
 
     assert loss.requires_grad == is_training
 
@@ -963,6 +1010,7 @@ def compute_loss(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
+        info["utterances"] = task_ids.size(0)
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
@@ -971,6 +1019,7 @@ def compute_loss(
         info["pruned_loss"] = pruned_loss.detach().cpu().item()
     if params.use_ctc:
         info["ctc_loss"] = ctc_loss.detach().cpu().item()
+    info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1233,7 +1282,7 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        setup_dist(rank, world_size, params.master_port)
+        rank = setup_distributed()
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1341,11 +1390,101 @@ def run(rank, world_size, args):
 
     librispeech = MultiTaskDataModule(args)
 
-    if params.full_libri:
-        train_cuts = librispeech.train_all_shuf_cuts()
+    train_cuts = {}
+    train_cuts_duration = []
+    
+    # NOTE: We combine all the ASR data together, and use one sampler.
+    # We use CutSet.mux to sample with weight, the weight is the number 
+    # of training samples (NOT the total duration)!
+    asr_training_cuts = []
+    asr_training_cuts_lens = []
+    asr_training_cuts_duration = []
+    if params.use_librispeech:
+        if not params.full_libri: 
+            librispeech_cuts = librispeech.train_clean_100_cuts()
+            librispeech_cuts_len = 85617 # n_cuts
+            librispeech_cuts_duration = 100
+        else:
+            librispeech_cuts = librispeech.train_all_shuf_cuts()
+            librispeech_cuts_len = 281239
+            librispeech_cuts_duration = 960
+        librispeech_cuts = librispeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+        asr_training_cuts.append(librispeech_cuts)
+        asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
+        asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
+        
+    
+    if params.use_gigaspeech:
+        gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
+        gigaspeech_cuts_len = {
+            "s": 210012, # 250 hrs
+            "m": 859493, # 1000 hrs
+            "l": 2152879, # 2500 hrs
+            "xl": 8611516 # 10000 hrs
+        }
+        gigaspeech_cuts_duration = {
+            "s": 250, # 250 hrs
+            "m": 1000, # 1000 hrs
+            "l": 2500, # 2500 hrs
+            "xl": 10000 # 10000 hrs
+        }
+        gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(gigaspeech_cuts)
+        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
+        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
+        
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts_len = {
+            "S": 151600, 
+            "M": 1514500, 
+            "L": 14621270,
+        }
+        wenetspeech_cuts_duration = {
+            "S": 100, # 100 hrs
+            "M": 1000, # 1000 hrs
+            "L": 10000, # 10000 hrs
+        }
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(wenetspeech_cuts)
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+        
+    
+    # combine the asr data
+    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+    if len(asr_training_cuts) > 1:
+        asr_training_cuts = CutSet.mux(
+            *asr_training_cuts,
+            weights=asr_training_cuts_lens,
+            stop_early=True,
+        )
     else:
-        train_cuts = librispeech.train_clean_100_cuts()
-    logging.info(train_cuts)
+        asr_training_cuts = asr_training_cuts[0]
+    asr_training_cuts_duration = sum(asr_training_cuts_duration)
+    
+    # audio data
+    train_cuts["cuts_audioset"] = asr_training_cuts
+    train_cuts_duration.append(asr_training_cuts_duration)
+
+    if params.use_audioset and params.do_audio_tagging:
+        logging.info(f"Getting audioset cuts")
+        if params.repeat_audioset > 1:
+            audioset_cuts = librispeech.audioset_cuts().repeat(
+                times=params.repeat_audioset,
+                preserve_id=False
+            )
+        else:
+            audioset_cuts = librispeech.audioset_cuts()
+        audioset_cuts_lens = {
+            "balanced": 50,
+            "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5000,
+        }
+        audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+        train_cuts["cuts_audioset"] = audioset_cuts
+        train_cuts_duration.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
+        
+    assert len(train_cuts) >= 1, "At least one task should be done!"
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1356,7 +1495,7 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
-        if c.duration < 1.0 or c.duration > 20.0:
+        if c.duration < 1.0 or c.duration > 21.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )
@@ -1384,7 +1523,9 @@ def run(rank, world_size, args):
 
         return True
 
-    train_cuts = train_cuts.filter(remove_short_and_long_utt)
+    if not params.at_weighted_sampler:
+        for k, cuts in train_cuts.items():
+            train_cuts[k] = cuts.filter(remove_short_and_long_utt)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1393,10 +1534,16 @@ def run(rank, world_size, args):
     else:
         sampler_state_dict = None
 
+    # construct the training dataloader
     train_dl = librispeech.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict, world_size=world_size, rank=rank
+        train_cuts, 
+        sampler_state_dict=sampler_state_dict,
+        sampling_weight=train_cuts_duration,
+        world_size=world_size,
+        rank=rank
     )
 
+    # TODO: add more validation sets
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
 
@@ -1538,6 +1685,14 @@ def main():
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
+    if args.use_multi_node:
+        # for multi-node multi-GPU training
+        rank = get_rank()
+        world_size = get_world_size()
+        args.world_size = world_size
+        print(f"rank: {rank}, world_size: {world_size}")
+        run(rank=rank, world_size=world_size, args=args)
+        return
     world_size = args.world_size
     assert world_size >= 1
     if world_size > 1:
