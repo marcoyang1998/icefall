@@ -79,6 +79,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from zipformer import Zipformer2
 
+
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
 from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
@@ -86,7 +87,11 @@ from icefall.checkpoint import (
     save_checkpoint_with_global_batch_idx,
     update_averaged_model,
 )
-from icefall.dist import cleanup_dist, setup_dist
+from icefall.dist import (
+    cleanup_dist,
+    get_rank,
+    get_world_size,
+)
 from icefall.env import get_env_info
 from icefall.hooks import register_inf_check_hooks
 from icefall.utils import (
@@ -429,6 +434,12 @@ def get_parser():
         type=str2bool,
         default=True,
         help="Whether to use half precision training.",
+    )
+    
+    parser.add_argument(
+        "--use-multi-node",
+        type=str2bool,
+        default=True,
     )
     
     parser.add_argument(
@@ -1325,6 +1336,15 @@ def main():
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
+    if args.use_multi_node:
+        # for multi-node multi-GPU training
+        rank = get_rank()
+        world_size = get_world_size()
+        args.world_size = world_size
+        print(f"rank: {rank}, world_size: {world_size}")
+        run(rank=rank, world_size=world_size, args=args)
+        return
+    
     world_size = args.world_size
     assert world_size >= 1
     if world_size > 1:

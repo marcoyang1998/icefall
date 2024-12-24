@@ -1324,12 +1324,12 @@ def run(rank, world_size, args):
         wenetspeech_cuts_len = {
             "S": 151600,
             "M": 1514500,
-            "L": 15145000, # TODO: update this number
+            "L": 13306651, # TODO: update this number
         }
         wenetspeech_cuts_duration = {
             "S": 100,
             "M": 1000,
-            "L": 10000,
+            "L": 9700,
         }
         wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
         asr_training_cuts.append(wenetspeech_cuts)
