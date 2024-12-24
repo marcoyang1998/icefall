@@ -36,6 +36,7 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     ZipSampler,
     SpecAugment,
     WeightedSimpleCutSampler,
+    make_worker_init_fn,
 )
 from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
     AudioSamples,
@@ -107,11 +108,27 @@ class MultiTaskDataModule:
             help="Path to directory with train/valid/test cuts.",
         )
         group.add_argument(
+            "--use-shar",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
+            "--shar-dir",
+            type=Path,
+            default=Path("data-shar"),
+            help="Path to directory with train/valid/test cuts.",
+        )
+        group.add_argument(
             "--max-duration",
             type=int,
             default=200.0,
             help="Maximum pooled recordings duration (seconds) in a "
             "single batch. You can reduce it if it causes CUDA OOM.",
+        )
+        group.add_argument(
+            "--num-mel-bins",
+            type=int,
+            default=128,
         )
         group.add_argument(
             "--bucketing-sampler",
@@ -359,6 +376,12 @@ class MultiTaskDataModule:
           sampler_state_dict:
             The state dict for the training sampler.
         """
+        # properly set world_size and rank
+        if self.args.use_shar:
+            logging.info(f"Setting world_size=1 and rank=0 because we will be using shar!")
+            world_size = 1
+            rank = 0
+        
         transforms = []
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
@@ -433,13 +456,11 @@ class MultiTaskDataModule:
             # Drop feats to be on the safe side.
             train = MultiTaskKDDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=self.args.num_mel_bins))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
-                world_size=world_size,
-                rank=rank,
             )
 
         if self.args.bucketing_sampler:
@@ -451,8 +472,8 @@ class MultiTaskDataModule:
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
-                buffer_size=self.args.num_buckets * 2000,
-                shuffle_buffer_size=self.args.num_buckets * 5000,
+                buffer_size=self.args.num_buckets * 1500,
+                shuffle_buffer_size=self.args.num_buckets * 1500,
                 drop_last=self.args.drop_last,
                 world_size=world_size,
                 rank=rank,
@@ -483,8 +504,8 @@ class MultiTaskDataModule:
                         max_duration=md,
                         shuffle=self.args.shuffle,
                         num_buckets=self.args.num_buckets,
-                        buffer_size=self.args.num_buckets * 2000,
-                        shuffle_buffer_size=self.args.num_buckets * 5000,
+                        buffer_size=self.args.num_buckets * 1500,
+                        shuffle_buffer_size=self.args.num_buckets * 1500,
                         drop_last=self.args.drop_last,
                         world_size=world_size,
                         rank=rank,
@@ -507,9 +528,9 @@ class MultiTaskDataModule:
                             cuts,
                             max_duration=md,
                             shuffle=self.args.shuffle,
-                            num_buckets=self.args.num_buckets,
-                            buffer_size=self.args.num_buckets * 2000,
-                            shuffle_buffer_size=self.args.num_buckets * 5000,
+                            num_buckets=5,
+                            buffer_size=10000,
+                            shuffle_buffer_size=10000,
                             drop_last=self.args.drop_last,
                             world_size=world_size,
                             rank=rank,
@@ -536,19 +557,37 @@ class MultiTaskDataModule:
             logging.info("Loading sampler state dict")
             train_sampler.load_state_dict(sampler_state_dict)
 
-        # 'seed' is derived from the current random state, which will have
-        # previously been set in the main process.
-        seed = torch.randint(0, 100000, ()).item()
-        worker_init_fn = _SeedWorkers(seed)
+        if not self.args.use_shar:
+            # 'seed' is derived from the current random state, which will have
+            # previously been set in the main process.
+            seed = torch.randint(0, 100000, ()).item()
+            worker_init_fn = _SeedWorkers(seed)
 
-        train_dl = DataLoader(
-            train,
-            sampler=train_sampler,
-            batch_size=None,
-            num_workers=self.args.num_workers,
-            persistent_workers=False,
-            worker_init_fn=worker_init_fn,
-        )
+            train_dl = DataLoader(
+                train,
+                sampler=train_sampler,
+                batch_size=None,
+                num_workers=self.args.num_workers,
+                persistent_workers=False,
+                worker_init_fn=worker_init_fn,
+            )
+        else:
+            from lhotse.dataset.iterable_dataset import IterableDatasetWrapper
+            logging.info("Wrapping the dataset and sampler to an iterable")
+            train_iter_dataset = IterableDatasetWrapper(
+                dataset=train,
+                sampler=train_sampler,
+            )
+            train_dl = DataLoader(
+                train_iter_dataset,
+                batch_size=None,
+                # For faster dataloading, use num_workers > 1
+                num_workers=self.args.num_workers,
+                # Note: Lhotse offers its own "worker_init_fn" that helps properly
+                #       set the random seeds in all workers (also with multi-node training)
+                #       and randomizes the shard order across different workers.
+                worker_init_fn=make_worker_init_fn(seed=0),
+            )
 
         return train_dl
 
@@ -570,7 +609,7 @@ class MultiTaskDataModule:
         if self.args.on_the_fly_feats:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
@@ -608,7 +647,7 @@ class MultiTaskDataModule:
     ) -> DataLoader:
         logging.debug("About to create test dataset")
         test = MultiTaskKDDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
+            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128)))
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
@@ -665,9 +704,16 @@ class MultiTaskDataModule:
             "About to get the shuffled train-clean-100, \
             train-clean-360 and train-other-500 cuts"
         )
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
-        )
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/librispeech/train-all-shuf",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+            ).repeat()
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_train-all-shuf.jsonl.gz"
+            )
 
     @lru_cache()
     def dev_clean_2_cuts(self) -> CutSet:
@@ -718,10 +764,19 @@ class MultiTaskDataModule:
         all_cuts = CutSet()
         for subset in gigaspeech_list:
             logging.info(f"Loading gigaspeech cuts subset: {subset}")
-            cuts = load_manifest_lazy(self.args.manifest_dir / f"gigaspeech_cuts_{subset}.jsonl.gz")
+            if self.args.use_shar:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/gigaspeech/{subset}",
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                )
+            else:
+                cuts = load_manifest_lazy(self.args.manifest_dir / f"gigaspeech_cuts_{subset}.jsonl.gz")
             all_cuts += cuts
             if self.args.gigaspeech_subset == subset:
                 break
+        if self.args.use_shar:
+            all_cuts = all_cuts.repeat()
         
         return all_cuts
 
@@ -738,17 +793,36 @@ class MultiTaskDataModule:
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get {self.args.libriheavy_subset} subset cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
-        )
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/libriheavy/{self.args.libriheavy_subset}",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+            ).repeat()
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
+            )
     
     @lru_cache()
     def wenetspeech_train_cuts(self) -> CutSet:
         logging.info(f"About to get wenetspeech {self.args.wenetspeech_subset} cuts")
-        cuts_train = load_manifest_lazy(
-            self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
-        )
-        return cuts_train
+        if self.args.use_shar:
+            num_splits = 10
+            all_cuts = CutSet()
+            for i in range(num_splits):
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/wenetspeech/L/split_{i}",
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                )
+                all_cuts += cuts
+            return all_cuts.repeat()
+        else:
+            cuts_train = load_manifest_lazy(
+                self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+            )
+            return cuts_train
 
     @lru_cache()
     def wenetspeech_valid_cuts(self) -> CutSet:
@@ -770,18 +844,32 @@ class MultiTaskDataModule:
         logging.info("About to get the audioset cuts.")
         if self.args.audioset_subset == "full":
             if not self.args.at_weighted_sampler:
-                cuts = load_manifest_lazy(
-                    self.args.manifest_dir / "audioset_cuts_full.jsonl.gz"
-                )
+                if self.args.use_shar:
+                    cuts = CutSet.from_shar(
+                        in_dir=f"{str(self.args.shar_dir)}/audioset/full",
+                        shuffle_shards=True,
+                        stateful_shuffle=True,
+                    ).repeat()
+                else:
+                    cuts = load_manifest_lazy(
+                        self.args.manifest_dir / "audioset_cuts_full.jsonl.gz"
+                    )
             else:
                 from lhotse import load_manifest
                 cuts = load_manifest(
                     self.args.manifest_dir / "audioset_cuts_full.jsonl.gz"
                 )
         else:
-            cuts = load_manifest_lazy(
-                self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
-            )
+            if self.args.use_shar:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/audioset/{self.args.audioset_subset}",
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                ).repeat()
+            else:
+                cuts = load_manifest_lazy(
+                    self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
+                )
         return cuts
 
     @lru_cache()
