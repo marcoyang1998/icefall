@@ -900,8 +900,12 @@ def compute_loss(
 
     # mvq tokens
     mvq_tokens = batch["cb_indexes"].to(device)
+    
     # audio tagging label
-    at_targets = batch["at_targets"].to(device) # the label indices are in CED format
+    if params.do_audio_tagging:
+        at_targets = batch["at_targets"].to(device) # the label indices are in CED format
+    else:
+        at_targets = None
     
     with torch.set_grad_enabled(is_training):
         mvq_loss, audio_tagging_loss = model(
@@ -1330,12 +1334,12 @@ def run(rank, world_size, args):
         wenetspeech_cuts_len = {
             "S": 151600,
             "M": 1514500,
-            "L": 15145000, # TODO: update this number
+            "L": 13306651, # TODO: update this number
         }
         wenetspeech_cuts_duration = {
             "S": 100,
             "M": 1000,
-            "L": 10000,
+            "L": 9700,
         }
         wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=1
         asr_training_cuts.append(wenetspeech_cuts)
@@ -1468,8 +1472,11 @@ def run(rank, world_size, args):
         valid_dls.append(asr_giga_valid_dl)
     
     if params.use_wenetspeech:
-        # TODO: add the wenetspeech valid cuts
-        pass
+        wenet_dev_cuts = librispeech.wenetspeech_valid_cuts()
+        wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
+        asr_wenet_valid_dl = librispeech.valid_dataloaders(wenet_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ASR_wenet")
+        valid_dls.append(asr_wenet_valid_dl)
      
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
@@ -1628,6 +1635,9 @@ def main():
         mp.spawn(run, args=(world_size, args), nprocs=world_size, join=True)
     else:
         run(rank=0, world_size=1, args=args)
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 
 if __name__ == "__main__":
     main()
