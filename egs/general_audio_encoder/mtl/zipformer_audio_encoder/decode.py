@@ -101,6 +101,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from functools import partial
 
 import k2
 import sentencepiece as spm
@@ -139,6 +140,8 @@ from icefall.utils import (
     str2bool,
     write_error_stats,
 )
+
+from utils import _add_task_id
 
 LOG_EPS = math.log(1e-10)
 
@@ -952,7 +955,8 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
-                )
+                ),
+                strict=False,
             )
 
     model.to(device)
@@ -1043,7 +1047,9 @@ def main():
     librispeech = MultiTaskDataModule(args)
 
     test_clean_cuts = librispeech.test_clean_cuts()
+    test_clean_cuts = test_clean_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
     test_other_cuts = librispeech.test_other_cuts()
+    test_other_cuts = test_other_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
 
     test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
     test_other_dl = librispeech.test_dataloaders(test_other_cuts)

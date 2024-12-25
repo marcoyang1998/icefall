@@ -259,6 +259,12 @@ class MultiTaskDataModule:
             choices=["xs", "s", "m", "l", "xl"]
         )
         
+        group.add_argument(
+            "--use-wenetspeech",
+            type=str2bool,
+            default=False,
+        )
+        
         # KD related
         group.add_argument(
             "--mvq-KD",

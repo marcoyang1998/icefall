@@ -320,6 +320,18 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--do-audio-tagging",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--num-events",
+        type=int,
+        default=527,
+    )
+    
+    parser.add_argument(
         "--use-transducer",
         type=str2bool,
         default=True,
@@ -331,12 +343,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If True, use CTC head.",
-    )
-    
-    parser.add_argument(
-        "--num-events",
-        type=int,
-        default=527,
     )
 
 
@@ -628,6 +634,7 @@ def get_params() -> AttributeDict:
             "subsampling_factor": 4,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
+            "num_tasks": 2,
         }
     )
 
@@ -725,8 +732,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
-        num_event=params.num_events,
-        
+        num_events=params.num_events,
     )
     return model
 
@@ -946,7 +952,7 @@ def compute_loss(
     y = sp.encode(texts, out_type=int)
     y = k2.RaggedTensor(y)
     
-    at_targets = batch["at_targets"]
+    at_targets = batch["at_targets"] if params.do_audio_tagging else None
     if at_targets is not None:
         at_targets = at_targets.to(device)
     
@@ -1000,9 +1006,10 @@ def compute_loss(
             ctc_loss = (ctc_loss * asr_mask).sum()
             loss += params.ctc_loss_scale * ctc_loss
         
-        at_mask = task_ids == 2
-        audio_tagging_loss = (audio_tagging_loss * at_mask).sum()
-        loss += params.audio_tagging_loss_scale * audio_tagging_loss
+        if params.do_audio_tagging:
+            at_mask = task_ids == 2
+            audio_tagging_loss = (audio_tagging_loss * at_mask).sum()
+            loss += params.audio_tagging_loss_scale * audio_tagging_loss
 
     assert loss.requires_grad == is_training
 
@@ -1019,7 +1026,8 @@ def compute_loss(
         info["pruned_loss"] = pruned_loss.detach().cpu().item()
     if params.use_ctc:
         info["ctc_loss"] = ctc_loss.detach().cpu().item()
-    info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
+    if params.do_audio_tagging:
+        info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1464,7 +1472,7 @@ def run(rank, world_size, args):
     asr_training_cuts_duration = sum(asr_training_cuts_duration)
     
     # audio data
-    train_cuts["cuts_audioset"] = asr_training_cuts
+    train_cuts["cuts_asr"] = asr_training_cuts
     train_cuts_duration.append(asr_training_cuts_duration)
 
     if params.use_audioset and params.do_audio_tagging:
@@ -1485,6 +1493,7 @@ def run(rank, world_size, args):
         train_cuts_duration.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
         
     assert len(train_cuts) >= 1, "At least one task should be done!"
+    logging.info(train_cuts)
 
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
@@ -1526,6 +1535,24 @@ def run(rank, world_size, args):
     if not params.at_weighted_sampler:
         for k, cuts in train_cuts.items():
             train_cuts[k] = cuts.filter(remove_short_and_long_utt)
+            
+    # Combine the ASR and audio data together
+    if params.bucketing_sampler:
+        assert params.zip_sampler == False
+        train_cuts = [item[1] for item in train_cuts.items()]
+        if len(train_cuts) > 1:
+            logging.info(f"Using mux to combine data")
+            logging.info(f"Training cuts: {train_cuts}")
+            train_cuts_lens = [sum(asr_training_cuts_lens), num_audio_cuts] 
+            logging.info(f"Training cuts lens: {train_cuts_lens}")
+            train_cuts = CutSet.mux(
+                *train_cuts,
+                weights=train_cuts_lens,
+                stop_early=params.stop_early,
+            )
+        else:
+            train_cuts = train_cuts[0]
+        assert isinstance(train_cuts, CutSet), type(train_cuts)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1544,13 +1571,16 @@ def run(rank, world_size, args):
     )
 
     # TODO: add more validation sets
+    valid_sets = []
+    valid_dls = []
+    
     valid_cuts = librispeech.dev_clean_cuts()
     valid_cuts += librispeech.dev_other_cuts()
-
-    valid_sets = ["librispeech"]
-    valid_dls = [
+    valid_cuts = valid_cuts.map(partial(_add_task_id, 1))
+    valid_sets.append("librispeech")
+    valid_dls.append(
         librispeech.valid_dataloaders(valid_cuts, world_size=world_size, rank=rank),
-    ]
+    )
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:

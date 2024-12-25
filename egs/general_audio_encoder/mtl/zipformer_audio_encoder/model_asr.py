@@ -494,7 +494,7 @@ class MultiTaskModel(nn.Module):
             targets=targets,
             input_lengths=encoder_out_lens,
             target_lengths=target_lengths,
-            reduction="sum",
+            reduction="none",
         )
         return ctc_loss
 
@@ -567,7 +567,7 @@ class MultiTaskModel(nn.Module):
                 lm_only_scale=lm_scale,
                 am_only_scale=am_scale,
                 boundary=boundary,
-                reduction="sum",
+                reduction="none",
                 return_grad=True,
             )
 
@@ -600,7 +600,7 @@ class MultiTaskModel(nn.Module):
                 ranges=ranges,
                 termination_symbol=blank_id,
                 boundary=boundary,
-                reduction="sum",
+                reduction="none",
             )
 
         return simple_loss, pruned_loss
