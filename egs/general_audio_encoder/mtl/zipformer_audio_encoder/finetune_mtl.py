@@ -119,12 +119,15 @@ def get_adjusted_batch_count(params: AttributeDict) -> float:
     # returns the number of batches we would have used so far if we had used the reference
     # duration.  This is for purposes of set_batch_count().
     # Note that we add a very large constant here to make the ScheduledFloat
-    # variable as their end value.
-    return (
+    # variable as their end value.    
+    batch_count = (
         params.batch_idx_train
         * (params.max_duration * params.world_size)
         / params.ref_duration
-    ) + 100000
+    )
+    if params.large_batch_count:
+        batch_count += 100000
+    return batch_count
 
 
 def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
@@ -188,7 +191,7 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         "--freeze-encoder-steps",
         type=int,
         default=-1,
-        help="For this number of steps, freeze the encoder. If set, freeze-encoder cannot be true"
+        help="For this number of steps, freeze the encoder. If set, freeze-encoder cannot be true; -1 means not freezing"
     )
     
     parser.add_argument(
@@ -421,6 +424,26 @@ def get_parser():
         default=0.0045,
         help="""The base learning rate.
         It is set to a very small value as we are doing fine-tuning""",
+    )
+    
+    parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.5,
+        help="The initial value of warmup, between 0 and 1"
+    )
+    
+    parser.add_argument(
+        "--warmup-batches",
+        type=float,
+        default=500.0,
+        help="The number of batches for lr warmup"
+    )
+    
+    parser.add_argument(
+        "--large-batch-count",
+        type=str2bool,
+        default=True,
     )
 
     parser.add_argument(
@@ -1373,7 +1396,13 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs)
+    scheduler = Eden(
+        optimizer,
+        params.lr_batches,
+        params.lr_epochs,
+        warmup_batches=params.warmup_batches,
+        warmup_start=params.warmup_start,
+    )
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
