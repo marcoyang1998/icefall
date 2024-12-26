@@ -236,6 +236,12 @@ class MultiTaskDataModule:
             help="When enabled, select noise from MUSAN and mix it"
             "with training dataset. ",
         )
+        
+        group.add_argument(
+            "--time-mask-ratio",
+            type=float,
+            default=1.0,
+        )
 
         group.add_argument(
             "--input-strategy",
@@ -420,7 +426,12 @@ class MultiTaskDataModule:
             ).parameters["num_frame_masks"]
             if num_frame_masks_parameter.default == 1:
                 num_frame_masks = 2
-            logging.info(f"Num frame mask: {num_frame_masks}")
+            num_frame_masks = int(10 * self.args.time_mask_ratio)
+            max_frames_mask_fraction = 0.15 * self.args.time_mask_ratio
+            logging.info(
+                f"num_frame_masks: {num_frame_masks}, "
+                f"max_frames_mask_fraction: {max_frames_mask_fraction}"
+            )
             input_transforms.append(
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
@@ -507,8 +518,8 @@ class MultiTaskDataModule:
                         buffer_size=self.args.num_buckets * 1500,
                         shuffle_buffer_size=self.args.num_buckets * 1500,
                         drop_last=self.args.drop_last,
-                        world_size=world_size,
-                        rank=rank,
+                        # world_size=world_size,
+                        # rank=rank,
                     )
                 else:
                     if self.args.at_weighted_sampler:
@@ -520,8 +531,6 @@ class MultiTaskDataModule:
                             max_duration=md,
                             shuffle=False,  # do not support shuffle
                             drop_last=self.args.drop_last,
-                            world_size=world_size,
-                            rank=rank,
                         )
                     else:
                         sampler = DynamicBucketingSampler(
@@ -532,8 +541,6 @@ class MultiTaskDataModule:
                             buffer_size=10000,
                             shuffle_buffer_size=10000,
                             drop_last=self.args.drop_last,
-                            world_size=world_size,
-                            rank=rank,
                         )
                     
                 samplers.append(sampler)
@@ -548,8 +555,8 @@ class MultiTaskDataModule:
                 cuts_train,
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
-                world_size=world_size,
-                rank=rank,
+                # world_size=world_size,
+                # rank=rank,
             )
         logging.info("About to create train dataloader")
 
@@ -574,18 +581,19 @@ class MultiTaskDataModule:
         else:
             from lhotse.dataset.iterable_dataset import IterableDatasetWrapper
             logging.info("Wrapping the dataset and sampler to an iterable")
+            
+            train_sampler.world_size = 1
+            train_sampler.rank = 0
+            
             train_iter_dataset = IterableDatasetWrapper(
                 dataset=train,
                 sampler=train_sampler,
             )
+            
             train_dl = DataLoader(
                 train_iter_dataset,
                 batch_size=None,
-                # For faster dataloading, use num_workers > 1
                 num_workers=self.args.num_workers,
-                # Note: Lhotse offers its own "worker_init_fn" that helps properly
-                #       set the random seeds in all workers (also with multi-node training)
-                #       and randomizes the shard order across different workers.
                 worker_init_fn=make_worker_init_fn(seed=0),
             )
 
@@ -709,6 +717,7 @@ class MultiTaskDataModule:
                 in_dir=f"{str(self.args.shar_dir)}/librispeech/train-all-shuf",
                 shuffle_shards=True,
                 stateful_shuffle=True,
+                seed="randomized",
             ).repeat()
         else:
             return load_manifest_lazy(
@@ -759,24 +768,32 @@ class MultiTaskDataModule:
     def gigaspeech_train_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech training cuts")
         gigaspeech_list = ["xs", "s", "m", "l", "xl"]
+        durations = [10, 240, 750, 1500, 7500]
         assert self.args.gigaspeech_subset in gigaspeech_list, self.args.gigaspeech_subset
         
         all_cuts = CutSet()
-        for subset in gigaspeech_list:
+        all_cuts = []
+        weights = []
+        for i, subset in enumerate(gigaspeech_list):
             logging.info(f"Loading gigaspeech cuts subset: {subset}")
+            weights.append(durations[i])
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
                     in_dir=f"{str(self.args.shar_dir)}/gigaspeech/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
-                )
+                    seed="randomized",
+                ).repeat()
             else:
                 cuts = load_manifest_lazy(self.args.manifest_dir / f"gigaspeech_cuts_{subset}.jsonl.gz")
-            all_cuts += cuts
+            all_cuts.append(cuts)
             if self.args.gigaspeech_subset == subset:
                 break
-        if self.args.use_shar:
-            all_cuts = all_cuts.repeat()
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=weights,
+            stop_early=False,
+        )
         
         return all_cuts
 
@@ -798,6 +815,7 @@ class MultiTaskDataModule:
                 in_dir=f"{str(self.args.shar_dir)}/libriheavy/{self.args.libriheavy_subset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
+                seed="randomized",
             ).repeat()
         else:
             return load_manifest_lazy(
@@ -815,6 +833,7 @@ class MultiTaskDataModule:
                     in_dir=f"{str(self.args.shar_dir)}/wenetspeech/L/split_{i}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
+                    seed="randomized",
                 )
                 all_cuts += cuts
             return all_cuts.repeat()
@@ -849,6 +868,7 @@ class MultiTaskDataModule:
                         in_dir=f"{str(self.args.shar_dir)}/audioset/full",
                         shuffle_shards=True,
                         stateful_shuffle=True,
+                        seed="randomized",
                     ).repeat()
                 else:
                     cuts = load_manifest_lazy(
@@ -865,6 +885,7 @@ class MultiTaskDataModule:
                     in_dir=f"{str(self.args.shar_dir)}/audioset/{self.args.audioset_subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
+                    seed="randomized",
                 ).repeat()
             else:
                 cuts = load_manifest_lazy(

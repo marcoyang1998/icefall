@@ -888,17 +888,6 @@ def compute_loss(
 
     supervisions = batch["supervisions"]
     cuts = supervisions["cut"]
-    if random.random() < 0.02:
-        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
-        unique_origin = set(shard_origin)
-        count = {orig: 0 for orig in unique_origin}
-        for sh in shard_origin:
-            count[sh] += 1
-        logging.info(count)
-    if random.random() < 0.01:
-        shard_epoch = [int(c.shar_epoch) for c in cuts]
-        max_epoch = max(shard_epoch)
-        logging.info(f"Estimated epoch is {max_epoch}")
         
     feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
@@ -1070,39 +1059,23 @@ def train_one_epoch(
     
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
-        cut_ids = [c.id.rsplit("_", 1)[0] for c in cuts]
         
-        if random.random() < 1.0:
-            shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
-            unique_origin = set(shard_origin)
-            count = {orig: 0 for orig in unique_origin}
-            for sh in shard_origin:
-                count[sh] += 1
-                if sh in shard_count:
-                    shard_count[sh] += 1
-                else:
-                    shard_count[sh] = 1
-            logging.info(count)
-        if random.random() < 1.0:
+        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
+        unique_origin = set(shard_origin)
+        count = {orig: 0 for orig in unique_origin}
+        for sh in shard_origin:
+            count[sh] += 1
+            if sh in shard_count:
+                shard_count[sh] += 1
+            else:
+                shard_count[sh] = 1
+            
+        if batch_idx % 1000 == 1:
             shard_epoch = [int(c.shar_epoch) for c in cuts]
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
-        if batch_idx % 100 == 1:
+            logging.info(count)
             logging.info(f"Cuts stats: {shard_count}")
-            
-        
-        # for id in cut_ids:
-        #     if id in asr_count:
-        #         asr_count[id] += 1
-        #     else:
-        #         asr_count[id] = 1
-        # if batch_idx % 200 == 1:
-        #     import pdb; pdb.set_trace()
-        #     print(len([k for k in asr_count if "wav" not in k]))
-        #     print(len(asr_count))
-        
-        continue
-        
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1209,7 +1182,7 @@ def train_one_epoch(
                         "train/grad_scale", cur_grad_scale, params.batch_idx_train
                     )
 
-        if params.batch_idx_train % params.valid_interval == 0 and not params.print_diagnostics:
+        if params.batch_idx_train % params.valid_interval == 1 and not params.print_diagnostics:
             for valid_set, valid_dl in zip(valid_sets, valid_dls):
                 logging.info("Computing validation loss")
                 valid_info = compute_validation_loss(
@@ -1416,7 +1389,7 @@ def run(rank, world_size, args):
         asr_training_cuts = CutSet.mux(
             *asr_training_cuts,
             weights=asr_training_cuts_lens,
-            stop_early=True,
+            stop_early=False,
         )
     else:
         asr_training_cuts = asr_training_cuts[0]
@@ -1495,7 +1468,7 @@ def run(rank, world_size, args):
         sampler_state_dict = None
 
     train_dl = librispeech.train_dataloaders(
-        train_cuts, 
+        train_cuts,
         sampler_state_dict=sampler_state_dict, 
         sampling_weight=train_cuts_duration, 
         world_size=world_size,
