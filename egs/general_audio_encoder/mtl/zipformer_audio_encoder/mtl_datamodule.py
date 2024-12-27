@@ -260,6 +260,18 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--use-libriheavy",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--libriheavy-subset",
+            type=str,
+            default="medium",
+        )
+        
+        group.add_argument(
             "--use-wenetspeech",
             type=str2bool,
             default=False,
@@ -740,7 +752,7 @@ class MultiTaskDataModule:
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get {self.args.libriheavy_subset} subset cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / f"libriheavy_cuts_${self.args.libriheavy_subset}.jsonl.gz"
+            self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
         )
     
     @lru_cache()

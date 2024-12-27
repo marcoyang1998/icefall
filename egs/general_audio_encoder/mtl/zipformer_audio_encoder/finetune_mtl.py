@@ -107,6 +107,7 @@ from icefall.utils import (
 )
 from utils import (
     compare_model,
+    upper_only_alpha,
     MetricsTracker,
     _add_task_id,
     setup_distributed,   
@@ -1365,11 +1366,14 @@ def run(rank, world_size, args):
             compare_model(model.state_dict(), model_avg.state_dict())
             model_avg = copy.deepcopy(model).to(torch.float64)
     else:
-        # resuming training
-        assert params.start_epoch > 1, params.start_epoch
-        checkpoints = load_checkpoint_if_available(
-            params=params, model=model, model_avg=model_avg
-        )
+        if params.start_epoch > 1:
+            # resuming training
+            checkpoints = load_checkpoint_if_available(
+                params=params, model=model, model_avg=model_avg
+            )
+        else:
+            # training from scratch
+            checkpoints =None
 
     # Setting the encoder lr scale
     logging.info(f"Setting the lr scale of parameters in encoder and encoder_embed to {params.encoder_lr_scale}")
@@ -1470,6 +1474,22 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
         asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
         
+    if params.use_libriheavy:
+        libriheavy_cuts = librispeech.libriheavy_train_cuts()
+        libriheavy_cuts = libriheavy_cuts.map(upper_only_alpha)
+        libriheavy_cuts_len = {
+            "small": 122512 * 0.8, # 122512
+            "medium": 1050000 * 0.8, # 1093040
+        }
+        libriheavy_cuts_duration = {
+            "small": 500 * 0.8,
+            "medium": 4154 * 0.8,
+        }
+        libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(libriheavy_cuts)
+        asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
+        asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
+    
     if params.use_wenetspeech:
         wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
         wenetspeech_cuts_len = {

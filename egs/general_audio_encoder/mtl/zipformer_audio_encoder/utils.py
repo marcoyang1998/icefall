@@ -1,6 +1,7 @@
 import logging
 import collections
 import os
+import re
 from typing import List, Tuple
 from lhotse.array import Array, TemporalArray
 
@@ -8,14 +9,32 @@ import torch
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 
+def remove_non_alphabetic(text: str, strict: bool = True) -> str:
+    # Recommend to set strict to False
+    if not strict:
+        # Note, this also keeps space, single quote(')
+        text = text.replace("-", " ")
+        text = text.replace("—", " ")
+        return re.sub(r"[^a-zA-Z0-9\s']+", "", text)
+    else:
+        # only keeps space
+        return re.sub(r"[^a-zA-Z\s]+", "", text)
+
+
+def upper_only_alpha(c):
+    text = c.supervisions[0].text
+    text = remove_non_alphabetic(text.upper(), strict=False)
+    c.supervisions[0].text = text
+    return c
+
 def setup_distributed():
     """Setup distributed training environment."""
     dist.init_process_group(
-        backend="nccl",  # 推荐 NCCL 后端
-        init_method="env://",  # 使用环境变量设置
+        backend="nccl",
+        init_method="env://",
     )
     rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(rank)  # 当前进程绑定到对应的 GPU
+    torch.cuda.set_device(rank)
     return rank
 
 def add_dummy_text(c):
