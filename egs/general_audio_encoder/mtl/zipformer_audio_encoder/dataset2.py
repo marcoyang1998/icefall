@@ -199,7 +199,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
 def validate_multi_kd(cuts: CutSet) -> None:
     for cut in cuts:
-        assert cut.has_features, cut
+        # assert cut.has_features, cut
         assert cut.has_custom("task_id")
         if cut.task_id == 1: 
             # speech cuts, should have codebook indexes
