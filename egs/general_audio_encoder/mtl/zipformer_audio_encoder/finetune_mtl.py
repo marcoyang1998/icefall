@@ -1623,13 +1623,22 @@ def run(rank, world_size, args):
     valid_sets = []
     valid_dls = []
     
-    valid_cuts = librispeech.dev_clean_cuts()
-    valid_cuts += librispeech.dev_other_cuts()
-    valid_cuts = valid_cuts.map(partial(_add_task_id, 1))
-    valid_sets.append("librispeech")
-    valid_dls.append(
-        librispeech.valid_dataloaders(valid_cuts, world_size=world_size, rank=rank),
-    )
+    if params.use_librispeech:
+        valid_cuts = librispeech.dev_clean_cuts()
+        valid_cuts += librispeech.dev_other_cuts()
+        valid_cuts = valid_cuts.map(partial(_add_task_id, 1))
+        valid_sets.append("librispeech")
+        valid_dls.append(
+            librispeech.valid_dataloaders(valid_cuts, world_size=world_size, rank=rank),
+        )
+    
+    if params.use_gigaspeech:
+        giga_dev_cuts = librispeech.gigaspeech_dev_cuts()
+        giga_dev_cuts = giga_dev_cuts.map(partial(_add_task_id, 1))
+        asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("gigaspeech")
+        valid_dls.append(asr_giga_valid_dl)
+        
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
