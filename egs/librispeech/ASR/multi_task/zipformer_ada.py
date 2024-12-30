@@ -40,6 +40,8 @@ from scaling import (
     Dropout2,
     FloatLike,
     ScheduledFloat,
+    SwooshL,
+    SwooshR,
     Whiten,
     convert_num_channels,
     limit_param_value,
@@ -128,6 +130,9 @@ class Zipformer2(EncoderInterface):
         memory_dim: int = -1,
         memory_dropout_rate: float = 0.05,
         memory_layer: int = 0,
+        use_adapters: bool = False,
+        adapter_dim: int = 16,
+        num_tasks: int = 2,
     ) -> None:
         super(Zipformer2, self).__init__()
 
@@ -165,6 +170,9 @@ class Zipformer2(EncoderInterface):
         self.left_context_frames = left_context_frames
         self.memory_dropout_rate = memory_dropout_rate
         self.memory_layer = memory_layer
+        
+        # adapter related
+        self.use_adapters = use_adapters
 
         for u, d in zip(encoder_unmasked_dim, encoder_dim):
             assert u <= d
@@ -186,6 +194,9 @@ class Zipformer2(EncoderInterface):
                 dropout=dropout,
                 cnn_module_kernel=cnn_module_kernel[i],
                 causal=causal,
+                use_adapters=use_adapters,
+                adapter_dim=adapter_dim,
+                num_tasks=num_tasks,
             )
 
             # For the segment of the warmup period, we let the Conv2dSubsampling
@@ -585,6 +596,8 @@ class Zipformer2EncoderLayer(nn.Module):
         feedforward_dim: the dimension of the feedforward network model (default=2048).
         dropout: the dropout value (default=0.1).
         cnn_module_kernel (int): Kernel size of convolution module.
+        use_adapters: insert adapters in each layer
+        adapter_dim: the bottleneck dimension of the adapter
 
     Examples::
         >>> encoder_layer = Zipformer2EncoderLayer(embed_dim=512, nhead=8)
@@ -624,6 +637,9 @@ class Zipformer2EncoderLayer(nn.Module):
         bypass_skip_rate: FloatLike = ScheduledFloat(
             (0.0, 0.5), (4000.0, 0.02), default=0
         ),
+        use_adapters: bool = False,
+        adapter_dim: int = 16,
+        num_tasks: int = 2,
     ) -> None:
         super(Zipformer2EncoderLayer, self).__init__()
         self.embed_dim = embed_dim
@@ -762,6 +778,44 @@ class Zipformer2EncoderLayer(nn.Module):
             min_abs=0.1,
             max_abs=4.0,
         )
+        
+        self.use_adapters = use_adapters
+        if use_adapters:
+            # for weighting output of the MultiAdapter
+            self.num_tasks = num_tasks
+            self.adapter_weights = nn.Linear(embed_dim, self.num_tasks)
+            
+            self.mid_adapter = MultiAdapter(
+                embed_dim=embed_dim,
+                bottleneck_dim=adapter_dim,
+                num_adapters=self.num_tasks,
+            )
+
+            # placed after the 1st self-attn module
+            self.post_sa_adapter = MultiAdapter(
+                embed_dim=embed_dim,
+                bottleneck_dim=adapter_dim,
+                num_adapters=self.num_tasks,
+            )
+
+            # placed after the 2nd convolution module
+            self.post_conv_adapter = MultiAdapter(
+                embed_dim=embed_dim,
+                bottleneck_dim=adapter_dim,
+                num_adapters=self.num_tasks,
+            )
+
+            # at the end of each layer
+            self.adapter = MultiAdapter(
+                embed_dim=embed_dim,
+                bottleneck_dim=adapter_dim,
+                num_adapters=self.num_tasks,
+            )
+        else:
+            self.mid_adapter = None
+            self.post_sa_adapter = None
+            self.post_conv_adapter = None
+            self.adapter = None
 
     def get_bypass_scale(self, batch_size: int):
         # returns bypass-scale of shape (num_channels,),
@@ -882,6 +936,15 @@ class Zipformer2EncoderLayer(nn.Module):
                 self.memory_balancer(self.src_attn1(memory, src_attn_weights)),
                 attention_skip_rate,
             )
+            
+        if self.use_adapters:
+            adapter_weight = self.adapter_weights(src) # (T,N,num_tasks)
+            adapter_weight = adapter_weight.softmax(dim=-1)
+            if random.random() < 0.005 and not self.training:
+                logging.info(f"Adapter weights: {adapter_weight.mean(dim=(0,1))}")
+            
+        if self.use_adapters and self.post_sa_adapter is not None:
+            src = self.post_sa_adapter(src, adapter_weight)
 
         src = src + self.sequence_dropout(
             self.conv_module1(
@@ -896,6 +959,9 @@ class Zipformer2EncoderLayer(nn.Module):
 
         # bypass in the middle of the layer.
         src = self.bypass_mid(src_orig, src)
+        
+        if self.use_adapters and self.mid_adapter is not None:
+            src = self.mid_adapter(src, adapter_weight)
 
         self_attn = self.self_attn2(src, attn_weights)
 
@@ -915,6 +981,9 @@ class Zipformer2EncoderLayer(nn.Module):
             ),
             float(self.conv_skip_rate),
         )
+        
+        if self.use_adapters and self.post_conv_adapter is not None:
+            src = self.post_conv_adapter(src, adapter_weight)
 
         src = src + self.sequence_dropout(
             self.balancer_ff3(self.feed_forward3(src)), float(self.ff3_skip_rate)
@@ -927,6 +996,9 @@ class Zipformer2EncoderLayer(nn.Module):
 
         src = self.balancer2(src)
         src = self.whiten(src)
+        
+        if self.use_adapters and self.adapter is not None:
+            src = self.adapter(src, adapter_weight)
 
         return src
 
@@ -2260,6 +2332,62 @@ class ConvolutionModule(nn.Module):
 
         return x, cache
 
+class AdapterModule(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int = 384,
+        bottleneck_dim: int = 16,
+    ):
+        # The simplest adapter
+        super(AdapterModule, self).__init__()
+        self.embed_dim = embed_dim
+        self.bottleneck_dim = bottleneck_dim
+        self.activation = SwooshL()
+
+        self.in_proj = nn.Linear(embed_dim, bottleneck_dim)
+        self.out_proj = nn.Linear(bottleneck_dim, embed_dim)
+
+    def forward_adapter(self, x):
+        x = self.activation(self.in_proj(x))
+        x = self.out_proj(x)
+        return x
+    
+    def forward(self, x):
+        x_orig = x
+        x = self.forward_adapter(x)
+        return x_orig + x
+    
+class MultiAdapter(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int=384,
+        bottleneck_dim: int = 16,
+        num_adapters: int = 2,
+    ):
+        # A few adapters running in parallel, the output of each adapter will be weighted combined
+        # and added to the input
+        super(MultiAdapter, self).__init__()
+        self.adapters = nn.ModuleList()
+        for i in range(num_adapters):
+            adapter = AdapterModule(
+                embed_dim, bottleneck_dim,
+            )
+            self.adapters.append(adapter)
+        self.num_adapters = num_adapters
+        
+    def forward(self, x, weight=None):
+        # weight: (seq_len, N, num_adapters), a frame-wise weight for adapters
+        x_orig = x
+        if weight is None:
+            L, N, _ = x.shape
+            weight = torch.ones(L,N,self.num_adapters).to(x.device) / self.num_adapters
+        outputs = []
+        for i, m in enumerate(self.adapters):
+            outputs.append(weight[...,i].unsqueeze(-1) * m.forward_adapter(x))
+        outputs = sum(outputs)
+        
+        return x_orig + outputs
+        
 
 class ScalarMultiply(nn.Module):
     def __init__(self, scale: float):
