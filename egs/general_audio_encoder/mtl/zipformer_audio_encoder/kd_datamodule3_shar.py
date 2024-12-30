@@ -827,16 +827,23 @@ class MultiTaskDataModule:
         logging.info(f"About to get wenetspeech {self.args.wenetspeech_subset} cuts")
         if self.args.use_shar:
             num_splits = 10
-            all_cuts = CutSet()
+            all_cuts = []
             for i in range(num_splits):
+                split_dir = f"{str(self.args.shar_dir)}/wenetspeech/L/split_{i}"
+                logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/wenetspeech/L/split_{i}",
+                    in_dir=split_dir,
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
-                )
-                all_cuts += cuts
-            return all_cuts.repeat()
+                ).repeat()
+                cuts = cuts.resample(16000)
+                all_cuts.append(cuts)
+            return CutSet.mux(
+                *all_cuts,
+                weights=[1.0] * num_splits,
+                stop_early=False,
+            )
         else:
             cuts_train = load_manifest_lazy(
                 self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"

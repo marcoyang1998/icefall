@@ -892,7 +892,7 @@ def compute_loss(
     feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
     
-    if random.random() < 0.2 and is_training:
+    if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
             duration = sum([c.duration for c in cuts if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
@@ -1075,7 +1075,7 @@ def train_one_epoch(
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
             logging.info(count)
-            logging.info(f"Cuts stats: {shard_count}")
+            logging.info(f"Batch {batch_idx}: Cuts stats: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(

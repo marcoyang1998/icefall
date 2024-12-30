@@ -40,12 +40,12 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
     log "Processing audioset"
     shar_dir=${root_shar_dir}/audioset
     mkdir -p $shar_dir
-    for subset in balanced full; do
+    for subset in eval; do
         mkdir -p $shar_dir/$subset
         manifest=data/fbank_as_ced_mAP50/audioset_cuts_${subset}.jsonl.gz
         if [ ! -f $shar_dir/.shar.$subset.complete ]; then
             log "Start exporting audioset ${subset}"
-            lhotse shar export -j 8 \
+            lhotse shar export -j 2 \
                 --audio wav \
                 -c beats_embedding:numpy \
                 $manifest \
@@ -59,7 +59,7 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
     log "Processing GigaSpeech"
     shar_dir=${root_shar_dir}/gigaspeech
     mkdir -p $shar_dir
-    for subset in xs dev test s m l xl; do
+    for subset in xl; do
         manifest=$fbank_dir/gigaspeech_cuts_${subset}.jsonl.gz
         if [ ! -f $shar_dir/.shar.$subset.complete ]; then
             log "Start exporting gigaspeech ${subset}"
@@ -77,7 +77,7 @@ if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
     log "Processing Libriheavy"
     shar_dir=${root_shar_dir}/libriheavy
     mkdir -p $shar_dir
-    for subset in small medium; do
+    for subset in medium; do
         manifest=$fbank_dir/libriheavy_cuts_${subset}.jsonl.gz
         if [ ! -f $shar_dir/.shar.$subset.complete ]; then
             log "Start exporting libriheavy ${subset}"
@@ -97,14 +97,13 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
     mkdir -p $shar_dir
     
     subset=L
-
-    for n in $(seq 0 1 9); do
+    for n in 1; do 
         # manifest=$fbank_dir/wenetspeech_cuts_${subset}.jsonl.gz
         manifest=$fbank_dir/wenetspeech_L_split/wenetspeech_cuts_L.${n}.processed.jsonl.gz
         if [ ! -f $shar_dir/.shar.${subset}.${n}.complete ]; then
             log "Start exporting wenetspeech ${subset} split ${n}"
-            lhotse shar export -j 8 \
-                --audio flac \
+            lhotse shar export -j 4 \
+                --audio original \
                 -c codebook_indexes:numpy \
                 $manifest \
                 $shar_dir/$subset/split_${n}
