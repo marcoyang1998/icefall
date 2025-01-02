@@ -932,16 +932,28 @@ class Zipformer2EncoderLayer(nn.Module):
         )
 
         if memory is not None and hasattr(self, "attn_weights"):
+            cross_attn = self.memory_balancer(self.src_attn1(memory, src_attn_weights)) # (T,B,C)
             src = src + self.sequence_dropout(
-                self.memory_balancer(self.src_attn1(memory, src_attn_weights)),
+                cross_attn,
                 attention_skip_rate,
             )
+        else:
+            cross_attn = None
             
-        if self.use_adapters:
-            adapter_weight = self.adapter_weights(src) # (T,N,num_tasks)
+        if self.use_adapters and cross_attn is not None:
+            L, N, _ = cross_attn.shape
+            memory_dropout_mask = memory[0,:, 0] == 0.0
+            adapter_mask = torch.ones(L, N, 1).to(cross_attn.device)
+            adapter_mask[:, memory_dropout_mask, :] = 0.0
+            adapter_weight = self.adapter_weights(cross_attn) # (T,N,num_tasks)
+            adapter_weight = adapter_weight * adapter_mask
             adapter_weight = adapter_weight.softmax(dim=-1)
+            # adapter_weight.maked_fill_(memory_dropout_mask.unsqueeze(0).unsqueeze(-1), )
+            # adapter_weight[:, memory_dropout_mask, :] = 1 / self.num_tasks
             if random.random() < 0.005 and not self.training:
                 logging.info(f"Adapter weights: {adapter_weight.mean(dim=(0,1))}")
+        else:
+            adapter_weight = None
             
         if self.use_adapters and self.post_sa_adapter is not None:
             src = self.post_sa_adapter(src, adapter_weight)
@@ -2374,17 +2386,24 @@ class MultiAdapter(nn.Module):
             )
             self.adapters.append(adapter)
         self.num_adapters = num_adapters
+        self.history_weight = 0.0
+        self.history_count = 0
         
     def forward(self, x, weight=None):
         # weight: (seq_len, N, num_adapters), a frame-wise weight for adapters
         x_orig = x
+        L, N, _ = x.shape
         if weight is None:
-            L, N, _ = x.shape
             weight = torch.ones(L,N,self.num_adapters).to(x.device) / self.num_adapters
         outputs = []
         for i, m in enumerate(self.adapters):
             outputs.append(weight[...,i].unsqueeze(-1) * m.forward_adapter(x))
         outputs = sum(outputs)
+        
+        if not self.training:
+            self.history_weight = self.history_weight * self.history_count + weight.sum(dim=(0,1))
+            self.history_weight /= (self.history_count + N * L)
+            self.history_count += N * L
         
         return x_orig + outputs
         

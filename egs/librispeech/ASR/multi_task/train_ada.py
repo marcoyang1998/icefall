@@ -87,7 +87,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils import _add_dummy_embeddings_and_taskIDs, MetricsTracker
 
-from zipformer_ada2 import Zipformer2
+from zipformer_ada import Zipformer2
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
