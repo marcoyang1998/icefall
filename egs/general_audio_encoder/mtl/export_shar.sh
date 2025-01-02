@@ -77,7 +77,7 @@ if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
     log "Processing Libriheavy"
     shar_dir=${root_shar_dir}/libriheavy
     mkdir -p $shar_dir
-    for subset in medium; do
+    for subset in medium large; do
         manifest=$fbank_dir/libriheavy_cuts_${subset}.jsonl.gz
         if [ ! -f $shar_dir/.shar.$subset.complete ]; then
             log "Start exporting libriheavy ${subset}"
