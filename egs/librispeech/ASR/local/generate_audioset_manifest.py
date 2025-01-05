@@ -48,6 +48,12 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--compute-fbank",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
         "--feat-output-dir",
         type=str,
         default="data/fbank_audioset",
@@ -69,13 +75,13 @@ def main():
     if split in ["balanced", "unbalanced"]:
         csv_file = "download/audioset/full_train_asedata_with_duration.csv"
     elif split == "eval":
-        csv_file = "download/audioset/eval.csv"
+        csv_file = "download/audioset/eval_all.csv"
     else:
         raise ValueError()
 
     labels = parse_csv(csv_file)
 
-    audio_files = glob.glob(f"{dataset_dir}/{split}/*.wav")
+    audio_files = glob.glob(f"{dataset_dir}/{split}/wav_all/*.wav")
     
     new_cuts = []
     for i, audio in enumerate(audio_files):
@@ -108,6 +114,10 @@ def main():
 
     cuts = CutSet.from_cuts(new_cuts)
 
+    if not args.compute_fbank:
+        manifest_output_dir = feat_output_dir + "/" + f"cuts_audioset_{split}.jsonl.gz"
+        cuts.to_jsonl(manifest_output_dir)
+        
     extractor = Fbank(FbankConfig(num_mel_bins=num_mel_bins))
 
     logging.info(f"Computing fbank features for {split}")

@@ -49,7 +49,7 @@ def compute_fbank_musan():
     src_dir = Path("data/manifests")
     output_dir = Path("data/fbank")
     num_jobs = min(15, os.cpu_count())
-    num_mel_bins = 80
+    num_mel_bins = 128
 
     dataset_parts = (
         "music",

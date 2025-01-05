@@ -178,7 +178,16 @@ def extract_embeddings(
                 layer_idx=params.embedding_layer # which layer's embedding to be stored
             )
             
-            codebook_indexes = quantizer.encode(embeddings) # [N, T, C]
+            # codebook_indexes = quantizer.encode(embeddings) # [N, T, C]
+            N,T,C = embeddings.shape
+            embeddings = embeddings.reshape(-1, C)
+            B = 2000
+            splits = embeddings.split(B)
+            codebook_indexes = []
+            for chunk in splits:
+                chunk_indexes = quantizer.encode(chunk)
+                codebook_indexes.append(chunk_indexes)
+            codebook_indexes = torch.cat(codebook_indexes).reshape(N,T,params.num_codebooks)
             codebook_indexes = codebook_indexes.to("cpu").numpy()
             assert np.min(codebook_indexes) >= 0
             assert np.max(codebook_indexes) < 256
@@ -199,6 +208,7 @@ def extract_embeddings(
                 num_cuts += 1
                 if num_cuts and num_cuts % 100 == 0:
                     logging.info(f"Cuts processed until now: {num_cuts}")
+                    # torch.cuda.empty_cache()
                 
     logging.info(f"Finished extracting Whisper codebook indexes, processed a total of {num_cuts} cuts.")
                 
@@ -222,10 +232,15 @@ def join_manifests(
         ori_cut.codebook_indexes = embed_cut.codebook_indexes
     
     input_cuts.to_jsonl(output_dir)
-    print(f"Saved the joined manifest to {output_dir}")
+    logging.info(f"Saved the joined manifest to {output_dir}")
     
 def remove_short_and_long_utt(c):
-    if c.duration < 1.0 or c.duration > 30.0:
+    if c.duration < 1.0 or c.duration > 24.0:
+        return False
+    return True
+
+def remove_sp(c):
+    if "sp0.9" in c.id or "sp1.1" in c.id:
         return False
     return True
 
@@ -240,9 +255,12 @@ if __name__=="__main__":
     params.embedding_dir = Path(params.embedding_dir)
     
     nj = params.num_jobs
+    print(f"Start loading manifest")
     cuts = load_manifest(params.input_manifest)
     cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
+    cuts = cuts.filter(remove_sp) # remove speed perturb
     print(f"Finished loading manifest")
+    print(cuts)
     
     embedding_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
     
@@ -255,12 +273,12 @@ if __name__=="__main__":
             )
         else:
             splitted_cuts = cuts.split(num_splits=nj)
-            print(f"Finished splitting manifest")
+            logging.info(f"Finished splitting manifest")
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
             manifests =  f"{str(params.embedding_dir)}/whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-*.jsonl.gz"
             os.system(f"lhotse combine {manifests} {embedding_manifest}")
     else:
-        print(f"Skip embedding extraction: the manifest is already generated.")
+        logging.info(f"Skip embedding extraction: the manifest is already generated.")
     
     output_manifest = params.target_manifest_file
     if not os.path.exists(output_manifest):
