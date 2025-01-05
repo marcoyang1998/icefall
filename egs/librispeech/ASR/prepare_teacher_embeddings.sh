@@ -41,6 +41,7 @@ fi
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     log "Stage 1: Compute fbank for audioset and generate manifest"
+    mkdir -p data/fbank_audioset
     if [ ! -e data/fbank_audioset/.audioset.done ]; then
         for split in balanced unbalanced eval; do
             python ./local/generate_audioset_manifest.py \

@@ -4,7 +4,6 @@ import os
 import logging
 from pathlib import Path
 
-from kd_datamodule import LibriSpeechKDDataModule
 from icefall.utils import AttributeDict, setup_logger, make_pad_mask
 
 import torch
@@ -62,13 +61,24 @@ def get_parser():
         default="data/embeddings"
     )
     
+    parser.add_argument(
+        "--target-manifest-file",
+        type=str,
+    )
+    
+    parser.add_argument(
+        "--max-duration",
+        type=int,
+        default=500,
+    )
+    
+    
     return parser
     
 
 @torch.no_grad()
 def extract_embeddings(
     rank: int,
-    data_module,
     manifest: str,
     params: AttributeDict,
 ):
@@ -109,7 +119,6 @@ def extract_embeddings(
         num_workers=1,
         persistent_workers=False,
     )
-    # dl = data_module.valid_dataloaders(manifest)
     
     new_cuts = []
     num_cuts = 0
@@ -139,8 +148,8 @@ def extract_embeddings(
                 )
                 new_cuts.append(new_cut)
                 num_cuts += 1
-            if num_cuts and num_cuts % 100 == 0:
-                logging.info(f"Cuts processed until now: {num_cuts}")
+                if num_cuts and num_cuts % 100 == 0:
+                    logging.info(f"Cuts processed until now: {num_cuts}")
     logging.info(f"Finished extracting CED embeddings, processed a total of {num_cuts} cuts.")
                 
     CutSet.from_cuts(new_cuts).to_jsonl(output_manifest)
@@ -170,7 +179,6 @@ torch.set_num_interop_threads(1)
 
 if __name__=="__main__":
     parser = get_parser()
-    LibriSpeechKDDataModule.add_arguments(parser)
     args = parser.parse_args()
     params = AttributeDict()
     params.update(vars(args))
@@ -182,15 +190,11 @@ if __name__=="__main__":
     print(f"Finished loading manifest")
     
     params.model_id = "CED-base"
-    target_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}.jsonl.gz"
-
-    args.return_cuts = True
-    librispeech = LibriSpeechKDDataModule(args, evaluation=True)
+    embedding_manifest = params.embedding_dir / f"{params.model_id}-{params.output_manifest}.jsonl.gz"
     
-    if not target_manifest.exists():
+    if not embedding_manifest.exists():
         if nj == 1:
             extract_embeddings(
-                data_module=librispeech,
                 rank=0,
                 manifest=cuts,
                 params=params,    
@@ -198,25 +202,16 @@ if __name__=="__main__":
         else:
             splitted_cuts = cuts.split(num_splits=nj)
             print(f"Finished splitting manifest")
-            mp.spawn(extract_embeddings, args=(librispeech, splitted_cuts, params), nprocs=nj, join=True)
+            mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
             manifests =  f"{str(params.embedding_dir)}/{params.model_id}-{params.output_manifest}-*.jsonl.gz"
-            os.system(f"lhotse combine {manifests} {target_manifest}")
+            os.system(f"lhotse combine {manifests} {embedding_manifest}")
     else:
         print(f"Skip embedding extraction: the manifest is already generated.")
     
-    output_manifest = params.input_manifest.replace(".jsonl.gz", "-with-CED-embeddings.jsonl.gz")
+    output_manifest = params.target_manifest_file
     if not os.path.exists(output_manifest):
         join_manifests(
             input_cuts=cuts,
-            embedding_manifest=target_manifest,
+            embedding_manifest=embedding_manifest,
             output_dir=output_manifest,
         )
-    
-    
-    
-        
-    
-        
-        
-        
-        
