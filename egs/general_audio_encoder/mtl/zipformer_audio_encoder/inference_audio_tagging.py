@@ -37,7 +37,7 @@ from typing import Dict
 
 import torch
 import torch.nn as nn
-from kd_datamodule2 import MultiTaskDataModule
+from kd_datamodule3_shar import MultiTaskDataModule
 
 try:
     from sklearn.metrics import average_precision_score
@@ -52,7 +52,7 @@ from icefall.checkpoint import (
     load_checkpoint,
 )
 from icefall.utils import AttributeDict, setup_logger, str2bool
-from utils import _add_dummy_embeddings_and_taskIDs
+from utils import _add_dummy_embeddings_and_taskIDs, _add_task_id
 
 
 def get_parser():
@@ -155,7 +155,6 @@ def decode_dataset(
     all_labels = []
 
     for batch_idx, batch in enumerate(dl):
-        batch = batch[0]
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
         num_cuts += len(cut_ids)
 
@@ -311,9 +310,9 @@ def main():
     audioset = MultiTaskDataModule(args)
 
     audioset_cuts = audioset.audioset_eval_cuts()
-    audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
+    audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
 
-    audioset_dl = audioset.valid_dataloaders(audioset_cuts, dataset_order=["audio_tagging"])
+    audioset_dl = audioset.valid_dataloaders(audioset_cuts)
 
     test_sets = ["audioset_eval"]
 

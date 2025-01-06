@@ -122,7 +122,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         Return a new batch, with the batch size automatically determined using the constraints
         of max_duration and max_cuts.
         """
-        validate_multi_kd(cuts)
+        # validate_multi_kd(cuts)
 
         self.hdf5_fix.update()
 
