@@ -352,6 +352,13 @@ def get_parser():
         default=30,
         help="Number of epochs to train.",
     )
+    
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=200000,
+        help="Number of epochs to train.",
+    )
 
     parser.add_argument(
         "--start-epoch",
@@ -1070,7 +1077,7 @@ def train_one_epoch(
             else:
                 shard_count[sh] = 1
             
-        if batch_idx % 1000 == 1:
+        if batch_idx % 200 == 1:
             shard_epoch = [int(c.shar_epoch) for c in cuts]
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
@@ -1146,9 +1153,9 @@ def train_one_epoch(
             if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
-                if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
-                    saved_bad_model = True
+                # if not saved_bad_model:
+                #     save_bad_model(suffix="-first-warning")
+                #     saved_bad_model = True
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
                 save_bad_model()
@@ -1202,6 +1209,8 @@ def train_one_epoch(
                         tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
                     )
             model.train()
+        if params.use_shar and params.batch_idx_train > params.max_iters:
+            return
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -1371,12 +1380,14 @@ def run(rank, world_size, args):
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
         libriheavy_cuts_len = {
-            "small": 122512 * 0.8, # 122512
-            "medium": 1050000 * 0.8, # 1093040
+            "small": 122512 * 0.9, # 122512
+            "medium": 996017, # 1093040, fewer after filtering
+            "large": 10093746,
         }
         libriheavy_cuts_duration = {
-            "small": 500 * 0.8,
-            "medium": 4154 * 0.8,
+            "small": 500 * 0.9,
+            "medium": 3687,
+            "large": 37218,
         }
         libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(libriheavy_cuts)
@@ -1546,6 +1557,10 @@ def run(rank, world_size, args):
             diagnostic.print_diagnostics()
             break
 
+        if params.batch_idx_train > params.max_iters:
+            logging.info(f"Already reached the maximum iterations: {params.max_iters}")
+            break
+        
         save_checkpoint(
             params=params,
             model=model,
