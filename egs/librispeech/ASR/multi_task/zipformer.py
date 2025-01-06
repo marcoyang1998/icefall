@@ -348,6 +348,7 @@ class Zipformer2(EncoderInterface):
         else:
             attn_mask = self._get_attn_mask(x, chunk_size, left_context_chunks)
 
+        # apply dropout to the memory
         if self.training and memory is not None:
             batch_size = x.shape[1]
             # setting memory to zero should be equivalent to not using the

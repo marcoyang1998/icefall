@@ -43,7 +43,7 @@ try:
     from sklearn.metrics import average_precision_score
 except:
     raise ImportError(f"Please run\n" "pip3 install -U scikit-learn")
-from train import add_model_arguments, get_model, get_params
+from train2 import add_model_arguments, get_model, get_params
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -302,7 +302,7 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                 ),
-                strict=True,
+                strict=False,
             )
 
     model.to(device)
