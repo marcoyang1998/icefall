@@ -330,6 +330,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--audio-tagging-loss-scale",
+        type=float,
+        default=1.0,
+    )
+    
+    parser.add_argument(
         "--num-events",
         type=int,
         default=527,
@@ -380,6 +386,13 @@ def get_parser():
         "--num-epochs",
         type=int,
         default=30,
+        help="Number of epochs to train.",
+    )
+    
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=200000,
         help="Number of epochs to train.",
     )
 
@@ -1032,7 +1045,7 @@ def compute_loss(
         
         if params.do_audio_tagging:
             at_mask = task_ids == 2
-            audio_tagging_loss = (audio_tagging_loss * at_mask).sum()
+            audio_tagging_loss = (audio_tagging_loss.sum(dim=-1) * at_mask).sum()
             loss += params.audio_tagging_loss_scale * audio_tagging_loss
 
     assert loss.requires_grad == is_training
@@ -1150,17 +1163,39 @@ def train_one_epoch(
             params=params,
             optimizer=optimizer,
             scheduler=scheduler,
-            sampler=train_dl.sampler,
+            sampler=train_dl.sampler if not params.use_shar else None,
             scaler=scaler,
             rank=0,
         )
 
+    shard_count = {}
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
 
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
+
+        if params.use_shar:
+            supervisions = batch["supervisions"]
+            cuts = supervisions["cut"]
+            
+            shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
+            unique_origin = set(shard_origin)
+            count = {orig: 0 for orig in unique_origin}
+            for sh in shard_origin:
+                count[sh] += 1
+                if sh in shard_count:
+                    shard_count[sh] += 1
+                else:
+                    shard_count[sh] = 1
+                
+            if batch_idx % 500 == 1:
+                shard_epoch = [int(c.shar_epoch) for c in cuts]
+                max_epoch = max(shard_epoch)
+                logging.info(f"Estimated epoch is {max_epoch}")
+                # logging.info(count)
+                logging.info(f"Batch {batch_idx}: Cuts stats: {shard_count}")
 
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
@@ -1213,7 +1248,7 @@ def train_one_epoch(
                 params=params,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                sampler=train_dl.sampler,
+                sampler=train_dl.sampler if not params.use_shar else None,
                 scaler=scaler,
                 rank=rank,
             )
@@ -1246,9 +1281,14 @@ def train_one_epoch(
             cur_lr = max(scheduler.get_last_lr())
             cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
 
+            if params.use_shar:
+                cur_batch_idx = params.batch_idx_train
+            else:
+                cur_batch_idx = batch_idx
+            
             logging.info(
                 f"Epoch {params.cur_epoch}, "
-                f"batch {batch_idx}, loss[{loss_info}], "
+                f"batch {cur_batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
                 + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
@@ -1289,6 +1329,8 @@ def train_one_epoch(
                     valid_info.write_summary(
                         tb_writer, f"train/{valid_set}_valid_", params.batch_idx_train
                     )
+        if params.use_shar and params.batch_idx_train > params.max_iters:
+            return
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
     params.train_loss = loss_value
@@ -1478,12 +1520,14 @@ def run(rank, world_size, args):
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
         libriheavy_cuts = libriheavy_cuts.map(upper_only_alpha)
         libriheavy_cuts_len = {
-            "small": 122512 * 0.8, # 122512
-            "medium": 1050000 * 0.8, # 1093040
+            "small": 122512 * 0.9, # 122512
+            "medium": 996017, # 1093040, fewer after filtering
+            "large": 10093746,
         }
         libriheavy_cuts_duration = {
-            "small": 500 * 0.8,
-            "medium": 4154 * 0.8,
+            "small": 500 * 0.9,
+            "medium": 3687,
+            "large": 37218,
         }
         libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(libriheavy_cuts)
@@ -1519,6 +1563,7 @@ def run(rank, world_size, args):
     else:
         asr_training_cuts = asr_training_cuts[0]
     asr_training_cuts_duration = sum(asr_training_cuts_duration)
+    num_audio_cuts = sum(asr_training_cuts_lens)
     
     # audio data
     train_cuts["cuts_asr"] = asr_training_cuts
@@ -1565,19 +1610,19 @@ def run(rank, world_size, args):
 
         # In ./zipformer.py, the conv module uses the following expression
         # for subsampling
-        T = ((c.num_frames - 7) // 2 + 1) // 2
-        tokens = sp.encode(c.supervisions[0].text, out_type=str)
+        # T = ((c.num_frames - 7) // 2 + 1) // 2
+        # tokens = sp.encode(c.supervisions[0].text, out_type=str)
 
-        if T < len(tokens):
-            logging.warning(
-                f"Exclude cut with ID {c.id} from training. "
-                f"Number of frames (before subsampling): {c.num_frames}. "
-                f"Number of frames (after subsampling): {T}. "
-                f"Text: {c.supervisions[0].text}. "
-                f"Tokens: {tokens}. "
-                f"Number of tokens: {len(tokens)}"
-            )
-            return False
+        # if T < len(tokens):
+        #     logging.warning(
+        #         f"Exclude cut with ID {c.id} from training. "
+        #         f"Number of frames (before subsampling): {c.num_frames}. "
+        #         f"Number of frames (after subsampling): {T}. "
+        #         f"Text: {c.supervisions[0].text}. "
+        #         f"Tokens: {tokens}. "
+        #         f"Number of tokens: {len(tokens)}"
+        #     )
+        #     return False
 
         return True
 
@@ -1615,8 +1660,8 @@ def run(rank, world_size, args):
         train_cuts, 
         sampler_state_dict=sampler_state_dict,
         sampling_weight=train_cuts_duration,
-        world_size=world_size,
-        rank=rank
+        # world_size=world_size,
+        # rank=rank
     )
 
     # TODO: add more validation sets
@@ -1647,11 +1692,12 @@ def run(rank, world_size, args):
 
     for epoch in range(params.start_epoch, params.num_epochs + 1):
         scheduler.step_epoch(epoch - 1)
-        fix_random_seed(params.seed + epoch - 1)
-        train_dl.sampler.set_epoch(epoch - 1)
+        if not params.use_shar:
+            fix_random_seed(params.seed + epoch - 1)
+            train_dl.sampler.set_epoch(epoch - 1)
 
-        if tb_writer is not None:
-            tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
+            if tb_writer is not None:
+                tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
 
         params.cur_epoch = epoch
 
@@ -1670,6 +1716,10 @@ def run(rank, world_size, args):
             world_size=world_size,
             rank=rank,
         )
+        
+        if params.batch_idx_train > params.max_iters:
+            logging.info(f"Already reached the maximum iterations: {params.max_iters}")
+            break
 
         if params.print_diagnostics:
             diagnostic.print_diagnostics()
@@ -1681,7 +1731,7 @@ def run(rank, world_size, args):
             model_avg=model_avg,
             optimizer=optimizer,
             scheduler=scheduler,
-            sampler=train_dl.sampler,
+            sampler=train_dl.sampler if not params.use_shar else None,
             scaler=scaler,
             rank=rank,
         )
