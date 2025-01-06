@@ -983,7 +983,8 @@ class Zipformer2Encoder(nn.Module):
             cur_begin = cur_end
             
         self.encoder_dim = encoder_layer.embed_dim
-        self.memory_proj = nn.Linear(memory_dim, self.encoder_dim)
+        self.memory_dim = memory_dim
+        self.memory_proj = nn.Linear(memory_dim, self.encoder_dim, bias=False)
 
     def forward(
         self,
@@ -1016,12 +1017,16 @@ class Zipformer2Encoder(nn.Module):
         """
         # use the soft prompt (memory) as prefix of the speech frames
         # need to left pad the src_key_padding_mask to ensure the length matches
-        if memory is not None:
-            mem_len, batch_size, channel_dim = memory.shape
-            memory = self.memory_proj(memory)
-            src = torch.cat([memory, src], dim=0) # (seq_len+prompt_len, batch, embed)
-            extra_src_key_mask = torch.zeros(batch_size, mem_len).bool().to(src.device)
-            src_key_padding_mask = torch.cat([extra_src_key_mask, src_key_padding_mask], dim=1)
+        # import pdb; pdb.set_trace()
+        # if memory is None:
+        #     L,N,_ = src.shape
+        #     memory = torch.zeros(L,N, self.memory_dim).to(src.device)
+        
+        # mem_len, batch_size, channel_dim = memory.shape
+        # memory = self.memory_proj(memory)
+        # src = torch.cat([memory, src], dim=0) # (seq_len+prompt_len, batch, embed)
+        # extra_src_key_mask = torch.zeros(batch_size, mem_len).bool().to(src.device)
+        # src_key_padding_mask = torch.cat([extra_src_key_mask, src_key_padding_mask], dim=1)
         
         pos_emb = self.encoder_pos(src)
         output = src
