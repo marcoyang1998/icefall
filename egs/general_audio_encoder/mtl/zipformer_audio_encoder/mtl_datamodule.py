@@ -289,6 +289,12 @@ class MultiTaskDataModule:
             default=False,
         )
         
+        group.add_argument(
+            "--wenetspeech-subset",
+            type=str,
+            default="L",
+        )
+        
         # KD related
         group.add_argument(
             "--mvq-KD",
@@ -464,7 +470,7 @@ class MultiTaskDataModule:
             # Drop feats to be on the safe side.
             train = MultiTaskDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
                 mvq_KD=self.args.mvq_KD,
@@ -484,8 +490,8 @@ class MultiTaskDataModule:
                 buffer_size=self.args.num_buckets * 2000,
                 shuffle_buffer_size=self.args.num_buckets * 5000,
                 drop_last=self.args.drop_last,
-                world_size=world_size,
-                rank=rank,
+                # world_size=world_size if not self.args.use_shar else 1,
+                # rank=rank if not self.args.use_shar else 0,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
@@ -580,6 +586,11 @@ class MultiTaskDataModule:
             from lhotse.dataset.iterable_dataset import IterableDatasetWrapper
             logging.info("Wrapping the dataset and sampler to an iterable")
             
+            logging.info(f"World size: {train_sampler.world_size}")
+            logging.info(f"Rank: {train_sampler.rank}")
+            
+            rank = train_sampler.rank
+            
             train_sampler.world_size = 1
             train_sampler.rank = 0
             
@@ -592,7 +603,7 @@ class MultiTaskDataModule:
                 train_iter_dataset,
                 batch_size=None,
                 num_workers=self.args.num_workers,
-                worker_init_fn=make_worker_init_fn(seed=0),
+                worker_init_fn=make_worker_init_fn(seed=rank),
             )
 
         return train_dl
@@ -615,7 +626,7 @@ class MultiTaskDataModule:
         if self.args.on_the_fly_feats:
             validate = MultiTaskDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 return_cuts=self.args.return_cuts,
                 mvq_KD=self.args.mvq_KD,
                 at_KD=self.args.at_KD,
@@ -655,7 +666,7 @@ class MultiTaskDataModule:
     ) -> DataLoader:
         logging.debug("About to create test dataset")
         test = MultiTaskDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
+            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128)))
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
@@ -899,7 +910,7 @@ class MultiTaskDataModule:
                 cuts = load_manifest_lazy(
                     self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
                 )
-        return cuts
+        return cuts.drop_features()
 
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:

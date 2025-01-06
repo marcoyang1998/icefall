@@ -486,8 +486,8 @@ class MultiTaskDataModule:
                 buffer_size=self.args.num_buckets * 1500,
                 shuffle_buffer_size=self.args.num_buckets * 1500,
                 drop_last=self.args.drop_last,
-                world_size=world_size,
-                rank=rank,
+                # world_size=world_size,
+                # rank=rank,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
@@ -582,6 +582,11 @@ class MultiTaskDataModule:
             from lhotse.dataset.iterable_dataset import IterableDatasetWrapper
             logging.info("Wrapping the dataset and sampler to an iterable")
             
+            logging.info(f"World size: {train_sampler.world_size}")
+            logging.info(f"Rank: {train_sampler.rank}")
+            
+            rank = train_sampler.rank
+            
             train_sampler.world_size = 1
             train_sampler.rank = 0
             
@@ -594,7 +599,7 @@ class MultiTaskDataModule:
                 train_iter_dataset,
                 batch_size=None,
                 num_workers=self.args.num_workers,
-                worker_init_fn=make_worker_init_fn(seed=0),
+                worker_init_fn=make_worker_init_fn(seed=rank),
             )
 
         return train_dl
@@ -811,12 +816,29 @@ class MultiTaskDataModule:
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
-            return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/{self.args.libriheavy_subset}",
+            medium_cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            if self.args.libriheavy_subset == "medium":
+                return medium_cuts
+            else:
+                assert self.args.libriheavy_subset == "large"
+                large_cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                    seed="randomized",
+                ).repeat()
+                cuts = [medium_cuts, large_cuts]
+                return CutSet.mux(
+                    *cuts,
+                    weights=[1, 9],
+                    stop_early=False,
+                )
+                
         else:
             return load_manifest_lazy(
                 self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
