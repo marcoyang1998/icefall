@@ -385,8 +385,8 @@ class MultiTaskDataModule:
         # properly set world_size and rank
         if self.args.use_shar:
             logging.info(f"Setting world_size=1 and rank=0 because we will be using shar!")
-            world_size = 1
-            rank = 0
+            # world_size = 1
+            # rank = 0
         
         transforms = []
         if self.args.enable_musan:
@@ -486,8 +486,6 @@ class MultiTaskDataModule:
                 buffer_size=self.args.num_buckets * 1500,
                 shuffle_buffer_size=self.args.num_buckets * 1500,
                 drop_last=self.args.drop_last,
-                # world_size=world_size,
-                # rank=rank,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
@@ -518,8 +516,6 @@ class MultiTaskDataModule:
                         buffer_size=self.args.num_buckets * 1500,
                         shuffle_buffer_size=self.args.num_buckets * 1500,
                         drop_last=self.args.drop_last,
-                        # world_size=world_size,
-                        # rank=rank,
                     )
                 else:
                     if self.args.at_weighted_sampler:
@@ -555,8 +551,6 @@ class MultiTaskDataModule:
                 cuts_train,
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
-                # world_size=world_size,
-                # rank=rank,
             )
         logging.info("About to create train dataloader")
 
@@ -586,6 +580,7 @@ class MultiTaskDataModule:
             logging.info(f"Rank: {train_sampler.rank}")
             
             rank = train_sampler.rank
+            world_size = train_sampler.world_size
             
             train_sampler.world_size = 1
             train_sampler.rank = 0
@@ -599,7 +594,7 @@ class MultiTaskDataModule:
                 train_iter_dataset,
                 batch_size=None,
                 num_workers=self.args.num_workers,
-                worker_init_fn=make_worker_init_fn(seed=rank),
+                worker_init_fn=make_worker_init_fn(seed=0, rank=rank, world_size=world_size),
             )
 
         return train_dl
