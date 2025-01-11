@@ -1535,7 +1535,16 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
     
     if params.use_wenetspeech:
+        def map_zh(c):
+            from icefall.utils import tokenize_by_CJK_char
+            from icefall.byte_utils import byte_encode
+            text = c.supervisions[0].text
+            text = byte_encode(tokenize_by_CJK_char(text))
+            c.supervisions[0].text = text
+            return c
+            
         wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts = wenetspeech_cuts.map(map_zh)
         wenetspeech_cuts_len = {
             "S": 151600, 
             "M": 1514500, 
