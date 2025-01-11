@@ -27,7 +27,7 @@ from typing import Any, Dict, Optional
 import whisper
 from BEATs import BEATs, BEATsConfig
 from dataset import MultiKDDataset, SpeakerRecognitionDataset
-from speechbrain.pretrained import EncoderClassifier, SpeakerRecognition
+# from speechbrain.pretrained import EncoderClassifier, SpeakerRecognition
 from teachers import Teacher, BEATsTeacher, EcapaTeacher, WhisperTeacher
 
 import torch
@@ -128,7 +128,7 @@ class LibriSpeechKDDataModule:
         model = model.encoder
         model.eval()
         
-        logging.info(f"Number of whisper params: {sum(p.numel()) for p in model.parameters()}")
+        logging.info(f"Number of whisper params: {sum(p.numel() for p in model.parameters())}")
         logging.info(f"Whisper version: {self.args.whisper_version}; Input dims {n_mels}")
         
         return WhisperTeacher(model=model, n_mels=n_mels)
