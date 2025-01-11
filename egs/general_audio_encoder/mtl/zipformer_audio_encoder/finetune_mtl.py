@@ -1692,7 +1692,14 @@ def run(rank, world_size, args):
         asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("gigaspeech")
         valid_dls.append(asr_giga_valid_dl)
-        
+    
+    if params.use_wenetspeech:
+        wenet_dev_cuts = librispeech.wenetspeech_valid_cuts()
+        wenet_dev_cuts = wenet_dev_cuts.map(map_zh)
+        wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_task_id, 1))
+        asr_wenet_valid_dl = librispeech.valid_dataloaders(wenet_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("wenetspeech")
+        valid_dls.append(asr_wenet_valid_dl)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
