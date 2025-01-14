@@ -27,11 +27,6 @@ def get_parser():
     )
     
     parser.add_argument(
-        "--input-manifest",
-        type=str,
-    )
-    
-    parser.add_argument(
         "--embedding-dim",
         type=int,
         default=512,
@@ -50,6 +45,12 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--valid-manifest",
+        type=str,
+        help="path to the validation manifest"
+    )
+    
+    parser.add_argument(
         "--quantizer-path",
         type=str,
         required=True,
@@ -61,7 +62,7 @@ def prepare_lilcom_data(manifest, split=True):
     all_data = []
     num_frames = 0
     for cut in tqdm(manifest):
-        feature = cut.load_custom("whisper_embedding").astype(np.float16)
+        feature = cut.load_custom("embedding").astype(np.float16)
         num_frames += feature.shape[0]
         all_data.append(feature)
     
@@ -160,10 +161,11 @@ def main(args):
         quantizer = train_quantizer(args)
         quantizer.to(device)
         
-    valid_manifest = "data/embeddings/whisper-turbo-layer--1-embeddings-dev-other.jsonl.gz"
-    valid_cuts = load_manifest_lazy(valid_manifest)
-    valid_data = prepare_lilcom_data(valid_cuts, split=False)
-    evaluate_quantizer(quantizer, valid_data)
+    valid_manifest = args.valid_manifest
+    if valid_manifest is not None:
+        valid_cuts = load_manifest_lazy(valid_manifest)
+        valid_data = prepare_lilcom_data(valid_cuts, split=False)
+        evaluate_quantizer(quantizer, valid_data)
     
 if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
