@@ -280,7 +280,7 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                 ),
-                strict=True,
+                strict=False,
             )
         else:
             assert params.avg > 0, params.avg
@@ -297,7 +297,7 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                 ),
-                strict=True,
+                strict=False,
             )
 
     model.to(device)

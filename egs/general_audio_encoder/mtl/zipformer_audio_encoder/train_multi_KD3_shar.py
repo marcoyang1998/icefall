@@ -1438,7 +1438,7 @@ def run(rank, world_size, args):
     logging.info(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 0.98 or c.duration > 21.0:
+        if c.duration < 0.98 or c.duration > 29.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )

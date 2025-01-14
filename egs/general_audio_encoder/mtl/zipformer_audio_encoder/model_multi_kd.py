@@ -86,12 +86,15 @@ class MultiKDModel(nn.Module):
         self.teacher_frame_ratio = teacher_frame_ratio 
         self.distillation_delta = distillation_delta
         
-        self.codebook_loss_net = JointCodebookLoss(
-            predictor_channels=encoder_dim,
-            num_codebooks=num_codebooks * self.teacher_frame_ratio,
-            is_joint=False,
-            reduction="none",
-        )
+        if num_codebooks > 0:
+            self.codebook_loss_net = JointCodebookLoss(
+                predictor_channels=encoder_dim,
+                num_codebooks=num_codebooks * self.teacher_frame_ratio,
+                is_joint=False,
+                reduction="none",
+            )
+        else:
+            self.codebook_loss_net = None
         
         self.audio_tagging_proj = nn.Sequential(
             nn.Dropout(0.1),
