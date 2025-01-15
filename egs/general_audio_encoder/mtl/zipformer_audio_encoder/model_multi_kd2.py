@@ -95,6 +95,19 @@ class MultiKDModel(nn.Module):
             )
         else:
             self.codebook_loss_net = None
+            
+        # audio codebook loss net
+        # we hard set the number of codebooks to 16
+        # TODO: support different number of codebooks
+        if num_codebooks > 0:
+            self.audio_codebook_loss_net = JointCodebookLoss(
+                predictor_channels=encoder_dim,
+                num_codebooks=16 * 1, # the audio teacher has the same frame rate
+                is_joint=False,
+                reduction="none",
+            )
+        else:
+            self.audio_codebook_loss_net = None
         
         self.audio_tagging_proj = nn.Sequential(
             nn.Dropout(0.1),
@@ -137,6 +150,7 @@ class MultiKDModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         codebook_indexes: torch.Tensor = None,
+        audio_codebook_indexes: torch.Tensor = None,
         at_targets: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -148,6 +162,10 @@ class MultiKDModel(nn.Module):
             before padding.
           codebook_indexes:
             Codebook indexes of teacher embeddings
+          audio_codebook_indexes:
+            Codebook indexes for general audio
+          at_targets:
+            Targets for audio tagging
             
         Returns:
           Return the transducer losses and CTC loss,
@@ -166,28 +184,50 @@ class MultiKDModel(nn.Module):
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
+        # 1. speech codebook loss
         if codebook_indexes is not None:
-            codebook_loss = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes)
+            codebook_loss = self.forward_codebook_loss(
+                codebook_loss_net=self.codebook_loss_net,
+                encoder_out=encoder_out, 
+                encoder_out_lens=encoder_out_lens, 
+                codebook_indexes=codebook_indexes,
+                teacher_frame_ratio=self.teacher_frame_ratio,
+            )
         else:
             codebook_loss = None
+            
+        # 2. audio codebook loss
+        if audio_codebook_indexes is not None:
+            audio_codebook_loss = self.forward_codebook_loss(
+                codebook_loss_net=self.audio_codebook_loss_net,
+                encoder_out=encoder_out,
+                encoder_out_lens=encoder_out_lens, 
+                codebook_indexes=audio_codebook_indexes,
+                teacher_frame_ratio=1, # audio teacher is 25 Hz
+            )
+        else:
+            audio_codebook_loss = None
         
+        # 3. audio tagging loss
         if at_targets is not None:
             at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
             at_loss = None
         
-        return codebook_loss, at_loss
+        return codebook_loss, audio_codebook_loss, at_loss
 
     def forward_codebook_loss(
         self,
+        codebook_loss_net: torch.nn.Module,
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
+        teacher_frame_ratio: int = 2.0,
     ):
         # align the encoder features with the codebook indexes
         if codebook_indexes.shape[1] != encoder_out.shape[1]:
             codebook_indexes = self.concat_successive_codebook_indexes(
-                encoder_out, codebook_indexes, ratio=self.teacher_frame_ratio
+                encoder_out, codebook_indexes, ratio=teacher_frame_ratio
             )
         if self.distillation_delta > 0:
             codebook_indexes = codebook_indexes[:,:-self.distillation_delta, :]
@@ -196,7 +236,7 @@ class MultiKDModel(nn.Module):
             codebook_indexes = codebook_indexes.masked_fill(truncated_padding_mask.unsqueeze(-1), value=-100)
             
         N,T,_ = encoder_out.shape
-        codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
+        codebook_loss = codebook_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
         num_cb = codebook_loss.size(-1)
         # normalize the loss by the number of codebooks
