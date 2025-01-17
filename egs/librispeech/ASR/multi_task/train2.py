@@ -730,7 +730,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         causal=params.causal,
         chunk_size=_to_int_tuple(params.chunk_size),
         left_context_frames=_to_int_tuple(params.left_context_frames),
-        memory_dim=params.memory_dim,
+        memory_dim=params.memory_dim if params.use_soft_prompt else -1,
         memory_dropout_rate=params.universal_prompt_prob,
     )
     return encoder

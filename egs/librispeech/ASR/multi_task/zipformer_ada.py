@@ -945,7 +945,7 @@ class Zipformer2EncoderLayer(nn.Module):
             memory_dropout_mask = memory[0,:, 0] == 0.0
             adapter_mask = torch.ones(L, N, 1).to(cross_attn.device)
             adapter_mask[:, memory_dropout_mask, :] = 0.0
-            adapter_weight = self.adapter_weights(cross_attn) # (T,N,num_tasks)
+            adapter_weight = self.adapter_weights(src) # (T,N,num_tasks)
             adapter_weight = adapter_weight * adapter_mask
             adapter_weight = adapter_weight.softmax(dim=-1)
             # adapter_weight.maked_fill_(memory_dropout_mask.unsqueeze(0).unsqueeze(-1), )
