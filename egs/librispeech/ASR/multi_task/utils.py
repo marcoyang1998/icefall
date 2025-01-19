@@ -6,6 +6,11 @@ import torch
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 
+NUM_SPEAKERS_DICT = {
+    "vox1": 1211,
+    "vox2": 5994,
+}
+
 def add_dummy_text(c):
     if c.supervisions[0].text is None:
         c.supervisions[0].text = "Dummy text added as a place holder. Please ignore this if possible."
@@ -47,6 +52,14 @@ def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
         return c
     
     c = add_embeddings(c)
+    return c
+
+def _add_task_id(task_id, c):
+    if not c.supervisions[0].has_custom("audio_event"):
+        c.supervisions[0].audio_event = "0"
+    if c.supervisions[0].text is None:
+        c.supervisions[0].text = "Dummy text added as a place holder. Please ignore this if possible."
+    c.task_id = task_id
     return c
 
 class MetricsTracker(collections.defaultdict):
