@@ -18,10 +18,12 @@
 
 
 import argparse
+from collections import defaultdict
 import inspect
 import logging
 from functools import lru_cache
 from pathlib import Path
+import pickle
 from typing import Any, Dict, Optional, Union, List
 
 import torch
@@ -44,7 +46,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
-from dataset import MultiTaskDataset
+from dataset2 import MultiTaskDataset
 from icefall.utils import str2bool
 
 
@@ -419,6 +421,7 @@ class MultiTaskDataModule:
                 # each cutset, as they will be higher likely to be exhausted at the same
                 # time
                 md = self.args.max_duration * sampling_weight[i]/ sum(sampling_weight)
+                logging.info(f"Max duration for {name}: {md}")
                 if "audioset" not in name:
                     sampler = DynamicBucketingSampler(
                         cuts,
@@ -685,24 +688,60 @@ class MultiTaskDataModule:
         return weights
 
     @lru_cache()
-    def voxceleb_cuts(self) -> CutSet:
+    def voxceleb_dev_cuts(self) -> CutSet:
         # this should be used in KD
         logging.info("About to get the voxceleb cuts.")
-        if self.args.voxceleb_subset == "only_vox2":
+        if self.args.voxceleb_subset == "vox2":
             logging.info("Only get the voxceleb2 cuts.")
             cuts = load_manifest_lazy(
-                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+                "data/fbank_voxceleb/vox2_cuts_dev.jsonl.gz"
             )
-            return cuts
-        cuts = load_manifest_lazy(
-            self.args.manifest_dir / "cuts_vox1_train-with-3-embeddings.jsonl.gz"
-        )
-        if self.args.voxceleb_subset == "vox2":
-            logging.info("Adding voxceleb2 cuts.")
-            cuts += load_manifest_lazy(
-                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+        else:
+            cuts = load_manifest_lazy(
+                "data/fbank_voxceleb/vox1_cuts_dev.jsonl.gz"
             )
         return cuts
+    
+    @lru_cache()
+    def voxceleb_test_cuts(self) -> CutSet:
+        # this should be used in KD
+        logging.info("About to get the voxceleb cuts.")
+        if self.args.voxceleb_subset == "vox2":
+            logging.info("Only get the voxceleb2 cuts.")
+            cuts = load_manifest_lazy(
+                "data/fbank_voxceleb/vox2_cuts_test.jsonl.gz"
+            )
+        else:
+            cuts = load_manifest_lazy(
+                "data/fbank_voxceleb/vox1_cuts_test.jsonl.gz"
+            )
+        return cuts
+    
+    @lru_cache()
+    def librispeech_speaker_dict(self):
+        logging.info(f"Loading speaker dict from librispeech")
+        if self.args.full_libri:
+            speaker_file = "data/speaker/librispeech_cuts_train-all-shuf.spkr.pkl"
+        else:
+            speaker_file = "data/speaker/librispeech_cuts_train-clean-100.spkr.pkl"
+        with open(speaker_file, "r") as f:
+            speaker_dict = pickle.load(f)
+        assert -100 not in speaker_dict
+        
+        speaker_dict = defaultdict(lambda: -100, speaker_dict)
+        return speaker_dict
+    
+    @lru_cache()
+    def voxceleb_speaker_dict(self):
+        logging.info(f"Loading speaker dict from voxceleb {self.args.voxceleb_subset}")
+        speaker_file = f"data/speaker/{self.args.voxceleb_subset}_cuts_dev.spkr.pkl"
+        
+        with open(speaker_file, "rb") as f:
+            speaker_dict = pickle.load(f)
+        assert -100 not in speaker_dict
+        
+        speaker_dict = defaultdict(lambda: -100, speaker_dict)
+        return speaker_dict
 
 
 if __name__=="__main__":
