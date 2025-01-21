@@ -75,7 +75,7 @@ from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model import PromptedAudioEncoder
+from model2 import PromptedAudioEncoder
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -85,7 +85,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_dummy_embeddings_and_taskIDs, MetricsTracker
+from utils import _add_task_id, MetricsTracker
 
 from zipformer_ada import Zipformer2
 
@@ -346,6 +346,18 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If do speaker verification"
+    )
+    
+    parser.add_argument(
+        "--num-speakers",
+        type=int,
+        default=-1,
+    )
+    
+    parser.add_argument(
+        "--speaker-embed-dim",
+        type=int,
+        default=192,
     )
     
     # soft prompt related
@@ -746,7 +758,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         causal=params.causal,
         chunk_size=_to_int_tuple(params.chunk_size),
         left_context_frames=_to_int_tuple(params.left_context_frames),
-        memory_dim=params.memory_dim,
+        memory_dim=params.memory_dim if params.use_soft_prompt else -1,
         memory_dropout_rate=params.universal_prompt_prob,
         use_adapters=params.use_adapters,
         adapter_dim=params.adapter_dim,
@@ -799,6 +811,9 @@ def get_model(params: AttributeDict) -> nn.Module:
         do_ASR=params.do_asr,
         do_AT=params.do_audio_tagging,
         do_SV=params.do_speaker_verification,
+        sv_KD=params.sv_KD,
+        speaker_embed_dim=params.speaker_embed_dim,
+        num_spkrs=params.num_speakers,
         use_soft_prompt=params.use_soft_prompt,
         soft_prompt_dim=params.soft_prompt_dim,
         soft_prompt_len=params.soft_prompt_len,
@@ -974,6 +989,7 @@ def compute_loss(
     sp: spm.SentencePieceProcessor,
     batch: dict,
     is_training: bool,
+    speaker_dict: dict,
 ) -> Tuple[Tensor, MetricsTracker]:
     """
     Compute loss given the model and its inputs.
@@ -1003,7 +1019,7 @@ def compute_loss(
     cuts = supervisions["cut"]
     feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
-    if random.random() < 0.04 and is_training:
+    if random.random() < 0.02 and is_training:
         for t in range(1, params.num_tasks+1):
             duration = sum([c.duration for c in cuts if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
@@ -1012,8 +1028,13 @@ def compute_loss(
     # audio tagging label
     at_targets = batch["at_targets"].to(device) # the label indices are in CED format
     
-    # TODO: load sv targets
-    sv_targets = None
+    # sv labels
+    speakers = batch["sv_targets"]
+    if params.do_speaker_verification:
+        sv_targets = [speaker_dict[spkr] for spkr in speakers]
+        sv_targets = torch.tensor(sv_targets).to(device)
+    else:
+        sv_targets = None
 
     batch_idx_train = params.batch_idx_train
     warm_step = params.warm_step
@@ -1068,7 +1089,8 @@ def compute_loss(
             
         if params.do_speaker_verification:
             # TODO: add SV loss
-            sv_loss = 0.0
+            mask = task_ids == 3 # SV=3
+            sv_loss = (sv_loss * mask).sum()
             loss += params.speaker_verification_loss_scale * sv_loss
 
     assert loss.requires_grad == is_training
@@ -1096,6 +1118,7 @@ def compute_validation_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
     sp: spm.SentencePieceProcessor,
+    speaker_dict: dict,
     valid_dl: torch.utils.data.DataLoader,
     world_size: int = 1,
 ) -> MetricsTracker:
@@ -1109,6 +1132,7 @@ def compute_validation_loss(
             params=params,
             model=model,
             sp=sp,
+            speaker_dict=speaker_dict,
             batch=batch,
             is_training=False,
         )
@@ -1132,6 +1156,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     scheduler: LRSchedulerType,
     sp: spm.SentencePieceProcessor,
+    speaker_dict: dict,
     train_dl: torch.utils.data.DataLoader,
     valid_sets: List[str],
     valid_dls: List[torch.utils.data.DataLoader],
@@ -1204,6 +1229,7 @@ def train_one_epoch(
                     params=params,
                     model=model,
                     sp=sp,
+                    speaker_dict=speaker_dict,
                     batch=batch,
                     is_training=True,
                 )
@@ -1311,6 +1337,7 @@ def train_one_epoch(
                     params=params,
                     model=model,
                     sp=sp,
+                    speaker_dict=speaker_dict,
                     valid_dl=valid_dl,
                     world_size=world_size,
                 )
@@ -1383,6 +1410,11 @@ def run(rank, world_size, args):
 
     if not params.use_transducer:
         params.ctc_loss_scale = 1.0
+        
+    if params.do_speaker_verification:
+        assert params.sv_KD == False
+        from utils import NUM_SPEAKERS_DICT
+        params.num_speakers = NUM_SPEAKERS_DICT[params.voxceleb_subset]
 
     logging.info(params)
 
@@ -1453,7 +1485,7 @@ def run(rank, world_size, args):
         else:
             librispeech_cuts = librispeech.train_all_shuf_cuts()
             librispeech_cuts_len = 960 * 3
-        librispeech_cuts = librispeech_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
+        librispeech_cuts = librispeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
         train_cuts["cuts_asr"] = librispeech_cuts
         train_cuts_lens.append(librispeech_cuts_len)
 
@@ -1470,9 +1502,23 @@ def run(rank, world_size, args):
             "balanced": 50,
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5000,
         }
-        audioset_cuts = audioset_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
+        audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_lens.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
+        
+    if params.do_speaker_verification:
+        sv_cuts = librispeech.voxceleb_dev_cuts()
+        voxceleb_cuts_lens = {
+            "vox1": 330,
+            "vox2": 2300
+        }
+        sv_cuts = sv_cuts.map(partial(_add_task_id, 3))
+        train_cuts["cuts_voxceleb"] = sv_cuts
+        train_cuts_lens.append(voxceleb_cuts_lens[params.voxceleb_subset])
+        # load speaker dict
+        speaker_dict = librispeech.voxceleb_speaker_dict()
+    else:
+        speaker_dict = None
         
     assert len(train_cuts) >= 1, "At least one task should be done!"
     
@@ -1485,7 +1531,7 @@ def run(rank, world_size, args):
         # You should use ../local/display_manifest_statistics.py to get
         # an utterance duration distribution for your dataset to select
         # the threshold
-        if c.duration < 1.0 or c.duration > 20.0:
+        if c.duration < 1.0 or c.duration > 29.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )
@@ -1493,8 +1539,8 @@ def run(rank, world_size, args):
 
         return True
     
-    # for k, cuts in train_cuts.items():
-    #     train_cuts[k] = cuts.filter(remove_short_and_long_utt)
+    for k, cuts in train_cuts.items():
+        train_cuts[k] = cuts.filter(remove_short_and_long_utt)
     
     if params.bucketing_sampler:
         assert params.zip_sampler == False
@@ -1533,14 +1579,14 @@ def run(rank, world_size, args):
     if params.do_asr:
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
-        ls_valid_cuts = ls_valid_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1))
+        ls_valid_cuts = ls_valid_cuts.map(partial(_add_task_id, 1))
         asr_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts)
         valid_sets.append("ASR_ls")
         valid_dls.append(asr_valid_dl)
      
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
-        as_eval_cuts = as_eval_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
+        as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
@@ -1569,6 +1615,7 @@ def run(rank, world_size, args):
             optimizer=optimizer,
             scheduler=scheduler,
             sp=sp,
+            speaker_dict=speaker_dict,
             train_dl=train_dl,
             valid_sets=valid_sets,
             valid_dls=valid_dls,
