@@ -383,7 +383,7 @@ class PromptedAudioEncoder(nn.Module):
             at_loss = torch.empty(0)
         
         # speaker verification
-        if self.do_SV:
+        if self.do_SV and sv_targets is not None:
             ecapa_embeddings = self.forward_speaker(
                 encoder_out, encoder_out_lens
             )
@@ -482,5 +482,3 @@ class PromptedAudioEncoder(nn.Module):
         asp_embedding = self.speaker_proj(asp_embedding) # (N, 1, 192)
         
         return asp_embedding
-
-Transducer = PromptedAudioEncoder # for decoding

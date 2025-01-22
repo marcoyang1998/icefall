@@ -701,17 +701,14 @@ class Zipformer2EncoderLayer(nn.Module):
         self.num_tasks = num_tasks
         self.adapter_weights = nn.Linear(embed_dim, self.num_tasks, bias=False)
         if use_adapters:
-            self.feed_forward2 = MultiFfwAdapter(
-                embed_dim, feedforward_dim, dropout, adapter_dim=adapter_dim, num_adapters=num_tasks
-            )
-            self.feed_forward3 = MultiFfwAdapter(
-                embed_dim, (feedforward_dim * 5) // 4, dropout, adapter_dim=adapter_dim, num_adapters=num_tasks
-            )
+            ffw_dim = feedforward_dim // num_tasks
+            self.feed_forward2 = MultiFfwAdapter(embed_dim, ffw_dim, dropout, num_tasks)
         else:
             self.feed_forward2 = FeedforwardModule(embed_dim, feedforward_dim, dropout)
-            self.feed_forward3 = FeedforwardModule(
-                embed_dim, (feedforward_dim * 5) // 4, dropout
-            )
+
+        self.feed_forward3 = FeedforwardModule(
+            embed_dim, (feedforward_dim * 5) // 4, dropout
+        )
 
         self.nonlin_attention = NonlinAttention(
             embed_dim, hidden_channels=3 * embed_dim // 4
@@ -1016,14 +1013,9 @@ class Zipformer2EncoderLayer(nn.Module):
         # if self.use_adapters and self.post_conv_adapter is not None:
         #     src = self.post_conv_adapter(src, adapter_weight)
 
-        if self.use_adapters and adapter_weight is not None:
-            src = src + self.sequence_dropout(
-                self.balancer_ff3(self.feed_forward3(src, weight=adapter_weight)), float(self.ff3_skip_rate)
-            )
-        else:
-            src = src + self.sequence_dropout(
-                self.balancer_ff3(self.feed_forward3(src)), float(self.ff3_skip_rate)
-            )
+        src = src + self.sequence_dropout(
+            self.balancer_ff3(self.feed_forward3(src)), float(self.ff3_skip_rate)
+        )
 
         src = self.balancer1(src)
         src = self.norm(src)
@@ -2399,39 +2391,36 @@ class MultiFfwAdapter(nn.Module):
         embed_dim: int,
         ffw_dim: int,
         dropout: FloatLike,
-        adapter_dim: int = 16,
-        num_adapters: int = 2,
+        num_ffws: int = 2,
     ):
         super(MultiFfwAdapter, self).__init__()
         
-        self.ffw = FeedforwardModule(embed_dim, ffw_dim, dropout)
-        self.adapters = nn.ModuleList()
-        for i in range(num_adapters):
-            adapter = AdapterModule(
-                embed_dim, adapter_dim,
+        self.ffws = nn.ModuleList()
+        for i in range(num_ffws):
+            adapter = FeedforwardModule(
+                embed_dim, ffw_dim, dropout,
             )
-            self.adapters.append(adapter)
-        self.num_adapters = num_adapters
-        
+            self.ffws.append(adapter)
+        self.num_ffws = num_ffws
         self.history_weight = []
+        # self.history_weight = 0.0
         self.history_count = 0
         
     def forward(self, x, weight=None):
         # weight: (seq_len, N, num_adapters), a frame-wise weight for adapters
-        ffw_out = self.ffw(x)
-        
         L, N, _ = x.shape
         if weight is None:
-            weight = torch.ones(L,N,self.num_adapters).to(x.device) / self.num_adapters
+            weight = torch.ones(L,N,self.num_ffws).to(x.device) / self.num_ffws
         outputs = []
-        for i, m in enumerate(self.adapters):
+        for i, m in enumerate(self.ffws):
             outputs.append(weight[...,i].unsqueeze(-1) * m(x))
         outputs = sum(outputs)
         
         if not self.training:
             self.history_weight.append(weight.mean(dim=0))
         
-        return ffw_out + outputs
+        # we don't need skip connection for this
+        return outputs
 
 class MultiAdapter(nn.Module):
     def __init__(
