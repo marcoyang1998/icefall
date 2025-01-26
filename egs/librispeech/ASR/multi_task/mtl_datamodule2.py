@@ -261,6 +261,12 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--repeat-voxceleb",
+            type=int,
+            default=1,
+        )
+        
+        group.add_argument(
             "--use-audioset",
             type=str2bool,
             default=True,

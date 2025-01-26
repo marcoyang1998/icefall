@@ -1488,14 +1488,16 @@ def run(rank, world_size, args):
         train_cuts_lens.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
         
     if params.do_speaker_verification:
-        sv_cuts = librispeech.voxceleb_dev_cuts()
+        sv_cuts = librispeech.voxceleb_dev_cuts().repeat(
+            params.repeat_voxceleb
+        )
         voxceleb_cuts_lens = {
             "vox1": 330,
             "vox2": 2300
         }
         sv_cuts = sv_cuts.map(partial(_add_task_id, 3))
         train_cuts["cuts_voxceleb"] = sv_cuts
-        train_cuts_lens.append(voxceleb_cuts_lens[params.voxceleb_subset])
+        train_cuts_lens.append(voxceleb_cuts_lens[params.voxceleb_subset] * params.repeat_voxceleb)
         # load speaker dict
         speaker_dict = librispeech.voxceleb_speaker_dict()
     else:
@@ -1505,23 +1507,14 @@ def run(rank, world_size, args):
     
     def remove_short_and_long_utt(c: Cut):
         # Keep only utterances with duration between 1 second and 20 seconds
-        #
-        # Caution: There is a reason to select 20.0 here. Please see
-        # ../local/display_manifest_statistics.py
-        #
-        # You should use ../local/display_manifest_statistics.py to get
-        # an utterance duration distribution for your dataset to select
-        # the threshold
         if c.duration < 1.0 or c.duration > 29.0:
-            # logging.warning(
-            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            # )
             return False
 
         return True
     
     for k, cuts in train_cuts.items():
-        train_cuts[k] = cuts.filter(remove_short_and_long_utt)
+        if "audioset" not in k:
+            train_cuts[k] = cuts.filter(remove_short_and_long_utt)
     
     if params.bucketing_sampler:
         assert params.zip_sampler == False
