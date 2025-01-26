@@ -879,10 +879,11 @@ class Zipformer2EncoderLayer(nn.Module):
         )
 
         if memory is not None and hasattr(self, "attn_weights"):
-            src = src + self.sequence_dropout(
+            cross_attn = self.sequence_dropout(
                 self.memory_balancer(self.src_attn1(memory, src_attn_weights)),
                 attention_skip_rate,
             )
+            src = src + cross_attn
 
         src = src + self.sequence_dropout(
             self.conv_module1(
