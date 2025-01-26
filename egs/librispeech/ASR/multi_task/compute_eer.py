@@ -109,6 +109,12 @@ def get_parser():
         type=str2bool,
         default=False,
     )
+    
+    parser.add_argument(
+        "--large-eps",
+        type=str2bool,
+        default=False,
+    )
 
     add_model_arguments(parser)
 
@@ -141,10 +147,11 @@ def inference_one_batch(
     batch: dict,
 ):
     device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
     feature = batch["inputs"]
     assert feature.ndim == 3, feature.shape
 
-    feature = feature.to(device)
+    feature = feature.to(device).to(dtype)
     # at entry, feature is (N, T, C)
     
     task_ids = batch["task_ids"].int().to(device)
@@ -157,8 +164,18 @@ def inference_one_batch(
     feature_lens = supervisions["num_frames"].to(device)
 
     encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens, task_ids)
+    
     speaker_embeddings = model.forward_speaker_verification(encoder_out, encoder_out_lens, return_embedding=True)
-
+    while True:
+        if speaker_embeddings.isnan().any():
+            new_eps = model.asp.tdnn.norm.norm.eps * 1.1
+            model.asp.tdnn.norm.norm.eps = new_eps
+            logging.info(f"Encountering NaN in the speaker embeddings, increasing eps to {new_eps}")
+            speaker_embeddings = model.forward_speaker_verification(encoder_out, encoder_out_lens, return_embedding=True)
+        else:
+            model.asp.tdnn.norm.norm.eps /= 2.0
+            break
+    
     return speaker_embeddings
 
 
@@ -317,6 +334,12 @@ def main():
 
     model.to(device)
     model.eval()
+    
+    if params.large_eps:
+        model.asp.tdnn.norm.norm.eps = 1e-4
+    
+    for n,p in model.named_parameters():
+        assert not torch.isnan(p).any(), (n,p)
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
