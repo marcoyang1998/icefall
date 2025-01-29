@@ -106,6 +106,8 @@ class Zipformer2(EncoderInterface):
             without memory.
         memory_layer: if supplied and >0, only add cross-attention module starting from
             the specified layer.
+        learnable_uni_weight: Controls the weight in universal model. If True, learn the weight for universal mode.
+            Otherwise use the same weight for each adapter
     """
 
     def __init__(
@@ -131,8 +133,9 @@ class Zipformer2(EncoderInterface):
         memory_dropout_rate: float = 0.05,
         memory_layer: int = 0,
         use_adapters: bool = False,
+        num_adapters: int = 3,
         adapter_dim: int = 16,
-        num_tasks: int = 2,
+        num_tasks: int = 3,
     ) -> None:
         super(Zipformer2, self).__init__()
 
@@ -173,6 +176,8 @@ class Zipformer2(EncoderInterface):
         
         # adapter related
         self.use_adapters = use_adapters
+        self.num_adapters = num_adapters
+        assert num_adapters == num_tasks
 
         for u, d in zip(encoder_unmasked_dim, encoder_dim):
             assert u <= d
@@ -196,7 +201,7 @@ class Zipformer2(EncoderInterface):
                 causal=causal,
                 use_adapters=use_adapters,
                 adapter_dim=adapter_dim,
-                num_tasks=num_tasks,
+                num_adapters=num_adapters, # the number of tasks need to be the same as num_adapters in hard weight mode
             )
 
             # For the segment of the warmup period, we let the Conv2dSubsampling
@@ -643,7 +648,7 @@ class Zipformer2EncoderLayer(nn.Module):
         ),
         use_adapters: bool = False,
         adapter_dim: int = 16,
-        num_tasks: int = 2,
+        num_adapters: int = 2,
     ) -> None:
         super(Zipformer2EncoderLayer, self).__init__()
         self.embed_dim = embed_dim
@@ -701,11 +706,23 @@ class Zipformer2EncoderLayer(nn.Module):
             embed_dim, (feedforward_dim * 3) // 4, dropout
         )
 
-        self.feed_forward2 = FeedforwardModule(embed_dim, feedforward_dim, dropout)
-
-        self.feed_forward3 = FeedforwardModule(
-            embed_dim, (feedforward_dim * 5) // 4, dropout
-        )
+        
+        # adpater related
+        self.use_adapters = use_adapters
+        self.num_adapters = num_adapters
+        
+        if use_adapters:
+            self.feed_forward2 = MultiFfwAdapter(
+                embed_dim, feedforward_dim, dropout, adapter_dim=adapter_dim, num_adapters=num_adapters
+            )
+            self.feed_forward3 = MultiFfwAdapter(
+                embed_dim, (feedforward_dim * 5) // 4, dropout, adapter_dim=adapter_dim, num_adapters=num_adapters
+            )
+        else:
+            self.feed_forward2 = FeedforwardModule(embed_dim, feedforward_dim, dropout)
+            self.feed_forward3 = FeedforwardModule(
+                embed_dim, (feedforward_dim * 5) // 4, dropout
+            )
 
         self.nonlin_attention = NonlinAttention(
             embed_dim, hidden_channels=3 * embed_dim // 4
@@ -782,45 +799,6 @@ class Zipformer2EncoderLayer(nn.Module):
             min_abs=0.1,
             max_abs=4.0,
         )
-        
-        self.use_adapters = use_adapters
-        if use_adapters:
-            # This configuration of MultiAdapter receives a mask for adapter hard selection
-            # The unused adapter will have 0
-            self.num_tasks = num_tasks
-            # self.adapter_weights = nn.Linear(embed_dim, self.num_tasks)
-            
-            self.mid_adapter = MultiAdapter(
-                embed_dim=embed_dim,
-                bottleneck_dim=adapter_dim,
-                num_adapters=self.num_tasks,
-            )
-
-            # placed after the 1st self-attn module
-            self.post_sa_adapter = MultiAdapter(
-                embed_dim=embed_dim,
-                bottleneck_dim=adapter_dim,
-                num_adapters=self.num_tasks,
-            )
-
-            # placed after the 2nd convolution module
-            self.post_conv_adapter = MultiAdapter(
-                embed_dim=embed_dim,
-                bottleneck_dim=adapter_dim,
-                num_adapters=self.num_tasks,
-            )
-
-            # at the end of each layer
-            self.adapter = MultiAdapter(
-                embed_dim=embed_dim,
-                bottleneck_dim=adapter_dim,
-                num_adapters=self.num_tasks,
-            )
-        else:
-            self.mid_adapter = None
-            self.post_sa_adapter = None
-            self.post_conv_adapter = None
-            self.adapter = None
 
     def get_bypass_scale(self, batch_size: int):
         # returns bypass-scale of shape (num_channels,),
@@ -945,20 +923,9 @@ class Zipformer2EncoderLayer(nn.Module):
             )
         else:
             cross_attn = None
-            
-        # if self.use_adapters and cross_attn is not None:
-        #     adapter_weight = self.adapter_weights(cross_attn) # (T,N,num_tasks)
-        #     adapter_weight = adapter_weight.softmax(dim=-1)
-        #     if random.random() < 0.005 and not self.training:
-        #         logging.info(f"Adapter weights: {adapter_weight.mean(dim=(0,1))}")
-        # else:
-        #     adapter_weight = None
         
         if not self.use_adapters:
             adapter_weight = None
-            
-        if self.use_adapters and self.post_sa_adapter is not None:
-            src = self.post_sa_adapter(src, adapter_weight)
 
         src = src + self.sequence_dropout(
             self.conv_module1(
@@ -967,15 +934,17 @@ class Zipformer2EncoderLayer(nn.Module):
             float(self.conv_skip_rate),
         )
 
-        src = src + self.sequence_dropout(
-            self.balancer_ff2(self.feed_forward2(src)), float(self.ff2_skip_rate)
-        )
+        if self.use_adapters:
+            src = src + self.sequence_dropout(
+                self.balancer_ff2(self.feed_forward2(src, weight=adapter_weight)), float(self.ff2_skip_rate)
+            )
+        else:
+            src = src + self.sequence_dropout(
+                self.balancer_ff2(self.feed_forward2(src)), float(self.ff2_skip_rate)
+            )
 
         # bypass in the middle of the layer.
         src = self.bypass_mid(src_orig, src)
-        
-        if self.use_adapters and self.mid_adapter is not None:
-            src = self.mid_adapter(src, adapter_weight)
 
         self_attn = self.self_attn2(src, attn_weights)
 
@@ -995,13 +964,15 @@ class Zipformer2EncoderLayer(nn.Module):
             ),
             float(self.conv_skip_rate),
         )
-        
-        if self.use_adapters and self.post_conv_adapter is not None:
-            src = self.post_conv_adapter(src, adapter_weight)
 
-        src = src + self.sequence_dropout(
-            self.balancer_ff3(self.feed_forward3(src)), float(self.ff3_skip_rate)
-        )
+        if self.use_adapters:
+            src = src + self.sequence_dropout(
+                self.balancer_ff3(self.feed_forward3(src, adapter_weight)), float(self.ff3_skip_rate)
+            )
+        else:
+            src = src + self.sequence_dropout(
+                self.balancer_ff3(self.feed_forward3(src)), float(self.ff3_skip_rate)
+            )
 
         src = self.balancer1(src)
         src = self.norm(src)
@@ -1010,9 +981,6 @@ class Zipformer2EncoderLayer(nn.Module):
 
         src = self.balancer2(src)
         src = self.whiten(src)
-        
-        if self.use_adapters and self.adapter is not None:
-            src = self.adapter(src, adapter_weight)
 
         return src
 
@@ -2375,6 +2343,47 @@ class AdapterModule(nn.Module):
         x = self.forward_adapter(x)
         return x_orig + x
     
+class MultiFfwAdapter(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        ffw_dim: int,
+        dropout: FloatLike,
+        adapter_dim: int = 16,
+        num_adapters: int = 2,
+    ):
+        super(MultiFfwAdapter, self).__init__()
+        
+        self.ffw = FeedforwardModule(embed_dim, ffw_dim, dropout)
+        self.adapters = nn.ModuleList()
+        for i in range(num_adapters):
+            adapter = AdapterModule(
+                embed_dim, adapter_dim,
+            )
+            self.adapters.append(adapter)
+        self.num_adapters = num_adapters
+        
+        self.history_weight = []
+        self.history_count = 0
+        
+    def forward(self, x, weight=None):
+        # weight: (seq_len, N, num_adapters), a frame-wise weight for adapters
+        ffw_out = self.ffw(x)
+        
+        L, N, _ = x.shape
+        if weight is None:
+            weight = torch.ones(L,N,self.num_adapters).to(x.device) / self.num_adapters
+        outputs = []
+        for i, m in enumerate(self.adapters):
+            outputs.append(weight[...,i].unsqueeze(-1) * m(x))
+        outputs = sum(outputs)
+        
+        if not self.training:
+            self.history_weight.append(weight.mean(dim=0))
+        
+        return ffw_out + outputs
+
+
 class MultiAdapter(nn.Module):
     def __init__(
         self,
