@@ -54,6 +54,9 @@ class PromptedAudioEncoder(nn.Module):
         do_ASR: bool = True,
         do_AT: bool = True,
         do_SV: bool = True,
+        sv_KD: bool = False,
+        num_spkrs: int = 1211,
+        speaker_embed_dim: int = 192,
     ):
         """
         Args:
@@ -131,9 +134,19 @@ class PromptedAudioEncoder(nn.Module):
         
         # speaker verification
         self.do_SV = do_SV
+        self.sv_KD = sv_KD
         if self.do_SV:
+            self.speaker_embed_dim = speaker_embed_dim
             self.asp = AttentiveStatisticsPooling(channels=encoder_dim)
-            self.speaker_proj = nn.Linear(2 * encoder_dim, 192)
+            self.speaker_proj = nn.Linear(2 * encoder_dim, speaker_embed_dim)
+            self.speaker_pred = nn.Linear(speaker_embed_dim, num_spkrs)
+            
+            # when performing KD for SV, use cosine similarity as loss function
+            # otherwise do the CE-based loss
+            if self.sv_KD:
+                self.sv_loss_mode = "cosine"
+            else:
+                self.sv_loss_mode = "ce"
             
         self.universal_prompt_prob = universal_prompt_prob
         
@@ -274,12 +287,10 @@ class PromptedAudioEncoder(nn.Module):
         if task_ids == None:
             ada_weight = torch.ones(N, self.num_tasks).to(device) / self.num_tasks
         else:
-            
             ada_weight = torch.zeros(N, self.num_tasks).to(device)
             for i in range(1, self.num_tasks+1):
                 mask = task_ids == i
                 ada_weight[mask, i-1] = 1.0
-            
         return ada_weight
 
     def forward_encoder(
@@ -401,11 +412,10 @@ class PromptedAudioEncoder(nn.Module):
             at_loss = torch.empty(0)
         
         # speaker verification
-        if self.do_SV:
-            ecapa_embeddings = self.forward_speaker(
-                encoder_out, encoder_out_lens
+        if self.do_SV and sv_targets is not None:
+            sv_loss = self.forward_speaker_verification(
+                encoder_out, encoder_out_lens, target=sv_targets, return_embedding=False, loss_mode=self.sv_loss_mode
             )
-            sv_loss = 1 - F.cosine_similarity(ecapa_embeddings, sv_targets, dim=-1, eps=1e-6)
         else:
             sv_loss = torch.empty(0)
         
@@ -488,17 +498,29 @@ class PromptedAudioEncoder(nn.Module):
 
         return at_loss
     
-    def forward_speaker(
+    def forward_speaker_verification(
         self,
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
+        target: torch.Tensor = None,
+        return_embedding: bool = False,
+        loss_mode: str="cosine",
     ):
+        # if loss_mode=cosine, target should be ()
         encoder_out = encoder_out.permute(0,2,1)
         encoder_out_lens = encoder_out_lens / torch.max(encoder_out_lens)
         asp_embedding = self.asp(encoder_out, encoder_out_lens) # (N,C,T)
         asp_embedding = asp_embedding.permute(0,2,1)
         asp_embedding = self.speaker_proj(asp_embedding) # (N, 1, 192)
         
-        return asp_embedding
+        if return_embedding:
+            return asp_embedding
+        
+        if loss_mode == "cosine":
+            loss = 1 - F.cosine_similarity(asp_embedding, target, dim=-1, eps=1e-6)
+        else:
+            logits = self.speaker_pred(asp_embedding.squeeze(dim=1))
+            loss = F.cross_entropy(logits, target, ignore_index=-100, reduction="none")
+        return loss
 
 Transducer = PromptedAudioEncoder # for decoding
