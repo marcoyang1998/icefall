@@ -648,7 +648,7 @@ class Zipformer2EncoderLayer(nn.Module):
         use_adapters: bool = False,
         adapter_dim: int = 16,
         num_adapters: int = 2,
-        learnable_uni_weight: bool = True,
+        learnable_uni_weight: bool = False,
     ) -> None:
         super(Zipformer2EncoderLayer, self).__init__()
         self.embed_dim = embed_dim
@@ -803,6 +803,14 @@ class Zipformer2EncoderLayer(nn.Module):
             max_abs=4.0,
         )
 
+    def get_adapter_weights(self, memory):
+        # memory: (L, num_tasks, C), bsz=1
+        adapter_weight = self.adapter_weights(memory) # (L,N,num_adapters)
+        adapter_weight = adapter_weight.mean(dim=0) # (N, num_adapters)
+        adapter_weight = adapter_weight.softmax(dim=-1) # (N, num_adapters)
+        
+        return adapter_weight
+
     def get_bypass_scale(self, batch_size: int):
         # returns bypass-scale of shape (num_channels,),
         # or (batch_size, num_channels,).  This is actually the
@@ -926,7 +934,7 @@ class Zipformer2EncoderLayer(nn.Module):
         else:
             cross_attn = None
             
-        if self.use_adapters and cross_attn is not None:
+        if self.use_adapters and memory is not None:
             adapter_weight = self.adapter_weights(memory) # (L,N,num_adapters)
             adapter_weight = adapter_weight.mean(dim=0) # (N, num_adapters)
             adapter_weight = adapter_weight.softmax(dim=-1) # (N, num_adapters)
