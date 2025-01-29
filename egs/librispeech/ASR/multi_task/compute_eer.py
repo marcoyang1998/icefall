@@ -331,7 +331,12 @@ def main():
                 ),
                 strict=False,
             )
-
+            
+            running_var = model.asp.tdnn.norm.norm.state_dict()["running_var"]
+            model.asp.tdnn.norm.norm.running_var = torch.where(running_var>0, running_var, 0.0)
+            running_mean = model.asp.tdnn.norm.norm.state_dict()["running_mean"]
+            model.asp.tdnn.norm.norm.running_mean = torch.where(running_mean>0, running_mean, 0.0)
+            
     model.to(device)
     model.eval()
     
