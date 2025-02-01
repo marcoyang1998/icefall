@@ -201,7 +201,7 @@ class Zipformer2(EncoderInterface):
                 dropout=dropout,
                 cnn_module_kernel=cnn_module_kernel[i],
                 causal=causal,
-                use_adapters=use_adapters if i>= self.memory_layer else False,
+                use_adapters=use_adapters,
                 adapter_dim=adapter_dim,
                 num_adapters=num_adapters,
                 learnable_uni_weight=learnable_uni_weight,
@@ -366,15 +366,6 @@ class Zipformer2(EncoderInterface):
             attn_mask = None
         else:
             attn_mask = self._get_attn_mask(x, chunk_size, left_context_chunks)
-
-        if self.training and memory is not None:
-            batch_size = x.shape[1]
-            # setting memory to zero should be equivalent to not using the
-            # memory input at all, since the Attention module has no biases.
-            memory = memory * (
-                torch.rand(batch_size, 1, device=memory.device)
-                > self.memory_dropout_rate
-            )
 
         for i, module in enumerate(self.encoders):
             ds = self.downsampling_factor[i]
@@ -934,21 +925,20 @@ class Zipformer2EncoderLayer(nn.Module):
         else:
             cross_attn = None
             
-        if self.use_adapters:
-            if memory is not None:
-                adapter_weight = self.adapter_weights(memory) # (L,N,num_adapters)
-                adapter_weight = adapter_weight.mean(dim=0) # (N, num_adapters)
-                adapter_weight = adapter_weight.softmax(dim=-1) # (N, num_adapters)
-                if random.random() < 0.004 and not self.training:
-                    with torch.no_grad():
-                        logging.info(f"Mean Adapter weights per batch: {adapter_weight.mean(dim=0)}")
-                        logging.info(f"Adapter weights: {adapter_weight[0]}")
-                        logging.info(f"std of weight for each adapter across the batch: {adapter_weight.std(0)}")                
-            else:
-                L,N,_ = src.shape
-                fake_memory = torch.zeros(N, self.memory_dim).to(src.device)
-                adapter_weight = self.adapter_weights(fake_memory) # (N, num_adapter)
-                adapter_weight = adapter_weight.softmax(dim=-1) # (N, num_adapters)
+        if self.use_adapters and memory is not None:
+            adapter_weight = self.adapter_weights(memory) # (L,N,num_adapters)
+            adapter_weight = adapter_weight.mean(dim=0) # (N, num_adapters)
+            adapter_weight = adapter_weight.softmax(dim=-1) # (N, num_adapters)
+            if random.random() < 0.004 and not self.training:
+                with torch.no_grad():
+                    logging.info(f"Mean Adapter weights per batch: {adapter_weight.mean(dim=0)}")
+                    logging.info(f"Adapter weights: {adapter_weight[0]}")
+                    logging.info(f"std of weight for each adapter across the batch: {adapter_weight.std(0)}")                
+        else:
+            L,N,_ = src.shape
+            fake_memory = torch.zeros(N, self.memory_dim).to(src.device)
+            adapter_weight = self.adapter_weights(fake_memory) # (N, num_adapter)
+            adapter_weight = adapter_weight.softmax(dim=-1) # (N, num_adapters)
 
         src = src + self.sequence_dropout(
             self.conv_module1(
