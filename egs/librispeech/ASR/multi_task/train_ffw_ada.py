@@ -87,7 +87,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils import _add_task_id, MetricsTracker
 
-from zipformer_ffw_ada2 import Zipformer2
+from zipformer_ffw_ada import Zipformer2
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -770,6 +770,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         use_adapters=params.use_adapters,
         adapter_dim=params.adapter_dim,
         num_tasks=params.num_tasks,
+        learnable_uni_weight=params.learnable_uni_weight,
     )
     return encoder
 
@@ -1547,7 +1548,8 @@ def run(rank, world_size, args):
         return True
     
     for k, cuts in train_cuts.items():
-        train_cuts[k] = cuts.filter(remove_short_and_long_utt)
+        if "audioset" not in k:
+            train_cuts[k] = cuts.filter(remove_short_and_long_utt)
     
     if params.bucketing_sampler:
         assert params.zip_sampler == False
