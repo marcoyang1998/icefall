@@ -398,6 +398,7 @@ class MultiTaskDataModule:
         if self.args.bucketing_sampler:
             logging.info("Using DynamicBucketingSampler.")
             assert self.args.zip_sampler == False, "Cannot use ZipSampler when using Dynamic Bucketing sampler"
+            assert self.args.at_weighted_sampler == False
             assert isinstance(cuts_train, CutSet), "DynamicBucketSampler only supports one training cuts"
             train_sampler = DynamicBucketingSampler(
                 cuts_train,
@@ -465,6 +466,18 @@ class MultiTaskDataModule:
             train_sampler = ZipSampler(
                 *samplers,
                 merge_batches=True
+            )
+        elif self.args.at_weighted_sampler:
+            assert not self.args.zip_sampler
+            assert not isinstance(cuts_train, list)
+            weights = self.audioset_sampling_weights()
+            train_sampler = WeightedSimpleCutSampler(
+                cuts_train,
+                weights,
+                num_samples=self.args.at_num_samples,
+                max_duration=self.args.max_duration,
+                shuffle=False,  # do not support shuffle
+                drop_last=self.args.drop_last,
             )
         else:
             logging.info("Using SimpleCutSampler.")

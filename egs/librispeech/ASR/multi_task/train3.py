@@ -1531,6 +1531,11 @@ def run(rank, world_size, args):
         else:
             train_cuts = train_cuts[0]
         assert isinstance(train_cuts, CutSet), type(train_cuts)
+    else:
+        assert len(train_cuts) == 1
+        assert "cuts_audioset" in train_cuts
+        train_cuts = train_cuts["cuts_audioset"]
+    
     logging.info(train_cuts)
 
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
