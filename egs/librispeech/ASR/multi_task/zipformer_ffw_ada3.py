@@ -713,7 +713,9 @@ class Zipformer2EncoderLayer(nn.Module):
         # By setting bias=True, we are actually learning a weight for universal mode 
         # setting bias=False is equivalent to forcing average weight in universal mode
         if use_adapters:
-            self.adapter_weights = nn.Linear(memory_dim, num_adapters, bias=learnable_uni_weight)
+            self.learnable_uni = learnable_uni_weight
+            if memory_dim > 0:
+                self.adapter_weights = nn.Linear(memory_dim, self.num_adapters, bias=learnable_uni_weight)
             self.feed_forward2 = MultiFfwAdapter(
                 embed_dim, feedforward_dim, dropout, adapter_dim=adapter_dim, num_adapters=num_adapters
             )
@@ -938,6 +940,12 @@ class Zipformer2EncoderLayer(nn.Module):
             if memory is not None:
                 adapter_weight = self.adapter_weights(memory) # (L,N,num_adapters)
                 adapter_weight = adapter_weight.mean(dim=0) # (N, num_adapters)
+                # by a small prob, hard set the adapter weight to average
+                # hope this will prevent some adapters from being dead
+                # only do this when we learn the universal weight
+                if self.learnable_uni and self.training:
+                    weight_mask = torch.rand(adapter_weight.shape[0], 1, device=src.device) > 0.05
+                    adapter_weight = adapter_weight * weight_mask
                 adapter_weight = adapter_weight.softmax(dim=-1) # (N, num_adapters)
                 if random.random() < 0.004 and not self.training:
                     with torch.no_grad():
@@ -2435,9 +2443,6 @@ class MultiAdapter(nn.Module):
         outputs = sum(outputs)
         
         if not self.training:
-            # self.history_weight = self.history_weight * self.history_count + weight.sum(dim=(0)) # (B,num_adapters)
-            # self.history_weight /= (self.history_count + N)
-            # self.history_count += N
             self.history_weight.append(weight.mean(dim=0))
         
         return x_orig + outputs
