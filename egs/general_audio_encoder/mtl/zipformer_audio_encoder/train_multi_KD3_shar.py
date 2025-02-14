@@ -313,6 +313,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--interpolate-teacher",
+        type=str2bool,
+        default=False,
+        help="""This should only be used when the teacher has a lower frame rate
+        than the student model. We use interpolation to find the nearest neighbour"""
+    )
+    
+    parser.add_argument(
         "--num-codebooks",
         type=int,
         default=8,
@@ -690,6 +698,10 @@ def get_model(params: AttributeDict) -> nn.Module:
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
+    
+    if params.interpolate_teacher:
+        logging.warning(f"Interpolate the teacher indexes to match the length of the student")
+        assert params.teacher_frame_ratio == 1
 
     model = MultiKDModel(
         encoder_embed=encoder_embed,
@@ -698,6 +710,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         num_codebooks=params.num_codebooks,
         distillation_layer=params.distillation_layer,
         distillation_delta=params.distillation_delta,
+        interpolate_teacher=params.interpolate_teacher,
         teacher_frame_ratio=params.teacher_frame_ratio,
     )
     return model
