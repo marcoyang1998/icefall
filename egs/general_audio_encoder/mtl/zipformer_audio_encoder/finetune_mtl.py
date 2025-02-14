@@ -1557,8 +1557,8 @@ def run(rank, world_size, args):
         }
         wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset] * params.repeat_wenetspeech)
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset] * params.repeat_wenetspeech)
         
     
     # combine the asr data

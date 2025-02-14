@@ -295,6 +295,12 @@ class MultiTaskDataModule:
             default="L",
         )
         
+        group.add_argument(
+            "--repeat-wenetspeech",
+            type=int,
+            default=1,
+        )
+        
         # KD related
         group.add_argument(
             "--mvq-KD",
