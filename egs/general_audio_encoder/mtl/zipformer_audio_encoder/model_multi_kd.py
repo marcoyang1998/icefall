@@ -38,6 +38,7 @@ class MultiKDModel(nn.Module):
         distillation_layer: int=9,
         distillation_delta: int=0,
         teacher_frame_ratio: int = 2,
+        interpolate_teacher: bool = False,
         num_events: int = 527
     ):
         """A joint CTC & Transducer ASR model.
@@ -84,6 +85,7 @@ class MultiKDModel(nn.Module):
         # codebooks for each frame
         self.num_codebooks= num_codebooks
         self.teacher_frame_ratio = teacher_frame_ratio 
+        self.interpolate_teacher = interpolate_teacher
         self.distillation_delta = distillation_delta
         
         if num_codebooks > 0:
@@ -185,10 +187,16 @@ class MultiKDModel(nn.Module):
         codebook_indexes: torch.Tensor,
     ):
         # align the encoder features with the codebook indexes
-        if codebook_indexes.shape[1] != encoder_out.shape[1]:
-            codebook_indexes = self.concat_successive_codebook_indexes(
-                encoder_out, codebook_indexes, ratio=self.teacher_frame_ratio
+        if self.interpolate_teacher:
+            codebook_indexes = self.interpolate_codebook_indexes(
+                encoder_out, codebook_indexes
             )
+        else:
+            if codebook_indexes.shape[1] != encoder_out.shape[1]:
+                codebook_indexes = self.concat_successive_codebook_indexes(
+                    encoder_out, codebook_indexes, ratio=self.teacher_frame_ratio
+                )
+                
         if self.distillation_delta > 0:
             codebook_indexes = codebook_indexes[:,:-self.distillation_delta, :]
             encoder_out = encoder_out[:, self.distillation_delta:, :]
@@ -223,6 +231,20 @@ class MultiKDModel(nn.Module):
         at_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
 
         return at_loss
+    
+    @staticmethod
+    def interpolate_codebook_indexes(middle_layer_output, codebook_indexes):
+        # This function addresses the case where the teacher has a lower frame rate
+        # than the student model
+        t_expected = middle_layer_output.shape[1]
+        N, T, C = codebook_indexes.shape # C should be 256
+        
+        codebook_indexes = codebook_indexes.permute(0,2,1).float() # (N,C,T)
+        codebook_indexes = torch.nn.functional.interpolate(codebook_indexes, t_expected)
+        codebook_indexes = codebook_indexes.permute(0,2,1).int() # (N,T,C)
+        
+        assert codebook_indexes.shape[1] == middle_layer_output.shape[1]
+        return codebook_indexes
     
     @staticmethod
     def concat_successive_codebook_indexes(middle_layer_output, codebook_indexes, ratio=2):

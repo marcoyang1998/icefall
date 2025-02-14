@@ -392,7 +392,7 @@ class MultiTaskDataModule:
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest(self.args.manifest_dir / "musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz")
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
