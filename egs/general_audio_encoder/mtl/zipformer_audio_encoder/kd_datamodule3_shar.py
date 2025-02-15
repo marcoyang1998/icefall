@@ -929,7 +929,7 @@ class MultiTaskDataModule:
             return cuts_train
     
     @lru_cache()
-    def multi_english_cuts(self) -> CutSet:
+    def multi_english_cuts(self):
         logging.info("About to get various English dataset cuts")
         datasets = ["peoplespeech", "common_voice_20200622"]
         datasets += ["en_us_english", "en8848", "ljspeech", "tatoeba", "ted", "vctk", "voase", "voaSplider"]
@@ -1081,16 +1081,16 @@ class MultiTaskDataModule:
         if self.args.voxceleb_subset == "only_vox2":
             logging.info("Only get the voxceleb2 cuts.")
             cuts = load_manifest_lazy(
-                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+                self.args.manifest_dir / "cuts_vox2_train.jsonl.gz"
             )
             return cuts
         cuts = load_manifest_lazy(
-            self.args.manifest_dir / "cuts_vox1_train-with-3-embeddings.jsonl.gz"
+            self.args.manifest_dir / "cuts_vox1_train.jsonl.gz"
         )
         if self.args.voxceleb_subset == "vox2":
             logging.info("Adding voxceleb2 cuts.")
             cuts += load_manifest_lazy(
-                self.args.manifest_dir / "cuts_vox2_train-with-3-embeddings.jsonl.gz"
+                self.args.manifest_dir / "cuts_vox2_train.jsonl.gz"
             )
         return cuts
 
