@@ -1089,7 +1089,7 @@ def train_one_epoch(
                 shard_count[sh] += 1
             else:
                 shard_count[sh] = 1
-            
+               
         if batch_idx % 200 == 1:
             shard_epoch = [int(c.shar_epoch) for c in cuts]
             max_epoch = max(shard_epoch)
@@ -1407,6 +1407,28 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
     
+    if params.use_mls:
+        mls_cuts = librispeech.mls_cuts()
+        mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
+        # mls cuts: 10801 hrs, 2619190 cuts
+        asr_training_cuts.append(mls_cuts)
+        asr_training_cuts_lens.append(2619190)
+        asr_training_cuts_duration.append(10801)
+    
+    if params.use_extra_chinese_dataset:
+        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(chineses_cuts)
+        asr_training_cuts_lens.append(chinese_cuts_len)
+        asr_training_cuts_duration.append(chinese_cut_durations)
+        
+    if params.use_extra_english_dataset:
+        englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
+        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(englishs_cuts)
+        asr_training_cuts_lens.append(english_cuts_len)
+        asr_training_cuts_duration.append(english_cut_durations)
+    
     # combine the asr data into a BIG cut
     assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
     if len(asr_training_cuts) > 1:
@@ -1452,9 +1474,6 @@ def run(rank, world_size, args):
     
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 0.98 or c.duration > 29.0:
-            # logging.warning(
-            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            # )
             return False
 
         return True

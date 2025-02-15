@@ -20,7 +20,7 @@
 import argparse
 import inspect
 import logging
-from functools import lru_cache
+from functools import lru_cache, cached_property
 from pathlib import Path
 from typing import Any, Dict, Optional, Union, List
 
@@ -315,6 +315,24 @@ class MultiTaskDataModule:
             type=str,
             default="medium",
             choices=["small", "medium", "large"]
+        )
+        
+        group.add_argument(
+            "--use-mls",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--use-extra-chinese-dataset",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--use-extra-english-dataset",
+            type=str2bool,
+            default=False,
         )
         
         group.add_argument(
@@ -809,7 +827,7 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
-        logging.info(f"About to get {self.args.libriheavy_subset} subset cuts")
+        logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
             medium_cuts = CutSet.from_shar(
                 in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
@@ -881,6 +899,119 @@ class MultiTaskDataModule:
     def wenetspeech_test_meeting_cuts(self) -> CutSet:
         logging.info("About to get TEST_MEETING cuts")
         return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_TEST_MEETING.jsonl.gz")
+    
+    @lru_cache()
+    def mls_cuts(self) -> CutSet:
+        logging.info("About to get MLS cuts")
+        if self.args.use_shar:
+            num_splits = 8
+            all_cuts = []
+            for i in range(num_splits):
+                split_dir = f"{str(self.args.shar_dir)}/MLS/split_{i}"
+                logging.info(f"Loading {split_dir}")
+                cuts = CutSet.from_shar(
+                    in_dir=split_dir,
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                    seed="randomized",
+                ).repeat()
+                cuts = cuts.resample(16000)
+                all_cuts.append(cuts)
+            return CutSet.mux(
+                *all_cuts,
+                weights=[1.0] * num_splits,
+                stop_early=False,
+            ).resample(16000)
+        else:
+            cuts_train = load_manifest_lazy(
+                self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+            )
+            return cuts_train
+    
+    @lru_cache()
+    def multi_english_cuts(self) -> CutSet:
+        logging.info("About to get various English dataset cuts")
+        datasets = ["peoplespeech", "common_voice_20200622"]
+        datasets += ["en_us_english", "en8848", "ljspeech", "tatoeba", "ted", "vctk", "voase", "voaSplider"]
+        all_cuts = []
+        cuts_duration = []
+        cuts_len = []
+        for dataset in datasets:
+            logging.info(f"Loading {dataset}")
+            cuts = CutSet.from_shar(
+                in_dir=f"{self.args.shar_dir}/{dataset}",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            all_cuts.append(cuts)
+            cuts_duration.append(self.dataset_duration_stats[dataset])
+            cuts_len.append(self.dataset_len_stats[dataset])
+
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=cuts_duration,
+            stop_early=False
+        )
+        all_cuts = all_cuts.resample(16000)
+        all_duration = sum(cuts_duration)
+        all_len = sum(cuts_len)
+        logging.info(f"Getting a total of {all_duration} hours ({all_len} samples) of English speech data. ")
+        return all_cuts, all_duration, all_len
+    
+    @lru_cache()
+    def multi_chinese_cuts(self):
+        logging.info("About to get various Chinese dataset cuts")
+        datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","common_voice_20200622","datatang1505"]
+        datasets += ["dialog3k", "magicdata", "sensetime", "ximalaya", "acq", "cantonese", "cs_wav", "dialog"]
+        datasets += ["MagicData_dialog","primewords_md_2018_set1","zhvoice","phone","speech_wav"]
+        datasets += ["digital_library_202003", "ST-CMDS-20170001_1-OS", "20220309"]
+        all_cuts = []
+        cuts_duration = []
+        cuts_len = []
+        for dataset in datasets:
+            logging.info(f"Loading {dataset}")
+            cuts = CutSet.from_shar(
+                in_dir=f"{self.args.shar_dir}/{dataset}",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            all_cuts.append(cuts)
+            cuts_duration.append(self.dataset_duration_stats[dataset])
+            cuts_len.append(self.dataset_len_stats[dataset])
+
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=cuts_duration,
+            stop_early=False
+        )
+        all_cuts = all_cuts.resample(16000)
+        all_duration = sum(cuts_duration)
+        all_len = sum(cuts_len)
+        # logging.info(f"Combining {datasets}")
+        logging.info(f"Getting a total of {all_duration} hours ({all_len} samples) of Chinese speech data. ")
+        return all_cuts, all_duration, all_len
+    
+    @cached_property
+    def dataset_duration_stats(self):
+        stats_file = f"{self.args.shar_dir}/stats_duration.txt"
+        stats = {}
+        with open(stats_file, "r") as f:
+            for line in f:
+                data = line.strip().split()
+                stats[data[0]] = float(data[1])
+        return stats
+    
+    @cached_property
+    def dataset_len_stats(self):
+        stats_file = f"{self.args.shar_dir}/stats_len.txt"
+        stats = {}
+        with open(stats_file, "r") as f:
+            for line in f:
+                data = line.strip().split()
+                stats[data[0]] = int(data[1])
+        return stats
     
     @lru_cache()
     def audioset_cuts(self) -> CutSet:
