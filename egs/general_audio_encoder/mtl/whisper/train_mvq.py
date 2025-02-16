@@ -5,6 +5,7 @@ from tqdm import tqdm
 
 import torch
 from lhotse import load_manifest_lazy
+from lhotse.features.io import LilcomChunkyReader
 import multi_quantization as quantization
 import numpy as np
 
@@ -21,7 +22,7 @@ def get_parser():
     )
     
     parser.add_argument(
-        "--quantizer-training-manifest",
+        "--input-manifest",
         type=str,
     )
     
@@ -44,26 +45,30 @@ def get_parser():
     )
     
     parser.add_argument(
-        "--valid-manifest",
-        type=str,
-        help="path to the validation manifest"
-    )
-    
-    parser.add_argument(
         "--quantizer-path",
         type=str,
         required=True,
     )
+    
+    parser.add_argument(
+        "quantizer_training_manifests",
+        type=str,
+        nargs="+",
+        help="The manifests used for quantizer training."
+    )
     return parser.parse_args()
 
-def prepare_lilcom_data(manifest, split=True):
-    logging.info(f"Preparing the lilcom data")
+def prepare_data(manifest_list, split=True):
+    # split needs to be True to enable shuffling! 
+    logging.info(f"Preparing the data")
     all_data = []
     num_frames = 0
-    for cut in tqdm(manifest):
-        feature = cut.load_custom("embedding").astype(np.float16)
-        num_frames += feature.shape[0]
-        all_data.append(feature)
+    for manifest in manifest_list:
+        manifest = load_manifest_lazy(manifest)
+        for cut in tqdm(manifest):
+            feature = cut.load_custom("embedding").astype(np.float16)
+            num_frames += feature.shape[0]
+            all_data.append(feature)
     
     all_data = np.concatenate(all_data, axis=0)
     
@@ -81,20 +86,17 @@ def prepare_lilcom_data(manifest, split=True):
 
 def train_quantizer(args):
     device = torch.device("cuda")
+    training_manifest = args.quantizer_training_manifests
     
     trainer = quantization.QuantizerTrainer(
         dim=args.embedding_dim,
         bytes_per_frame=args.num_codebooks,
         device=device,
-        phase_one_iters=20000,
-        phase_two_iters=20000,
+        phase_one_iters=50000,
+        phase_two_iters=50000,
     )
     
-    if args.feature_type == "h5":
-        train, valid = quantization.read_hdf5_data(args.embedding_path)
-    elif args.feature_type == "lilcom":
-        cuts = load_manifest_lazy(args.quantizer_training_manifest)
-        train, valid = prepare_lilcom_data(cuts)
+    train, valid = prepare_data(training_manifest, split=True)
     B = 1024  # Minibatch size, this is very arbitrary,
     # it's close to what we used when we tuned this method.
 
@@ -124,7 +126,7 @@ def train_quantizer(args):
 def evaluate_quantizer(quantizer, valid):
     device = torch.device("cuda")
     
-    B = 512
+    B = 1024
     num_batches = valid.shape[0] // B
     cur_start = 0
     
@@ -160,10 +162,17 @@ def main(args):
         quantizer = train_quantizer(args)
         quantizer.to(device)
         
-    valid_manifest = args.valid_manifest
-    if valid_manifest is not None:
-        valid_cuts = load_manifest_lazy(valid_manifest)
-        valid_data = prepare_lilcom_data(valid_cuts, split=False)
+    # evaluate quantizer
+    valid_manifests = [
+        # "manifests/libri-dev-other-whisper-turbo-layer--1.jsonl.gz",
+        # "manifests/giga-dev-whisper-turbo-layer--1.jsonl.gz",
+        # "manifests/wenetspeech-dev-whisper-turbo-layer--1.jsonl.gz",
+        # "manifests/aishell-test-whisper-turbo-layer--1.jsonl.gz",
+        # "manifests/baoxiang-20210816-whisper-turbo-layer--1.jsonl.gz"
+        "data/manifests/librispeech_cuts_dev-other.jsonl.gz"
+    ]
+    for valid_manifest in valid_manifests:
+        valid_data = prepare_data([valid_manifest], split=False)
         evaluate_quantizer(quantizer, valid_data)
     
 if __name__=="__main__":
