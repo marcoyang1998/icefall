@@ -320,5 +320,164 @@ fi
 
 # TODO: add more datasets here
 
+if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
+    log "Stage 12: Collect MVQ tokens on various Chinese datasets"
+    
+    #for dataset in aidatatang_200zh aishell3 cs_wav acq; do
+    #for dataset in aishell2 baidu_en_cn cantonese accent; do
+    # for dataset in datatang1505 dialog dialog3k magicdata MagicData_dialog ximalaya zhvoice; do
+    # for dataset in primewords_md_2018_set1 phone speech_wav; do
+    # for dataset in speech_wav peoplespeech; do
+    # for dataset in digital_library_202003 ST-CMDS-20170001_1-OS en_us_english en8848 ljspeech tatoeba ted vctk voase voaSplider; do
+    for dataset in 20220309; do
+        log "Processing $dataset"
+        mkdir -p $vq_dir/${dataset}
+        python multi_KD/extract_whisper_mvq.py \
+            --num-jobs 8 \
+            --input-manifest ASR_data/preprocessed_manifest/${dataset}_cuts.jsonl.gz \
+            --target-manifest-file $vq_dir/${dataset}_cuts.jsonl.gz \
+            --n-mels 128 \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-${dataset} \
+            --embedding-dir $vq_dir/${dataset} \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+
+if [ $stage -le 13 ] && [ $stop_stage -ge 13 ]; then
+    log "Stage 13: Collect MVQ tokens on MLS"
+    num_splits=8
+    split_dir=$vq_dir/MLS_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split $num_splits ASR_data/preprocessed_manifest/MLS_cuts.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+    
+    for i in $(seq 0 1 $(($num_splits-1))); do
+        log "Start encoding MLS split ${i}"
+        if [ ! -f  $split_dir/MLS_cuts.${i}.processed.jsonl.gz ]; then
+            python multi_KD/extract_whisper_mvq.py \
+                --num-jobs 8 \
+                --input-manifest $split_dir/MLS_cuts.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/MLS_cuts.${i}.processed.jsonl.gz \
+                --n-mels 128 \
+                --embedding-dim 1280 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-MLS-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer -1 \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/MLS_cuts.jsonl.gz ]; then
+        log "Combining the processed cuts of MLS"
+        pieces=$(find $split_dir -name "MLS_cuts.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/MLS_cuts.jsonl.gz
+    fi
+fi
+
+if [ $stage -le 14 ] && [ $stop_stage -ge 14 ]; then
+    log "Stage 14: Collect MVQ tokens on sensetime data"
+    subset=sensetime
+    num_splits=3
+    split_dir=$vq_dir/${subset}_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split $num_splits ASR_data/preprocessed_manifest/${subset}_cuts.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+    
+    for i in $(seq 0 1 $(($num_splits-1))); do
+        log "Start encoding ${subset} split ${i}"
+        if [ ! -f  $split_dir/${subset}_cuts.${i}.processed.jsonl.gz ]; then
+            python multi_KD/extract_whisper_mvq.py \
+                --num-jobs 8 \
+                --input-manifest $split_dir/${subset}_cuts.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/${subset}_cuts.${i}.processed.jsonl.gz \
+                --n-mels 128 \
+                --embedding-dim 1280 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-${subset}-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer -1 \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/${subset}_cuts.jsonl.gz ]; then
+        log "Combining the processed cuts of ${subset}"
+        pieces=$(find $split_dir -name "${subset}_cuts.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/${subset}_cuts.jsonl.gz
+    fi
+fi
+
+if [ $stage -le 15 ] && [ $stop_stage -ge 15 ]; then
+    log "Stage 15: Collect MVQ tokens on various English datasets"
+    for dataset in common_voice_20200622 en_us_english; do
+        log "Processing $dataset"
+        mkdir -p $vq_dir/${dataset}
+        python multi_KD/extract_whisper_mvq.py \
+            --num-jobs 4 \
+            --input-manifest ASR_data/preprocessed_manifest/${dataset}_cuts.jsonl.gz \
+            --target-manifest-file $vq_dir/${dataset}_cuts.jsonl.gz \
+            --n-mels 128 \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-${dataset} \
+            --embedding-dir $vq_dir/${dataset} \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 16 ] && [ $stop_stage -ge 16 ]; then
+    log "Stage 16: Collect MVQ tokens on speech_annotations data"
+    subset=speech_annotations_2021
+    num_splits=10
+    split_dir=$vq_dir/${subset}_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split --no-pad $num_splits ASR_data/preprocessed_manifest/${subset}_cuts.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+    
+    # for i in $(seq 0 1 $(($num_splits-1))); do
+    # for i in $(seq 0 1 4); do
+    for i in $(seq 5 1 $(($num_splits-1))); do
+        log "Start encoding ${subset} split ${i}"
+        if [ ! -f  $split_dir/${subset}_cuts.${i}.processed.jsonl.gz ]; then
+            python multi_KD/extract_whisper_mvq.py \
+                --num-jobs 8 \
+                --input-manifest $split_dir/${subset}_cuts.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/${subset}_cuts.${i}.processed.jsonl.gz \
+                --n-mels 128 \
+                --embedding-dim 1280 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-${subset}-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer -1 \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/${subset}_cuts.jsonl.gz ]; then
+        log "Combining the processed cuts of ${subset}"
+        pieces=$(find $split_dir -name "${subset}_cuts.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/${subset}_cuts.jsonl.gz
+    fi
+fi
 
 log "Done"

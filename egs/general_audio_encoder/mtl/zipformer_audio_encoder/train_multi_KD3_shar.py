@@ -77,9 +77,9 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_dummy_embeddings_and_taskIDs, _add_task_id, MetricsTracker, setup_distributed
+from utils import _add_task_id, MetricsTracker, setup_distributed
 
-from zipformer import Zipformer2
+from zipformer2 import Zipformer2
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -175,6 +175,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str,
         default="2,2,3,4,3,2",
         help="Number of zipformer encoder layers per stack, comma separated.",
+    )
+
+    parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=2,
+        help="The outout downsampling factor. Default is 2. If 1, no downsample is performed.",
     )
 
     parser.add_argument(
@@ -673,7 +680,7 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
@@ -702,6 +709,14 @@ def get_model(params: AttributeDict) -> nn.Module:
     if params.interpolate_teacher:
         logging.warning(f"Interpolate the teacher indexes to match the length of the student")
         assert params.teacher_frame_ratio == 1
+        
+    if params.output_downsampling_factor == 1:
+        logging.info(f"Setting the output downsample factor to 1.")
+        if params.teacher_frame_ratio > 1:
+            logging.warning(
+                f"You are using teacher_frame_ratio={params.teacher_frame_ratio}"
+                "However, the output downsampling factor is 1. This could be wrong!"
+            )
 
     model = MultiKDModel(
         encoder_embed=encoder_embed,
@@ -1085,17 +1100,12 @@ def train_one_epoch(
         count = {orig: 0 for orig in unique_origin}
         for sh in shard_origin:
             count[sh] += 1
-            if sh in shard_count:
-                shard_count[sh] += 1
-            else:
-                shard_count[sh] = 1
                
         if batch_idx % 200 == 1:
             shard_epoch = [int(c.shar_epoch) for c in cuts]
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
             logging.info(count)
-            logging.info(f"Batch {batch_idx}: Cuts stats: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(

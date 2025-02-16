@@ -168,7 +168,7 @@ class MultiKDModel(nn.Module):
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
-        if codebook_indexes is not None:
+        if codebook_indexes is not None and self.codebook_loss_net is not None:
             codebook_loss = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes)
         else:
             codebook_loss = None
@@ -193,10 +193,13 @@ class MultiKDModel(nn.Module):
             )
         else:
             if codebook_indexes.shape[1] != encoder_out.shape[1]:
+                # align the codebook indexes to the frame rate of the student encoder out
                 codebook_indexes = self.concat_successive_codebook_indexes(
                     encoder_out, codebook_indexes, ratio=self.teacher_frame_ratio
                 )
                 
+        # the delta is associated with the frame-rate of the encoder
+        # so a bigger delta maybe necessary for 50Hz student encoder
         if self.distillation_delta > 0:
             codebook_indexes = codebook_indexes[:,:-self.distillation_delta, :]
             encoder_out = encoder_out[:, self.distillation_delta:, :]
@@ -206,7 +209,7 @@ class MultiKDModel(nn.Module):
         N,T,_ = encoder_out.shape
         codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
-        num_cb = codebook_loss.size(-1)
+        num_cb = codebook_loss.size(-1) * (2 / self.teacher_frame_ratio) # TODO: ugly way to keep the value comparable, need to change
         # normalize the loss by the number of codebooks
         codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb
         
