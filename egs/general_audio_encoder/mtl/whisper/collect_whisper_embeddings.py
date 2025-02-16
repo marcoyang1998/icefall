@@ -154,7 +154,7 @@ def extract_embeddings(
                     duration=cut.duration,
                     channel=cut.channel,
                 )
-                new_cut.whisper_embedding = writer.store_array(
+                new_cut.embedding = writer.store_array(
                     key=cut.id,
                     value=embeddings[idx][: embedding_lens[idx]],
                     temporal_dim=0,
@@ -185,7 +185,7 @@ def join_manifests(
     embedding_cuts = embedding_cuts.sort_like(input_cuts)
     for cut_idx, (ori_cut, embed_cut) in enumerate(zip(input_cuts, embedding_cuts)):
         assert ori_cut.id == embed_cut.id
-        ori_cut.whisper_embedding = embed_cut.whisper_embedding
+        ori_cut.embedding = embed_cut.embedding
     
     input_cuts.to_jsonl(output_dir)
     print(f"Saved the joined manifest to {output_dir}")
