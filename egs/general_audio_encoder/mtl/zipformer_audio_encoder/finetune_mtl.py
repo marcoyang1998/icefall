@@ -70,6 +70,7 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 from mtl_datamodule import MultiTaskDataModule
+from attention_decoder import AttentionDecoderModel
 from decoder import Decoder
 from joiner import Joiner
 from lhotse.cut import Cut, CutSet
@@ -346,6 +347,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=True,
         help="If True, use Transducer head.",
+    )
+    
+    parser.add_argument(
+        "--use-attention-decoder",
+        type=str2bool,
+        default=False,
+        help="If True, use attention-decoder head.",
     )
 
     parser.add_argument(
@@ -741,6 +749,22 @@ def get_joiner_model(params: AttributeDict) -> nn.Module:
     )
     return joiner
 
+def get_attention_decoder_model(params: AttributeDict) -> nn.Module:
+    decoder = AttentionDecoderModel(
+        vocab_size=params.vocab_size,
+        decoder_dim=params.attention_decoder_dim,
+        num_decoder_layers=params.attention_decoder_num_layers,
+        attention_dim=params.attention_decoder_attention_dim,
+        num_heads=params.attention_decoder_num_heads,
+        feedforward_dim=params.attention_decoder_feedforward_dim,
+        memory_dim=max(_to_int_tuple(params.encoder_dim)),
+        sos_id=params.sos_id,
+        eos_id=params.eos_id,
+        ignore_id=params.ignore_id,
+        label_smoothing=params.label_smoothing,
+    )
+    return decoder
+
 
 def get_model(params: AttributeDict) -> nn.Module:
     assert params.use_transducer or params.use_ctc, (
@@ -758,17 +782,25 @@ def get_model(params: AttributeDict) -> nn.Module:
     else:
         decoder = None
         joiner = None
+        
+    if params.use_attention_decoder:
+        assert params.causal == False
+        attention_decoder = get_attention_decoder_model(params)
+    else:
+        attention_decoder = None
 
     model = MultiTaskModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
         joiner=joiner,
+        attention_decoder=attention_decoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
         decoder_dim=params.decoder_dim,
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
+        use_attention_decoder=params.use_attention_decoder,
         num_events=params.num_events,
     )
     return model
@@ -1013,7 +1045,7 @@ def compute_loss(
             at_targets=at_targets,
             freeze_encoder=freeze_encoder,
         )
-        simple_loss, pruned_loss, ctc_loss, audio_tagging_loss = losses[:4]
+        simple_loss, pruned_loss, ctc_loss, attention_decoder_loss, audio_tagging_loss = losses
 
         loss = 0.0
 
@@ -1038,6 +1070,10 @@ def compute_loss(
             pruned_loss = (pruned_loss * asr_mask).sum()
             
             loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
+            
+        if params.use_attention_decoder:
+            attention_decoder_loss = (attention_decoder_loss * asr_mask).sum()
+            loss += params.attention_decoder_loss_scale * attention_decoder_loss
 
         if params.use_ctc:
             ctc_loss = (ctc_loss * asr_mask).sum()
@@ -1063,6 +1099,8 @@ def compute_loss(
         info["pruned_loss"] = pruned_loss.detach().cpu().item()
     if params.use_ctc:
         info["ctc_loss"] = ctc_loss.detach().cpu().item()
+    if params.use_attention_decoder:
+        info["attention_decoder_loss"] = attention_decoder_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 

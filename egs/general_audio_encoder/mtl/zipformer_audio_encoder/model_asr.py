@@ -33,11 +33,13 @@ class AsrModel(nn.Module):
         encoder: nn.Module,
         decoder: Optional[nn.Module] = None,
         joiner: Optional[nn.Module] = None,
+        attention_decoder: Optional[nn.Module] = None,
         encoder_dim: int = 384,
         decoder_dim: int = 512,
         vocab_size: int = 500,
         use_transducer: bool = True,
         use_ctc: bool = False,
+        use_attention_decoder: bool = False, 
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -104,6 +106,8 @@ class AsrModel(nn.Module):
                 nn.Linear(encoder_dim, vocab_size),
                 nn.LogSoftmax(dim=-1),
             )
+        self.use_attention_decoder = use_attention_decoder
+        self.attention_decoder = attention_decoder
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor, freeze_encoder: bool=False,
@@ -362,11 +366,13 @@ class MultiTaskModel(nn.Module):
         encoder: nn.Module,
         decoder: Optional[nn.Module] = None,
         joiner: Optional[nn.Module] = None,
+        attention_decoder: Optional[nn.Module] = None,
         encoder_dim: int = 384,
         decoder_dim: int = 512,
         vocab_size: int = 500,
         use_transducer: bool = True,
         use_ctc: bool = False,
+        use_attention_decoder: bool = False,
         num_events: int = 527,
     ):
         """A joint CTC & Transducer ASR model.
@@ -434,6 +440,9 @@ class MultiTaskModel(nn.Module):
                 nn.Linear(encoder_dim, vocab_size),
                 nn.LogSoftmax(dim=-1),
             )
+        
+        self.use_attention_decoder = use_attention_decoder
+        self.attention_decoder = attention_decoder
         
         self.audio_tagging_proj = nn.Sequential(
             nn.Dropout(0.1),
@@ -650,6 +659,7 @@ class MultiTaskModel(nn.Module):
         assert y.num_axes == 2, y.num_axes
 
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
+        device = x.device
 
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(
@@ -688,12 +698,22 @@ class MultiTaskModel(nn.Module):
         else:
             ctc_loss = torch.empty(0)
             
+        if self.use_attention_decoder:
+            attention_decoder_loss = self.attention_decoder.calc_att_loss(
+                encoder_out=encoder_out,
+                encoder_out_lens=encoder_out_lens,
+                ys=y.to(device),
+                ys_lens=y_lens.to(device),
+            )
+        else:
+            attention_decoder_loss = torch.empty(0)
+            
         if at_targets is not None:
             at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
             at_loss = None
         
-        return simple_loss, pruned_loss, ctc_loss, at_loss
+        return simple_loss, pruned_loss, ctc_loss, attention_decoder_loss, at_loss
     
     def forward_audio_tagging(
         self,
