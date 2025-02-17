@@ -20,6 +20,13 @@ def remove_non_alphabetic(text: str, strict: bool = True) -> str:
         # only keeps space
         return re.sub(r"[^a-zA-Z\s]+", "", text)
 
+def map_zh(c):
+    from icefall.utils import tokenize_by_CJK_char
+    from icefall.byte_utils import byte_encode
+    text = c.supervisions[0].text
+    text = byte_encode(tokenize_by_CJK_char(text))
+    c.supervisions[0].text = text
+    return c
 
 def upper_only_alpha(c):
     text = c.supervisions[0].text

@@ -301,6 +301,12 @@ class MultiTaskDataModule:
             default=1,
         )
         
+        group.add_argument(
+            "--use-aishell",
+            type=str2bool,
+            default=False,
+        )
+        
         # KD related
         group.add_argument(
             "--mvq-KD",
@@ -877,6 +883,21 @@ class MultiTaskDataModule:
     def wenetspeech_test_meeting_cuts(self) -> CutSet:
         logging.info("About to get TEST_MEETING cuts")
         return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_TEST_MEETING.jsonl.gz")
+    
+    @lru_cache()
+    def aishell_train_cuts(self) -> CutSet:
+        logging.info("About to get aishell training cuts")
+        return load_manifest_lazy(self.args.manifest_dir / "aishell_cuts_train.jsonl.gz")
+    
+    @lru_cache()
+    def aishell_dev_cuts(self) -> CutSet:
+        logging.info("About to get aishell dev cuts")
+        return load_manifest_lazy(self.args.manifest_dir / "aishell_cuts_dev.jsonl.gz")
+    
+    @lru_cache()
+    def aishell_test_cuts(self) -> CutSet:
+        logging.info("About to get aishell test cuts")
+        return load_manifest_lazy(self.args.manifest_dir / "aishell_cuts_test.jsonl.gz")
     
     @lru_cache()
     def audioset_cuts(self) -> CutSet:

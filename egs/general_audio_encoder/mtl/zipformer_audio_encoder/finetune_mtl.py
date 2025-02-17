@@ -111,6 +111,7 @@ from utils import (
     upper_only_alpha,
     MetricsTracker,
     _add_task_id,
+    map_zh,
     setup_distributed,   
 )
 
@@ -1573,14 +1574,6 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
     
     if params.use_wenetspeech:
-        def map_zh(c):
-            from icefall.utils import tokenize_by_CJK_char
-            from icefall.byte_utils import byte_encode
-            text = c.supervisions[0].text
-            text = byte_encode(tokenize_by_CJK_char(text))
-            c.supervisions[0].text = text
-            return c
-            
         wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
         wenetspeech_cuts = wenetspeech_cuts.map(map_zh)
         wenetspeech_cuts_len = {
@@ -1598,6 +1591,14 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset] * params.repeat_wenetspeech)
         asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset] * params.repeat_wenetspeech)
         
+    if params.use_aishell:
+        aishell_cuts = librispeech.aishell_train_cuts()
+        aishell_cuts = aishell_cuts.map(map_zh)
+        aishell_cuts = aishell_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        # aishell stats: 170 hrs, 120098 cuts
+        asr_training_cuts.append(aishell_cuts)
+        asr_training_cuts_lens.append(120098)
+        asr_training_cuts_duration.append(150)
     
     # combine the asr data
     assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
@@ -1637,39 +1638,12 @@ def run(rank, world_size, args):
     logging.info(train_cuts)
 
     def remove_short_and_long_utt(c: Cut):
-        # Keep only utterances with duration between 1 second and 20 seconds
-        #
-        # Caution: There is a reason to select 20.0 here. Please see
-        # ../local/display_manifest_statistics.py
-        #
-        # You should use ../local/display_manifest_statistics.py to get
-        # an utterance duration distribution for your dataset to select
-        # the threshold
-        if c.duration < 1.0 or c.duration > 21.0:
+        # Keep only utterances with duration between 1 second and 29 seconds
+        if c.duration < 1.0 or c.duration > 29.0:
             # logging.warning(
             #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
             # )
             return False
-
-        # In pruned RNN-T, we require that T >= S
-        # where T is the number of feature frames after subsampling
-        # and S is the number of tokens in the utterance
-
-        # In ./zipformer.py, the conv module uses the following expression
-        # for subsampling
-        # T = ((c.num_frames - 7) // 2 + 1) // 2
-        # tokens = sp.encode(c.supervisions[0].text, out_type=str)
-
-        # if T < len(tokens):
-        #     logging.warning(
-        #         f"Exclude cut with ID {c.id} from training. "
-        #         f"Number of frames (before subsampling): {c.num_frames}. "
-        #         f"Number of frames (after subsampling): {T}. "
-        #         f"Text: {c.supervisions[0].text}. "
-        #         f"Tokens: {tokens}. "
-        #         f"Number of tokens: {len(tokens)}"
-        #     )
-        #     return False
 
         return True
 
@@ -1738,6 +1712,14 @@ def run(rank, world_size, args):
         asr_wenet_valid_dl = librispeech.valid_dataloaders(wenet_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("wenetspeech")
         valid_dls.append(asr_wenet_valid_dl)
+        
+    if params.use_aishell:
+        aishell_dev_cuts = librispeech.aishell_dev_cuts()
+        aishell_dev_cuts = aishell_dev_cuts.map(map_zh)
+        aishell_dev_cuts = aishell_dev_cuts.map(partial(_add_task_id, 1))
+        asr_aishell_valid_dl = librispeech.valid_dataloaders(aishell_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("aishell")
+        valid_dls.append(asr_aishell_valid_dl)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:

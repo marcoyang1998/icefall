@@ -380,7 +380,36 @@ def get_parser():
         default=False,
         help="""Skip scoring, but still save the ASR output (for eval sets).""",
     )
+    
+    parser.add_argument(
+        "--test-libri",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--test-wenet",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--test-aishell",
+        type=str2bool,
+        default=False,
+    )
 
+    parser.add_argument(
+        "--blank-penalty",
+        type=float,
+        default=0.0,
+        help="""
+        The penalty applied on blank symbol during decoding.
+        Note: It is a positive value that would be applied to logits like
+        this `logits[:, 0] -= blank_penalty` (suppose logits.shape is
+        [batch_size, vocab] and blank id is 0).
+        """,
+    )
     add_model_arguments(parser)
 
     return parser
@@ -468,6 +497,7 @@ def decode_one_batch(
             beam=params.beam,
             max_contexts=params.max_contexts,
             max_states=params.max_states,
+            blank_penalty=params.blank_penalty,
         )
         for hyp in sp.decode(hyp_tokens):
             hyps.append(hyp.split())
@@ -482,6 +512,7 @@ def decode_one_batch(
             max_states=params.max_states,
             num_paths=params.num_paths,
             nbest_scale=params.nbest_scale,
+            blank_penalty=params.blank_penalty,
         )
         for hyp in hyp_tokens:
             hyps.append([word_table[i] for i in hyp])
@@ -496,6 +527,7 @@ def decode_one_batch(
             max_states=params.max_states,
             num_paths=params.num_paths,
             nbest_scale=params.nbest_scale,
+            blank_penalty=params.blank_penalty,
         )
         for hyp in sp.decode(hyp_tokens):
             hyps.append(hyp.split())
@@ -511,6 +543,7 @@ def decode_one_batch(
             num_paths=params.num_paths,
             ref_texts=sp.encode(supervisions["text"]),
             nbest_scale=params.nbest_scale,
+            blank_penalty=params.blank_penalty,
         )
         for hyp in sp.decode(hyp_tokens):
             hyps.append(hyp.split())
@@ -519,6 +552,7 @@ def decode_one_batch(
             model=model,
             encoder_out=encoder_out,
             encoder_out_lens=encoder_out_lens,
+            blank_penalty=params.blank_penalty,
         )
         for hyp in sp.decode(hyp_tokens):
             hyps.append("".join(smart_byte_decode(hyp).split()))
@@ -529,6 +563,7 @@ def decode_one_batch(
             encoder_out_lens=encoder_out_lens,
             beam=params.beam_size,
             context_graph=context_graph,
+            blank_penalty=params.blank_penalty,
         )
         for hyp in sp.decode(hyp_tokens):
             hyps.append(hyp.split())
@@ -855,7 +890,8 @@ def main():
             params.suffix += (
                 f"_LODR-{params.tokens_ngram}gram-scale-{params.ngram_lm_scale}"
             )
-
+    params.suffix += f"-blank-penalty-{params.blank_penalty}"
+    
     if params.use_averaged_model:
         params.suffix += "_use-averaged-model"
 
@@ -1046,28 +1082,42 @@ def main():
     args.return_cuts = True
     librispeech = MultiTaskDataModule(args)
 
-    test_clean_cuts = librispeech.test_clean_cuts()
-    test_clean_cuts = test_clean_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
-    test_other_cuts = librispeech.test_other_cuts()
-    test_other_cuts = test_other_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+    test_sets = []
+    test_dls = []
     
-    wenet_test_net_cuts = librispeech.wenetspeech_test_net_cuts()
-    wenet_test_net_cuts = wenet_test_net_cuts.map(partial(_add_task_id, 1))
-    wenet_test_meeting_cuts = librispeech.wenetspeech_test_meeting_cuts()
-    wenet_test_meeting_cuts = wenet_test_meeting_cuts.map(partial(_add_task_id, 1))
-
-    test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
-    test_other_dl = librispeech.test_dataloaders(test_other_cuts)
-    wenet_test_net_dl = librispeech.test_dataloaders(wenet_test_net_cuts)
-    wenet_test_meeting_dl = librispeech.test_dataloaders(wenet_test_meeting_cuts)
-
-    # test_sets = ["test-clean", "test-other", "test-net", "test-meeting"]
-    # test_dl = [test_clean_dl, test_other_dl, wenet_test_net_dl, wenet_test_meeting_dl]
+    if params.test_libri:
+        test_clean_cuts = librispeech.test_clean_cuts()
+        test_clean_cuts = test_clean_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+        test_other_cuts = librispeech.test_other_cuts()
+        test_other_cuts = test_other_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+        
+        test_dls.append(librispeech.test_dataloaders(test_clean_cuts))
+        test_dls.append(librispeech.test_dataloaders(test_other_cuts))
+        
+        test_sets += ["ls-test-clean", "ls-test-other"]
     
-    test_sets = [ "test-net", "test-meeting"]
-    test_dl = [wenet_test_net_dl, wenet_test_meeting_dl]
+    if params.test_wenet:
+        wenet_test_net_cuts = librispeech.wenetspeech_test_net_cuts()
+        wenet_test_net_cuts = wenet_test_net_cuts.map(partial(_add_task_id, 1))
+        wenet_test_meeting_cuts = librispeech.wenetspeech_test_meeting_cuts()
+        wenet_test_meeting_cuts = wenet_test_meeting_cuts.map(partial(_add_task_id, 1))
+        
+        test_dls.append(librispeech.test_dataloaders(wenet_test_net_cuts))
+        test_dls.append(librispeech.test_dataloaders(wenet_test_meeting_cuts))
+        test_sets += [ "wenet-test-net", "wenet-test-meeting"]
 
-    for test_set, test_dl in zip(test_sets, test_dl):
+    if params.test_aishell:
+        aishell_dev_cuts = librispeech.aishell_dev_cuts()
+        aishell_dev_cuts = aishell_dev_cuts.map(partial(_add_task_id, 1))
+        aishell_test_cuts = librispeech.aishell_test_cuts()
+        aishell_test_cuts = aishell_test_cuts.map(partial(_add_task_id, 1))
+        
+        test_dls.append(librispeech.test_dataloaders(aishell_dev_cuts))
+        test_dls.append(librispeech.test_dataloaders(aishell_test_cuts))
+        
+        test_sets += [ "aishell-dev", "aishell-test"]
+
+    for test_set, test_dl in zip(test_sets, test_dls):
         results_dict = decode_dataset(
             dl=test_dl,
             params=params,
