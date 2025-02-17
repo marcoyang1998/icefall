@@ -366,6 +366,7 @@ class MultiTaskModel(nn.Module):
         encoder: nn.Module,
         decoder: Optional[nn.Module] = None,
         joiner: Optional[nn.Module] = None,
+        encoder_downsample: Optional[nn.Module] = None,
         attention_decoder: Optional[nn.Module] = None,
         encoder_dim: int = 384,
         decoder_dim: int = 512,
@@ -414,6 +415,7 @@ class MultiTaskModel(nn.Module):
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
+        self.encoder_downsample = encoder_downsample
 
         self.use_transducer = use_transducer
         if use_transducer:
@@ -475,6 +477,13 @@ class MultiTaskModel(nn.Module):
             encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
+        
+        # if an extra downsample is placed after the encoder
+        if self.encoder_downsample is not None:
+            encoder_out = encoder_out.permute(1, 0, 2)
+            encoder_out = self.encoder_downsample(encoder_out)
+            encoder_out = encoder_out.permute(1, 0, 2)
+            encoder_out_lens = (encoder_out_lens + 1 ) // 2
 
         return encoder_out, encoder_out_lens
 

@@ -84,7 +84,7 @@ from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-from zipformer import Zipformer2
+from zipformer2 import Zipformer2, SimpleDownsample
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -210,6 +210,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str,
         default="2,2,3,4,3,2",
         help="Number of zipformer encoder layers per stack, comma separated.",
+    )
+    
+    parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=2,
+        help="The outout downsampling factor. Default is 2. If 1, no downsample is performed.",
+    )
+    
+    parser.add_argument(
+        "--post-encoder-downsampling-factor",
+        type=int,
+        default=1,
+        help="The ds factor after the zipformer encoder",
     )
 
     parser.add_argument(
@@ -709,8 +723,11 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
 
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
+    if params.output_downsampling_factor == 2:
+        assert params.post_encoder_downsampling_factor == 1, "CANNOT perform double output downsample!"
+        
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
@@ -730,6 +747,16 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     )
     return encoder
 
+def get_encoder_downsample_module(params: AttributeDict) -> nn.Module:
+    if params.post_encoder_downsampling_factor > 1:
+        downsample_module = SimpleDownsample(
+            max(_to_int_tuple(params.encoder_dim)),
+            downsample=params.post_encoder_downsampling_factor,
+            dropout=0.0,
+        )
+    else:
+        downsample_module = None
+    return downsample_module
 
 def get_decoder_model(params: AttributeDict) -> nn.Module:
     decoder = Decoder(
@@ -776,6 +803,7 @@ def get_model(params: AttributeDict) -> nn.Module:
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
+    post_encoder_downsample = get_encoder_downsample_module(params)
 
     if params.use_transducer:
         decoder = get_decoder_model(params)
@@ -793,6 +821,7 @@ def get_model(params: AttributeDict) -> nn.Module:
     model = MultiTaskModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
+        encoder_downsample=post_encoder_downsample,
         decoder=decoder,
         joiner=joiner,
         attention_decoder=attention_decoder,

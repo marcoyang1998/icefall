@@ -106,7 +106,7 @@ import sentencepiece as spm
 import torch
 import torch.nn as nn
 
-from train_multi_KD3_multinode import add_model_arguments, get_model, get_params
+from train_multi_KD3_shar import add_model_arguments, get_model, get_params
 
 from icefall.checkpoint import (
     average_checkpoints,
