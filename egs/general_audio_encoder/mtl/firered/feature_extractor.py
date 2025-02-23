@@ -27,9 +27,8 @@ class ASRFeatExtractor:
     def __call__(self, wav_paths: list, start_list: list, dur_list: list):
         feats = []
         durs = []
-        import pdb; pdb.set_trace()
         for wav_path, start, dur in zip(wav_paths, start_list, dur_list):
-
+            # wav_np, sample_rate = sf.read(wav_path , dtype='int16')
             wav_np, sample_rate = _read_audio(wav_path, start, dur)
             dur = wav_np.shape[0] / sample_rate
             fbank = self.fbank((sample_rate, wav_np))
@@ -50,8 +49,6 @@ class ASRFeatExtractor:
         for i in range(n_batch):
             pad[i, :xs[i].size(0)] = xs[i]
         return pad
-
-
 
 
 class CMVN:
