@@ -166,6 +166,16 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             dummy=self.dummy_codebook_indexes,
             temporal_array=True,
             pad_value=-100,
+            frame_rate=50,
+        )
+        
+        firered_mvq_tokens, firered_mvq_token_lens = _collate_custom_field(
+            cuts_pre_mixed,
+            "firered_codebook_indexes",
+            dummy=self.dummy_codebook_indexes,
+            temporal_array=True,
+            pad_value=-100,
+            frame_rate=25,
         )
         
         if self.at_KD:
@@ -189,8 +199,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         batch = {
             "inputs": inputs,
-            "cb_indexes": mvq_tokens,
-            "cb_indexes_len": mvq_token_lens,
+            "cb_indexes": [mvq_tokens, firered_mvq_tokens],
+            "cb_indexes_len": [mvq_token_lens, firered_mvq_token_lens],
             "supervisions": default_collate(
                 [
                     {
@@ -231,11 +241,12 @@ def _collate_custom_field(
     dummy: np.array = None,
     temporal_array: bool = True,
     pad_value=None,
+    frame_rate: int = 50,
 ):
     
     # by default, we assert the frame_shift is 0.02
     if temporal_array:
-        max_frames = [int(c.duration * 50) for c in cuts]
+        max_frames = [int(c.duration * frame_rate) for c in cuts]
         
         temporal_dim = 0
         pad_value = -100
