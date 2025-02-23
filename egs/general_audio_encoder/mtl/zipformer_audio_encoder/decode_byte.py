@@ -1082,6 +1082,11 @@ def main():
     args.return_cuts = True
     librispeech = MultiTaskDataModule(args)
 
+    def remove_short(c):
+        if c.duration < 0.3:
+            return False
+        return True
+
     test_sets = []
     test_dls = []
     
@@ -1098,6 +1103,7 @@ def main():
     
     if params.test_wenet:
         wenet_test_net_cuts = librispeech.wenetspeech_test_net_cuts()
+        wenet_test_net_cuts = wenet_test_net_cuts.filter(remove_short)
         wenet_test_net_cuts = wenet_test_net_cuts.map(partial(_add_task_id, 1))
         wenet_test_meeting_cuts = librispeech.wenetspeech_test_meeting_cuts()
         wenet_test_meeting_cuts = wenet_test_meeting_cuts.map(partial(_add_task_id, 1))
