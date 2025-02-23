@@ -9,6 +9,36 @@ import torch
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 
+from icefall.utils import tokenize_by_CJK_char
+from icefall.byte_utils import byte_encode
+
+def _normalize_chinese_text(text):
+    # 去除所有标点符号
+    text = re.sub(r"[，。！？、；：“”‘’（）《》【】{}·…—～]", "", text)
+    # 去除汉字之间的空格（确保不影响英文单词）
+    text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
+    text = text.upper()
+    return text
+
+def normalize_chinese_text(c):
+    text = c.supervisions[0].text
+    text = _normalize_chinese_text(text)
+    c.supervisions[0].text = text
+    return c
+
+def _normalize_english_text(text):
+    # 只保留字母、数字、空格和单引号，去掉其他标点符号
+    text = re.sub(r"[^\w\s']", "", text)
+    # 转换为大写
+    text = text.upper()
+    return text
+
+def normalize_english_text(c):
+    text = c.supervisions[0].text
+    text = _normalize_english_text(text)
+    c.supervisions[0].text = text
+    return c
+
 def remove_non_alphabetic(text: str, strict: bool = True) -> str:
     # Recommend to set strict to False
     if not strict:
@@ -21,8 +51,6 @@ def remove_non_alphabetic(text: str, strict: bool = True) -> str:
         return re.sub(r"[^a-zA-Z\s]+", "", text)
 
 def map_zh(c):
-    from icefall.utils import tokenize_by_CJK_char
-    from icefall.byte_utils import byte_encode
     text = c.supervisions[0].text
     text = byte_encode(tokenize_by_CJK_char(text))
     c.supervisions[0].text = text
@@ -203,3 +231,13 @@ class MetricsTracker(collections.defaultdict):
         """
         for k, v in self.norm_items():
             tb_writer.add_scalar(prefix + k, v, batch_idx)
+
+
+if __name__=="__main__":
+    text = "你好 ， 这是 一个  测试 句子 ！Hello 希望 这段 代码 能正常 工作 。"
+    normalized_text = normalize_chinese_text(text)
+    print(normalized_text)
+    
+    text = "Hello, world! It's a great day to learn NLP."
+    normalized_text = normalize_english_text(text)
+    print(normalized_text)
