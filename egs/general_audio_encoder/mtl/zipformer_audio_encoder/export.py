@@ -250,7 +250,8 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
-                )
+                ),
+                strict=True,
             )
         else:
             assert params.avg > 0, params.avg

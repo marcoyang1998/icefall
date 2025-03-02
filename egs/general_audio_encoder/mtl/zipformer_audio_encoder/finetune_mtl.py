@@ -109,6 +109,8 @@ from icefall.utils import (
 from utils import (
     compare_model,
     upper_only_alpha,
+    normalize_chinese_text,
+    normalize_english_text,
     MetricsTracker,
     _add_task_id,
     map_zh,
@@ -1253,18 +1255,12 @@ def train_one_epoch(
             count = {orig: 0 for orig in unique_origin}
             for sh in shard_origin:
                 count[sh] += 1
-                if sh in shard_count:
-                    shard_count[sh] += 1
-                else:
-                    shard_count[sh] = 1
                 
-            if batch_idx % 500 == 1:
+            if batch_idx % 200 == 1:
                 shard_epoch = [int(c.shar_epoch) for c in cuts]
                 max_epoch = max(shard_epoch)
                 logging.info(f"Estimated epoch is {max_epoch}")
-                # logging.info(count)
-                logging.info(f"Batch {batch_idx}: Cuts stats: {shard_count}")
-
+                logging.info(count)
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1586,7 +1582,7 @@ def run(rank, world_size, args):
         
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
-        libriheavy_cuts = libriheavy_cuts.map(upper_only_alpha)
+        libriheavy_cuts = libriheavy_cuts.map(normalize_english_text)
         libriheavy_cuts_len = {
             "small": 122512 * 0.9, # 122512
             "medium": 996017, # 1093040, fewer after filtering
@@ -1601,6 +1597,15 @@ def run(rank, world_size, args):
         asr_training_cuts.append(libriheavy_cuts)
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
+    
+    if params.use_mls:
+        mls_cuts = librispeech.mls_cuts()
+        mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
+        mls_cuts = mls_cuts.map(normalize_english_text)
+        # mls cuts: 10801 hrs, 2619190 cuts
+        asr_training_cuts.append(mls_cuts)
+        asr_training_cuts_lens.append(2619190)
+        asr_training_cuts_duration.append(10801)
     
     if params.use_wenetspeech:
         wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
@@ -1629,7 +1634,25 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(120098)
         asr_training_cuts_duration.append(150)
     
+    if params.use_extra_chinese_dataset:
+        chinese_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chinese_cuts = chinese_cuts.map(partial(_add_task_id, 1))
+        chinese_cuts = chinese_cuts.map(normalize_chinese_text)
+        chinese_cuts = chinese_cuts.map(map_zh)
+        asr_training_cuts.append(chinese_cuts)
+        asr_training_cuts_lens.append(chinese_cuts_len)
+        asr_training_cuts_duration.append(chinese_cut_durations)
+        
+    if params.use_extra_english_dataset:
+        englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
+        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
+        englishs_cuts = englishs_cuts.map(normalize_english_text)
+        asr_training_cuts.append(englishs_cuts)
+        asr_training_cuts_lens.append(english_cuts_len)
+        asr_training_cuts_duration.append(english_cut_durations)
+    
     # combine the asr data
+    # import pdb; pdb.set_trace()
     assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
     if len(asr_training_cuts) > 1:
         asr_training_cuts = CutSet.mux(
