@@ -1,0 +1,22 @@
+{
+    "exclude": [
+      "ASR_data",
+      "data-shar**",
+      "download",
+      "**/node_modules",
+      "**/__pycache__",
+      "**/third_party",
+      "**/tests",
+      "**/build",
+      "**/dist"
+    ],
+    "extraPaths": [
+        "./../../.."
+    ],
+    "reportArgumentType": "none",
+    "reportAttributeAccessIssue": "none",
+    "reportReturnType": "none",
+    "reportOptionalMemberAccess": "none",
+    "reportPrivateImportUsage": "none",
+    "reportAssignmentType": "none"
+}

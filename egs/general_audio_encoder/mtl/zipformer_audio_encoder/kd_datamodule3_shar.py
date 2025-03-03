@@ -993,6 +993,11 @@ class MultiTaskDataModule:
         logging.info(f"Getting a total of {all_duration} hours ({all_len} samples) of Chinese speech data. ")
         return all_cuts, all_duration, all_len
     
+    @lru_cache()
+    def weread_dataset_cuts(self):
+        logging.info("About to get weread dataset")
+        
+    
     @cached_property
     def dataset_duration_stats(self):
         stats_file = f"{self.args.shar_dir}/stats_duration.txt"

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+
+export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+
+# data related
+use_librispeech=0
+full_libri=0
+use_gigaspeech=0
+gigaspeech_subset=s
+use_wenetspeech=1
+wenetspeech_subset=S
+use_aishell=0
+
+causal=1
+lr=0.045
+
+do_audio_tagging=0
+at_KD=0 # need to set this to 0 for efficiency
+mvq_KD=0
+
+finetune_ckpt=zipformer_audio_encoder/exp-xlarge-lr-0.04-full-en-zh-baoxiang-data-audio-multi-kd-time-mask-ratio-1.0-shar/iter-350000-avg-4.pt
+
+freeze_encoder=0
+freeze_encoder_steps=2000
+# freeze_encoder=1
+# freeze_encoder_steps=-1
+encoder_lr_scale=0.05
+
+md=500
+
+exp_dir=zipformer_audio_encoder_finetune/exp-finetune-wenetspeech-${wenetspeech_subset}-\
+lr-${lr}-causal-${causal}-freeze-encoder-${freeze_encoder}\
+-freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
+-from-xlarge-zh-en-audio-baoxiang-data-mvq-350k
+# exp_dir=zipformer_audio_encoder_finetune/exp-debug
+
+# export CUDA_VISIBLE_DEVICES="0,1,2,3"
+torchrun \
+  --nproc_per_node 4 --master_port 18834 \
+  zipformer_audio_encoder/finetune_mtl.py \
+    --num-epochs 30 \
+    --use-fp16 1 \
+    --start-epoch 1 \
+    --use-librispeech $use_librispeech --full-libri $full_libri \
+    --use-gigaspeech $use_gigaspeech --gigaspeech-subset $gigaspeech_subset \
+    --use-wenetspeech $use_wenetspeech --wenetspeech-subset $wenetspeech_subset \
+    --use-aishell $use_aishell \
+    --exp-dir $exp_dir \
+    --manifest-dir data/fbank_mtl \
+    --base-lr $lr \
+    --do-audio-tagging $do_audio_tagging \
+    --mvq-KD $mvq_KD --at-KD $at_KD \
+    --do-finetune 1 --init-modules "encoder_embed,encoder" --finetune-ckpt $finetune_ckpt \
+    --freeze-encoder $freeze_encoder --freeze-encoder-steps $freeze_encoder_steps \
+    --encoder-lr-scale $encoder_lr_scale \
+    --causal $causal \
+    --bpe-model data/lang_bbpe_2000/bbpe.model \
+    --chunk-size 8,32,64 \
+    --left-context-frames 128,256 \
+    --num-encoder-layers 2,2,4,5,4,2 \
+    --feedforward-dim 512,1024,2048,3072,2048,1024 \
+    --encoder-dim 192,384,768,1024,768,384 \
+    --encoder-unmasked-dim 192,256,320,512,320,256 \
+    --on-the-fly-feats 1 \
+    --max-duration $md
+
+echo "Done"
