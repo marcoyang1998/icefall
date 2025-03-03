@@ -714,7 +714,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         logging.info(f"Setting the output downsample factor to 1.")
         if params.teacher_frame_ratio > 1:
             logging.warning(
-                f"You are using teacher_frame_ratio={params.teacher_frame_ratio}"
+                f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
                 "However, the output downsampling factor is 1. This could be wrong!"
             )
 
@@ -1382,23 +1382,6 @@ def run(rank, world_size, args):
         asr_training_cuts.append(gigaspeech_cuts)
         asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
         asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
-        
-    if params.use_wenetspeech:
-        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
-        wenetspeech_cuts_len = {
-            "S": 151600,
-            "M": 1514500,
-            "L": 13306651, # TODO: update this number
-        }
-        wenetspeech_cuts_duration = {
-            "S": 100,
-            "M": 1000,
-            "L": 9700,
-        }
-        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
     
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
@@ -1425,19 +1408,36 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(2619190)
         asr_training_cuts_duration.append(10801)
     
-    if params.use_extra_chinese_dataset:
-        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(chineses_cuts)
-        asr_training_cuts_lens.append(chinese_cuts_len)
-        asr_training_cuts_duration.append(chinese_cut_durations)
-        
     if params.use_extra_english_dataset:
         englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
         englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
         asr_training_cuts.append(englishs_cuts)
         asr_training_cuts_lens.append(english_cuts_len)
         asr_training_cuts_duration.append(english_cut_durations)
+    
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts_len = {
+            "S": 151600,
+            "M": 1514500,
+            "L": 13306651, # TODO: update this number
+        }
+        wenetspeech_cuts_duration = {
+            "S": 100,
+            "M": 1000,
+            "L": 9700,
+        }
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(wenetspeech_cuts)
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+    
+    if params.use_extra_chinese_dataset:
+        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(chineses_cuts)
+        asr_training_cuts_lens.append(chinese_cuts_len)
+        asr_training_cuts_duration.append(chinese_cut_durations)
     
     # combine the asr data into a BIG cut
     assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
