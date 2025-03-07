@@ -32,6 +32,7 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     DynamicBucketingSampler,
     K2SpeechRecognitionDataset,
     PrecomputedFeatures,
+    ReverbWithImpulseResponse,
     SimpleCutSampler,
     ZipSampler,
     SpecAugment,
@@ -230,6 +231,20 @@ class MultiTaskDataModule:
         )
 
         group.add_argument(
+            "--enable-rir",
+            type=str2bool,
+            default=False,
+            help="When enabled, perform RIR on the cuts",
+        )
+        
+        group.add_argument(
+            "--rir-cuts",
+            type=str,
+            default="data/rir/rir_cuts.jsonl.gz",
+            help="If None, use the default fast random RIR generator"
+        )
+        
+        group.add_argument(
             "--enable-musan",
             type=str2bool,
             default=True,
@@ -407,10 +422,22 @@ class MultiTaskDataModule:
             # rank = 0
         
         transforms = []
+        if self.args.enable_rir:
+            logging.info("Enable MUSAN")
+            if self.args.rir_cuts is not None:
+                logging.info("About to get RIR cuts")
+                rir_cuts = load_manifest_lazy("data/rir/rir_cuts.jsonl.gz")
+            else:
+                logging.info("Use the fast random RIR generator as no RIR recordings are provided")
+                rir_cuts = None
+            transforms.append(
+                ReverbWithImpulseResponse(rir_recordings=rir_cuts, p=0.5)
+            )
+        
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/noise/noise_all.jsonl.gz")
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
@@ -752,16 +779,29 @@ class MultiTaskDataModule:
     @lru_cache()
     def dev_clean_cuts(self) -> CutSet:
         logging.info("About to get dev-clean cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
-        )
+        if self.args.use_shar:
+            logging.info(f"Use share for librispeech dev-clean cuts")
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-clean",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
+            )
 
     @lru_cache()
     def dev_other_cuts(self) -> CutSet:
         logging.info("About to get dev-other cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
-        )
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-other",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
+            )
 
     @lru_cache()
     def test_clean_cuts(self) -> CutSet:
@@ -818,7 +858,14 @@ class MultiTaskDataModule:
     @lru_cache()
     def gigaspeech_dev_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
+        if self.args.use_shar:
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/gigaspeech/dev",
+                shuffle_shards=False,
+            )
+            return cuts
+        else:
+            return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
 
     @lru_cache()
     def gigaspeech_test_cuts(self) -> CutSet:
@@ -888,7 +935,16 @@ class MultiTaskDataModule:
     @lru_cache()
     def wenetspeech_valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_DEV.jsonl.gz")
+        if self.args.use_shar:
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/wenetspeech/DEV",
+                shuffle_shards=False,
+            )
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "wenetspeech_cuts_DEV.jsonl.gz"
+            )
 
     @lru_cache()
     def wenetspeech_test_net_cuts(self) -> List[CutSet]:
