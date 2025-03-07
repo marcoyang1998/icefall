@@ -13,9 +13,9 @@ log() {
   echo -e "$(date '+%Y-%m-%d %H:%M:%S') (${fname}:${BASH_LINENO[0]}:${FUNCNAME[1]}) $*"
 }
 
-root_shar_dir=data-shar-firered-en-zh-no-feat-cb-16-v2
+root_shar_dir=data-shar/data-shar-firered-en-zh-cb16-v2
 mkdir -p $root_shar_dir
-fbank_dir=data/vq_firered_zh_en_16_v2
+fbank_dir=data_new/vq_firered_zh_en_16_v2
 
 log "Shar dir: $root_shar_dir"
 log "Fbank dir: $fbank_dir"
@@ -103,7 +103,7 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
     subset=L
     for n in $(seq 0 1 9); do 
         # manifest=$fbank_dir/wenetspeech_cuts_${subset}.jsonl.gz
-        manifest=$fbank_dir/wenetspeech_L_split/wenetspeech_cuts_L.${n}.processed.jsonl.gz
+        manifest=$fbank_dir/wenetspeech_L_split/wenetspeech_cuts_L.${n}.jsonl.gz
         if [ ! -f $shar_dir/.shar.${subset}.${n}.complete ]; then
             log "Start exporting wenetspeech ${subset} split ${n}"
             lhotse shar export -j 8 \

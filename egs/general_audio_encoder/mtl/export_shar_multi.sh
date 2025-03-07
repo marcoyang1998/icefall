@@ -13,9 +13,9 @@ log() {
   echo -e "$(date '+%Y-%m-%d %H:%M:%S') (${fname}:${BASH_LINENO[0]}:${FUNCNAME[1]}) $*"
 }
 
-root_shar_dir=data-shar-whisper-cb16-firered-cb16-no-feat
+root_shar_dir=data-shar/data-shar-whisper-cb16-firered-cb16
 mkdir -p $root_shar_dir
-fbank_dir=data/vq_whisper_turbo_cb16_firered_zh_en_cb16
+fbank_dir=data_s3/vq_whisper_turbo_cb16_firered_zh_en_cb16
 log "Fbank dir: $fbank_dir"
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
