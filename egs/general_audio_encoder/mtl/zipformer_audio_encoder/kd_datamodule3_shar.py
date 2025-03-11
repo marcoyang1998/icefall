@@ -980,7 +980,7 @@ class MultiTaskDataModule:
             ).resample(16000)
         else:
             cuts_train = load_manifest_lazy(
-                self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+                self.args.manifest_dir / f"MLS_cuts_{self.args.training_subset}.jsonl.gz"
             )
             return cuts_train
     
@@ -1056,7 +1056,7 @@ class MultiTaskDataModule:
     
     @cached_property
     def dataset_duration_stats(self):
-        stats_file = f"{self.args.shar_dir}/stats_duration.txt"
+        stats_file = f"data/stats/stats_duration.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:
@@ -1066,7 +1066,7 @@ class MultiTaskDataModule:
     
     @cached_property
     def dataset_len_stats(self):
-        stats_file = f"{self.args.shar_dir}/stats_len.txt"
+        stats_file = f"data/stats/stats_len.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:
@@ -1107,11 +1107,18 @@ class MultiTaskDataModule:
                 cuts = load_manifest_lazy(
                     self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
                 )
-        return cuts
+        return cuts.drop_features()
 
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
         logging.info("About to get test-other cuts")
+        if self.args.use_shar:
+            logging.info(f"Use share for audioset eval cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/audioset/eval",
+                shuffle_shards=False,
+            )
+            return cuts
         return load_manifest_lazy(
             self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
         )
