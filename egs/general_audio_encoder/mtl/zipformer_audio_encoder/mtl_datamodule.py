@@ -866,14 +866,31 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
-        logging.info(f"About to get {self.args.libriheavy_subset} subset cuts")
+        logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
-            return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/{self.args.libriheavy_subset}",
+            medium_cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            if self.args.libriheavy_subset == "medium":
+                return medium_cuts
+            else:
+                assert self.args.libriheavy_subset == "large"
+                large_cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                    seed="randomized",
+                ).repeat()
+                cuts = [medium_cuts, large_cuts]
+                return CutSet.mux(
+                    *cuts,
+                    weights=[1, 9],
+                    stop_early=False,
+                )
+                
         else:
             return load_manifest_lazy(
                 self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
