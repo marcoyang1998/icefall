@@ -15,7 +15,7 @@ log() {
 
 root_shar_dir=data-shar/data-shar-firered-en-zh-cb16-v2
 mkdir -p $root_shar_dir
-fbank_dir=data_new/vq_firered_zh_en_16_v2
+fbank_dir=data_s3/vq_firered_zh_en_16_v2
 
 log "Shar dir: $root_shar_dir"
 log "Fbank dir: $fbank_dir"
@@ -180,6 +180,24 @@ if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
                 $manifest \
                 $shar_dir
             touch $root_shar_dir/.shar.${subset}.complete
+        fi
+    done
+fi
+
+if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
+    log "Processing weread"
+    dataset="weread"
+    for subset in $(seq 0 1 9); do
+        shar_dir=${root_shar_dir}/${dataset}/split_${subset}
+        mkdir -p $shar_dir
+        manifest=$fbank_dir/weread-16k-res-0${subset}_cuts.jsonl.gz
+        if [ ! -f $root_shar_dir/$dataset/.shar.split_${subset}.complete ]; then
+            log "Start exporting ${dataset}: split ${subset}"
+            lhotse shar export -j 8 \
+                -c codebook_indexes:numpy \
+                $manifest \
+                $shar_dir
+            touch $root_shar_dir/$dataset/.shar.split_${subset}.complete
         fi
     done
 fi

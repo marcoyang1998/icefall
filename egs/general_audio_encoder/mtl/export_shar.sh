@@ -61,7 +61,7 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
     log "Processing GigaSpeech"
     shar_dir=${root_shar_dir}/gigaspeech
     mkdir -p $shar_dir
-    for subset in xs s m l xl; do
+    for subset in xs s m l xl dev test; do
         manifest=$fbank_dir/gigaspeech_cuts_${subset}.jsonl.gz
         if [ ! -f $shar_dir/.shar.$subset.complete ]; then
             log "Start exporting gigaspeech ${subset}"
@@ -82,6 +82,23 @@ if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
         manifest=$fbank_dir/libriheavy_cuts_${subset}.jsonl.gz
         if [ ! -f $shar_dir/.shar.$subset.complete ]; then
             log "Start exporting libriheavy ${subset}"
+            lhotse shar export -j 8 \
+                -c codebook_indexes:numpy \
+                $manifest \
+                $shar_dir/$subset
+            touch $shar_dir/.shar.$subset.complete
+        fi
+    done
+fi
+
+if [ $stage -le 50 ] && [ $stop_stage -ge 50 ]; then
+    log "Processing WenetSpeech DEV"
+    shar_dir=${root_shar_dir}/wenetspeech
+    mkdir -p $shar_dir
+    for subset in DEV; do
+        manifest=$fbank_dir/wenetspeech_cuts_${subset}.jsonl.gz
+        if [ ! -f $shar_dir/.shar.$subset.complete ]; then
+            log "Start exporting wenetspeech ${subset}"
             lhotse shar export -j 8 \
                 -c codebook_indexes:numpy \
                 $manifest \
@@ -155,27 +172,29 @@ if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
 fi
 
 if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
-    log "Processing alimeeting"
+    log "Processing various english dataset"
     
+    # dataset="alimeeting"
+    # for subset in train eval test; do
+
     # for dataset in datatang1505 dialog dialog3k magicdata MagicData_dialog ximalaya aidatatang_200zh aishell3 aishell2 cs_wav acq zhvoice; do
     # for dataset in sensetime primewords_md_2018_set1 common_voice_20200622 accent baidu_en_cn cantonese; do
-    # for dataset in digital_library_202003 ST-CMDS-20170001_1-OS en_us_english en8848 ljspeech tatoeba ted vctk voase voaSplider; do
-    # for dataset in speech_annotations_2021; do
-    # for dataset in speech_wav peoplespeech; do
-    dataset="alimeeting"
-    for subset in train eval test; do
-        shar_dir=${root_shar_dir}/$dataset/${subset}
+    # for dataset in speech_annotations_2021 speech_wav; do
+    for dataset in common_voice_20200622 en_us_english en8848 ljspeech tatoeba ted vctk voase voaSplider peoplespeech; do
+    # for dataset in  ; do
+    
+        shar_dir=${root_shar_dir}/$dataset
         mkdir -p $shar_dir
-        # manifest=$fbank_dir/${dataset}_cuts.jsonl.gz
-        manifest=data/fbank_alimeeting_mono/alimeeting-far_cuts_${subset}.jsonl.gz
+        manifest=$fbank_dir/${dataset}_cuts.jsonl.gz
+        # manifest=data/fbank_alimeeting_mono/alimeeting-far_cuts_${subset}.jsonl.gz
         
-        if [ ! -f $root_shar_dir/.shar.${subset}.complete ]; then
-            log "Start exporting ${dataset}: ${subset}"
+        if [ ! -f $root_shar_dir/.shar.${dataset}.complete ]; then
+            log "Start exporting ${dataset}"
             lhotse shar export -j 8 \
-                -a original \
+                -c codebook_indexes:numpy \
                 $manifest \
                 $shar_dir
-            touch $root_shar_dir/.shar.${subset}.complete
+            touch $root_shar_dir/.shar.${dataset}.complete
         fi
     done
 fi

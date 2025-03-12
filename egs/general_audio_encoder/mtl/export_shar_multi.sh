@@ -94,6 +94,24 @@ if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
     done
 fi
 
+if [ $stage -le 50 ] && [ $stop_stage -ge 50 ]; then
+    log "Processing WenetSpeech DEV"
+    shar_dir=${root_shar_dir}/wenetspeech
+    mkdir -p $shar_dir
+    for subset in DEV; do
+        manifest=$fbank_dir/wenetspeech_cuts_${subset}.jsonl.gz
+        if [ ! -f $shar_dir/.shar.$subset.complete ]; then
+            log "Start exporting wenetspeech ${subset}"
+            lhotse shar export -j 8 \
+                -c codebook_indexes:numpy \
+                -c firered_codebook_indexes:numpy \
+                $manifest \
+                $shar_dir/$subset
+            touch $shar_dir/.shar.$subset.complete
+        fi
+    done
+fi
+
 if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
     log "Processing WenetSpeech"
     shar_dir=${root_shar_dir}/wenetspeech
