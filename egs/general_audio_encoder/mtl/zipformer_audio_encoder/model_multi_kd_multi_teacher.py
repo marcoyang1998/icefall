@@ -219,10 +219,10 @@ class MultiKDModel(nn.Module):
                     encoder_out, codebook_indexes, ratio=teacher_frame_ratio
                 )
                 
-        # the delta is associated with the frame-rate of the encoder
+        # the delta is associated with the frame-rate of the student encoder
         # so a bigger delta maybe necessary for 50Hz student encoder
         if distillation_delta > 0:
-            codebook_indexes = codebook_indexes[:,:distillation_delta, :]
+            codebook_indexes = codebook_indexes[:,:-distillation_delta, :]
             encoder_out = encoder_out[:, distillation_delta:, :]
             truncated_padding_mask = make_pad_mask(encoder_out_lens - distillation_delta)
             codebook_indexes = codebook_indexes.masked_fill(truncated_padding_mask.unsqueeze(-1), value=-100)
