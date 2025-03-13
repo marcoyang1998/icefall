@@ -128,6 +128,10 @@ def _add_task_id(task_id, c):
     c.task_id = task_id
     return c
 
+def _add_language_id(lid, c):
+    c.language_id = lid
+    return c
+
 def compare_model(state_dict1, state_dict2):
     assert state_dict1.keys() == state_dict2.keys()
     for key in state_dict1.keys():

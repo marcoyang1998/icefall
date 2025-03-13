@@ -159,6 +159,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+        cuts_pre_mixed = fix_start(cuts_pre_mixed)
         #mvq_tokens, mvq_token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=-100)
         mvq_tokens, mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
@@ -223,6 +224,17 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         return batch
 
+def fix_start(cuts):
+    # make the start of codebook indexes the same as the cut
+    new_cuts = []
+    for cut in cuts:
+        if cut.has_custom("codebook_indexes"):
+            cut.codebook_indexes.start = cut.start
+        if cut.has_custom("firered_codebook_indexes"):
+            cut.firered_codebook_indexes.start = cut.start
+        new_cuts.append(cut)
+    return new_cuts
+
 
 def validate_multi_kd(cuts: CutSet) -> None:
     for cut in cuts:
@@ -230,10 +242,10 @@ def validate_multi_kd(cuts: CutSet) -> None:
         assert cut.has_custom("task_id")
         if cut.task_id == 1: 
             # speech cuts, should have codebook indexes
-            assert cut.codebook_indexes.array.storage_key != "dummy_whisper_codebook_indexes_1510"
+            assert cut.has_custom("codebook_indexes") or cut.has_custom("firered_codebook_indexes")
         elif cut.task_id == 2:
             # audio cuts, should have audio logits
-            assert cut.beats_embedding.storage_key != "dummy_beats_embedding"
+            assert cut.has_custom("beats_embedding")
             
 def _collate_custom_field(
     cuts: CutSet, 
