@@ -63,7 +63,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar_multi_teacher import MultiTaskDataModule
+from kd_datamodule3_shar_multi_teacher2 import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
@@ -77,7 +77,7 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_task_id, MetricsTracker, setup_distributed
+from utils import _add_task_id, _add_language_id, MetricsTracker, setup_distributed
 
 from zipformer2 import Zipformer2
 
@@ -332,8 +332,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str,
         default="16,16",
     )
-    
-
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -934,6 +932,12 @@ def compute_loss(
         
     feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
+    is_zh = torch.tensor([c.language_id == "zh" for c in cuts]).to(device)
+    is_en = torch.tensor([c.language_id == "en" for c in cuts]).to(device)
+    language_masks = [is_en, is_zh]
+    
+    logging.info(f"Step: {params.batch_idx_train}, zh data: {is_zh.sum()}, en data: {is_en.sum()}")
+    # logging.info(f"Step: {params.batch_idx_train}, batch size: {len(cuts)}")
     
     if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
@@ -959,7 +963,7 @@ def compute_loss(
             at_targets=at_targets,
         )
 
-        mvq_losses = losses[:-1]
+        mvq_losses = losses[:-1] # (whisper_mvq, firered_mvq)
         audio_tagging_loss = losses[-1]
         loss = 0.0
 
@@ -971,8 +975,8 @@ def compute_loss(
         mvq_loss_values = []
         if params.do_mvq:
             mask = task_ids == 1 # ASR=1
-            for mvq_loss, scale in zip(mvq_losses, mvq_loss_scales):
-                mvq_loss = (mvq_loss * mask).sum()
+            for mvq_loss, scale, language_mask in zip(mvq_losses, mvq_loss_scales, language_masks):
+                mvq_loss = (mvq_loss * mask * language_mask).sum()
                 mvq_loss_values.append(mvq_loss)
                 loss += mvq_loss * scale # TODO: make this an option
             
@@ -1112,17 +1116,23 @@ def train_one_epoch(
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
         
-        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
+        shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
         unique_origin = set(shard_origin)
+        for ori in shard_origin:
+            if ori in shard_count:
+                shard_count[ori] += 1
+            else:
+                shard_count[ori] = 1
         count = {orig: 0 for orig in unique_origin}
         for sh in shard_origin:
             count[sh] += 1
                
-        if batch_idx % 200 == 1:
+        if batch_idx % 5 == 1:
             shard_epoch = [int(c.shar_epoch) for c in cuts]
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
             logging.info(count)
+            logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1230,24 +1240,24 @@ def train_one_epoch(
                     )
 
         if params.batch_idx_train % params.valid_interval == 1 and not params.print_diagnostics:
-            for valid_set, valid_dl in zip(valid_sets, valid_dls):
-                logging.info("Computing validation loss")
-                valid_info = compute_validation_loss(
-                    params=params,
-                    model=model,
-                    sp=sp,
-                    valid_dl=valid_dl,
-                    world_size=world_size,
-                )
+            # for valid_set, valid_dl in zip(valid_sets, valid_dls):
+            #     logging.info("Computing validation loss")
+            #     valid_info = compute_validation_loss(
+            #         params=params,
+            #         model=model,
+            #         sp=sp,
+            #         valid_dl=valid_dl,
+            #         world_size=world_size,
+            #     )
             
-                logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
-                logging.info(
-                    f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-                )
-                if tb_writer is not None:
-                    valid_info.write_summary(
-                        tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
-                    )
+            #     logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
+            #     logging.info(
+            #         f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+            #     )
+            #     if tb_writer is not None:
+            #         valid_info.write_summary(
+            #             tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
+            #         )
             model.train()
         if params.use_shar and params.batch_idx_train > params.max_iters:
             return
@@ -1361,23 +1371,25 @@ def run(rank, world_size, args):
     # NOTE: We combine all the ASR data together, and use one sampler.
     # We use CutSet.mux to sample with weight, the weight is the number 
     # of training samples (NOT the total duration)!
-    asr_training_cuts = []
-    asr_training_cuts_lens = []
-    asr_training_cuts_duration = []
+    # NOTE: since the chinese data are usually much shorter than english data
+    # using len for mux sampling might be not appropriate, we decided to combine 
+    # english and chinese cuts separately, and then mux with a fixed weight
+    
+    en_asr_training_cuts = []
+    en_asr_training_cuts_lens = []
+    en_asr_training_cuts_duration = []
     if params.use_librispeech:
         if not params.full_libri: 
             librispeech_cuts = librispeech.train_clean_100_cuts()
-            librispeech_cuts_len = 85617 # n_cuts
+            librispeech_cuts_len = 28539 # n_cuts
             librispeech_cuts_duration = 100
         else:
             librispeech_cuts = librispeech.train_all_shuf_cuts()
             librispeech_cuts_len = 281239
             librispeech_cuts_duration = 960
-        librispeech_cuts = librispeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
-        asr_training_cuts.append(librispeech_cuts)
-        asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
-        asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
-        
+        en_asr_training_cuts.append(librispeech_cuts)
+        en_asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
+        en_asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
     
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
@@ -1395,27 +1407,9 @@ def run(rank, world_size, args):
             "l": 2500, # 2500 hrs
             "xl": 10000 # 10000 hrs
         }
-        gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(gigaspeech_cuts)
-        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
-        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
-        
-    if params.use_wenetspeech:
-        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
-        wenetspeech_cuts_len = {
-            "S": 151600,
-            "M": 1514500,
-            "L": 13306651, # TODO: update this number
-        }
-        wenetspeech_cuts_duration = {
-            "S": 100,
-            "M": 1000,
-            "L": 9700,
-        }
-        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+        en_asr_training_cuts.append(gigaspeech_cuts)
+        en_asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
+        en_asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
     
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
@@ -1429,46 +1423,105 @@ def run(rank, world_size, args):
             "medium": 3687,
             "large": 37218,
         }
-        libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(libriheavy_cuts)
-        asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
-        asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
+        en_asr_training_cuts.append(libriheavy_cuts)
+        en_asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
+        en_asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
     
     if params.use_mls:
         mls_cuts = librispeech.mls_cuts()
-        mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
         # mls cuts: 10801 hrs, 2619190 cuts
-        asr_training_cuts.append(mls_cuts)
-        asr_training_cuts_lens.append(2619190)
-        asr_training_cuts_duration.append(10801)
-    
-    if params.use_extra_chinese_dataset:
-        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(chineses_cuts)
-        asr_training_cuts_lens.append(chinese_cuts_len)
-        asr_training_cuts_duration.append(chinese_cut_durations)
+        en_asr_training_cuts.append(mls_cuts)
+        en_asr_training_cuts_lens.append(2619190)
+        en_asr_training_cuts_duration.append(10801)
         
     if params.use_extra_english_dataset:
         englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
-        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(englishs_cuts)
-        asr_training_cuts_lens.append(english_cuts_len)
-        asr_training_cuts_duration.append(english_cut_durations)
+        en_asr_training_cuts.append(englishs_cuts)
+        en_asr_training_cuts_lens.append(english_cuts_len)
+        en_asr_training_cuts_duration.append(english_cut_durations)
     
-    # combine the asr data into a BIG cut
-    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
-    if len(asr_training_cuts) > 1:
-        asr_training_cuts = CutSet.mux(
-            *asr_training_cuts,
-            weights=asr_training_cuts_lens,
+    # combine the English asr data into a BIG cut
+    assert len(en_asr_training_cuts) >= 1, len(en_asr_training_cuts)
+    if len(en_asr_training_cuts) > 1:
+        en_asr_training_cuts = CutSet.mux(
+            *en_asr_training_cuts,
+            weights=en_asr_training_cuts_lens,
             stop_early=False,
         )
     else:
-        asr_training_cuts = asr_training_cuts[0]
+        en_asr_training_cuts = en_asr_training_cuts[0]
     
+    en_asr_training_cuts = en_asr_training_cuts.map(partial(_add_language_id, "en"))
+    logging.info(f"Total English data: {sum(en_asr_training_cuts_duration)} hours, {sum(en_asr_training_cuts_lens)} cuts.")
+    
+    # from now on, Chinese cuts
+    def change_codebook_indexes(c):
+        if c.has_custom("firered_codebook_indexes"): # if the cut already has firered cb, do nothing
+            del c.codebook_indexes
+            return c
+        else:
+            assert c.has_custom("codebook_indexes")
+            c.firered_codebook_indexes = c.codebook_indexes
+            del c.codebook_indexes
+            return c
+    
+    zh_asr_training_cuts = []
+    zh_asr_training_cuts_lens = []
+    zh_asr_training_cuts_duration = []
+    
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts_len = {
+            "S": 151600,
+            "M": 1514500,
+            "L": 13306651, # TODO: update this number
+        }
+        wenetspeech_cuts_duration = {
+            "S": 100,
+            "M": 1000,
+            "L": 9700,
+        }
+        wenetspeech_cuts = wenetspeech_cuts.map(change_codebook_indexes)
+        zh_asr_training_cuts.append(wenetspeech_cuts)
+        zh_asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
+        zh_asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+    
+    if params.use_extra_chinese_dataset:
+        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chineses_cuts = chineses_cuts.map(change_codebook_indexes)
+        zh_asr_training_cuts.append(chineses_cuts)
+        zh_asr_training_cuts_lens.append(chinese_cuts_len)
+        zh_asr_training_cuts_duration.append(chinese_cut_durations)
+        
+    # combine the chinese asr data into a BIG cut
+    assert len(zh_asr_training_cuts) >= 1, len(zh_asr_training_cuts)
+    if len(zh_asr_training_cuts) > 1:
+        zh_asr_training_cuts = CutSet.mux(
+            *zh_asr_training_cuts,
+            weights=zh_asr_training_cuts_lens,
+            stop_early=False,
+        )
+    else:
+        zh_asr_training_cuts = zh_asr_training_cuts[0]
+    logging.info(
+        f"Total Chinese data: {sum(zh_asr_training_cuts_duration)} hours,\
+            {sum(zh_asr_training_cuts_lens)} cuts."
+    )
+    
+    zh_asr_training_cuts = zh_asr_training_cuts.map(partial(_add_language_id, "zh"))
+    
+    # combine the en and zh ASR data
+    asr_training_cuts = [en_asr_training_cuts, zh_asr_training_cuts]
+    asr_training_cuts = CutSet.mux(
+        *asr_training_cuts,
+        weights=[1.0,1.0],
+        stop_early=False
+    )
+    asr_training_cuts = asr_training_cuts.map(partial(_add_task_id, 1))
+    
+    asr_training_cuts_duration = sum(en_asr_training_cuts_duration) + sum(zh_asr_training_cuts_duration)
     train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
+    train_cuts_duration.append(asr_training_cuts_duration)
     
     # audio data
     if params.use_audioset and params.do_audio_tagging:
@@ -1490,10 +1543,11 @@ def run(rank, world_size, args):
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+        audioset_cuts = audioset_cuts.map(partial(_add_language_id, "none"))
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
-        
+    
     assert len(train_cuts) >= 1, "At least one task should be done!"
     
     logging.info(train_cuts)
@@ -1502,7 +1556,6 @@ def run(rank, world_size, args):
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 0.98 or c.duration > 29.0:
             return False
-
         return True
     
     # If we filter the data and use weighted_sampler, the number of cuts
@@ -1553,6 +1606,7 @@ def run(rank, world_size, args):
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_task_id, 1))
+        ls_valid_cuts = ls_valid_cuts.map(partial(_add_language_id, "en"))
         asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_ls")
         valid_dls.append(asr_ls_valid_dl)
@@ -1560,6 +1614,7 @@ def run(rank, world_size, args):
     if params.use_gigaspeech:
         giga_dev_cuts = librispeech.gigaspeech_dev_cuts()
         giga_dev_cuts = giga_dev_cuts.map(partial(_add_task_id, 1))
+        giga_dev_cuts = giga_dev_cuts.map(partial(_add_language_id, "en"))
         asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_giga")
         valid_dls.append(asr_giga_valid_dl)
@@ -1567,6 +1622,8 @@ def run(rank, world_size, args):
     if params.use_wenetspeech:
         wenet_dev_cuts = librispeech.wenetspeech_valid_cuts()
         wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_task_id, 1))
+        wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_language_id, "zh"))
+        wenet_dev_cuts = wenet_dev_cuts.map(change_codebook_indexes)
         asr_wenet_valid_dl = librispeech.valid_dataloaders(wenet_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_wenet")
         valid_dls.append(asr_wenet_valid_dl)
@@ -1574,6 +1631,7 @@ def run(rank, world_size, args):
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
+        as_eval_cuts = as_eval_cuts.map(partial(_add_language_id, "none"))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
