@@ -159,6 +159,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+        cuts_pre_mixed = fix_start(cuts_pre_mixed)
         #mvq_tokens, mvq_token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=-100)
         mvq_tokens, mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
@@ -213,6 +214,17 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         return batch
 
+
+def fix_start(cuts):
+    # make the start of codebook indexes the same as the cut
+    new_cuts = []
+    for cut in cuts:
+        if cut.has_custom("codebook_indexes"):
+            cut.codebook_indexes.start = cut.start
+        if cut.has_custom("firered_codebook_indexes"):
+            cut.firered_codebook_indexes.start = cut.start
+        new_cuts.append(cut)
+    return new_cuts
 
 def validate_multi_kd(cuts: CutSet) -> None:
     for cut in cuts:
@@ -295,7 +307,6 @@ if __name__=="__main__":
         temporal_array=True,
         pad_value=-100
     )
-    import pdb; pdb.set_trace()
     print(gt_mvq_tokens)
     
     gt_beats_embed = collate_custom_field(augmented_cuts, "beats_embedding")
