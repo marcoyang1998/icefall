@@ -1541,6 +1541,15 @@ def run(rank, world_size, args):
             )
         else:
             audioset_cuts = librispeech.audioset_cuts()
+            
+        def change_to_s3(c):
+            source = c.recording.sources[0].source
+            source = source.replace("download/", "brainllm:s3://yangxiaoyu/")
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            return c
+        
+        audioset_cuts = audioset_cuts.map(change_to_s3)
         
         audioset_cuts_lens = {
             "balanced": 21155,
