@@ -650,7 +650,7 @@ def get_params() -> AttributeDict:
             "batch_idx_train": 0,
             "log_interval": 50,
             "reset_interval": 200,
-            "valid_interval": 3000,  # For the 100h subset, use 800
+            "valid_interval": 4000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 128, # for better audio capability 
             "subsampling_factor": 4,  # not passed in, this is fixed.
@@ -936,8 +936,8 @@ def compute_loss(
     is_en = torch.tensor([c.language_id == "en" for c in cuts]).to(device)
     language_masks = [is_en, is_zh]
     
-    logging.info(f"Step: {params.batch_idx_train}, zh data: {is_zh.sum()}, en data: {is_en.sum()}")
-    # logging.info(f"Step: {params.batch_idx_train}, batch size: {len(cuts)}")
+    if is_training:
+        logging.info(f"Step: {params.batch_idx_train}, zh data: {is_zh.sum()}, en data: {is_en.sum()}")
     
     if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
@@ -1117,21 +1117,22 @@ def train_one_epoch(
         cuts = supervisions["cut"]
         
         shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
-        unique_origin = set(shard_origin)
+        
         for ori in shard_origin:
             if ori in shard_count:
                 shard_count[ori] += 1
             else:
                 shard_count[ori] = 1
-        count = {orig: 0 for orig in unique_origin}
-        for sh in shard_origin:
-            count[sh] += 1
+        # unique_origin = set(shard_origin)
+        # count = {orig: 0 for orig in unique_origin}
+        # for sh in shard_origin:
+        #     count[sh] += 1
                
-        if batch_idx % 5 == 1:
+        if batch_idx % 10 == 1:
             shard_epoch = [int(c.shar_epoch) for c in cuts]
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
-            logging.info(count)
+            # logging.info(count)
             logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
@@ -1240,24 +1241,24 @@ def train_one_epoch(
                     )
 
         if params.batch_idx_train % params.valid_interval == 1 and not params.print_diagnostics:
-            # for valid_set, valid_dl in zip(valid_sets, valid_dls):
-            #     logging.info("Computing validation loss")
-            #     valid_info = compute_validation_loss(
-            #         params=params,
-            #         model=model,
-            #         sp=sp,
-            #         valid_dl=valid_dl,
-            #         world_size=world_size,
-            #     )
+            for valid_set, valid_dl in zip(valid_sets, valid_dls):
+                logging.info("Computing validation loss")
+                valid_info = compute_validation_loss(
+                    params=params,
+                    model=model,
+                    sp=sp,
+                    valid_dl=valid_dl,
+                    world_size=world_size,
+                )
             
-            #     logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
-            #     logging.info(
-            #         f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-            #     )
-            #     if tb_writer is not None:
-            #         valid_info.write_summary(
-            #             tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
-            #         )
+                logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
+                logging.info(
+                    f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+                )
+                if tb_writer is not None:
+                    valid_info.write_summary(
+                        tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
+                    )
             model.train()
         if params.use_shar and params.batch_idx_train > params.max_iters:
             return
@@ -1486,10 +1487,17 @@ def run(rank, world_size, args):
         zh_asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
         zh_asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
     
+    if params.use_weread:
+        weread_cuts, weread_cut_durations, weread_cuts_len = librispeech.weread_dataset_cuts()
+        weread_cuts = weread_cuts.map(change_codebook_indexes)
+        zh_asr_training_cuts.append(weread_cuts)
+        zh_asr_training_cuts_lens.append(weread_cuts_len)
+        zh_asr_training_cuts_duration.append(weread_cut_durations)
+    
     if params.use_extra_chinese_dataset:
-        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chineses_cuts = chineses_cuts.map(change_codebook_indexes)
-        zh_asr_training_cuts.append(chineses_cuts)
+        chinese_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chinese_cuts = chinese_cuts.map(change_codebook_indexes)
+        zh_asr_training_cuts.append(chinese_cuts)
         zh_asr_training_cuts_lens.append(chinese_cuts_len)
         zh_asr_training_cuts_duration.append(chinese_cut_durations)
         

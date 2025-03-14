@@ -141,14 +141,15 @@ class MultiTaskDataModule:
             "--simple-sampler",
             type=str2bool,
             default=False,
-            help="When enabled, use the simple cut sampler",
+            help="When enabled, use the simple cut sampler.",
         )
         group.add_argument(
             "--bucketing-sampler",
             type=str2bool,
             default=True,
             help="When enabled, the batches will come from buckets of "
-            "similar duration (saves padding frames).",
+            "similar duration (saves padding frames). To enable buckting sampler"
+            "in zip sampler, set simple-sampler to False",
         )
         group.add_argument(
             "--num-buckets",
@@ -346,6 +347,12 @@ class MultiTaskDataModule:
         
         group.add_argument(
             "--use-mls",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--use-weread",
             type=str2bool,
             default=False,
         )
@@ -578,11 +585,10 @@ class MultiTaskDataModule:
                             max_duration=md,
                             shuffle=self.args.shuffle,
                             num_buckets=self.args.num_buckets,
-                            buffer_size=self.args.num_buckets * 1500,
-                            shuffle_buffer_size=self.args.num_buckets * 1500,
+                            buffer_size=self.args.num_buckets * 2000,
+                            shuffle_buffer_size=self.args.num_buckets * 2000,
                             drop_last=self.args.drop_last,
                         )
-                        
                 else:
                     if self.args.at_weighted_sampler:
                         weights = self.audioset_sampling_weights()
@@ -1045,7 +1051,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"data-shar/data-shar-firered-en-zh-cb16-v2/{dataset}",
+                in_dir=f"{self.args.zh_shar_dir}/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1065,6 +1071,35 @@ class MultiTaskDataModule:
         # logging.info(f"Combining {datasets}")
         logging.info(f"Getting a total of {all_duration} hours ({all_len} samples) of Chinese speech data. ")
         return all_cuts, all_duration, all_len
+    
+    @lru_cache()
+    def weread_dataset_cuts(self):
+        logging.info("About to get weread dataset")
+        num_splits = 10
+        all_cuts = []
+        cuts_duration = []
+        cuts_len = []
+        for split in range(num_splits):
+            logging.info(f"Loading weread split {split}")
+            cuts = CutSet.from_shar(
+                in_dir=f"{self.args.zh_shar_dir}/weread/split_{split}",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            all_cuts.append(cuts)
+            cuts_duration.append(9000)
+            cuts_len.append(300)
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=[1]*len(all_cuts),  # each split is the same duration
+            stop_early=False
+        )
+        all_duration = num_splits * 6000
+        all_len = num_splits * 2999930
+        logging.info(f"Getting a total of {all_duration} hours ({all_len} samples) of weread data. ")
+        return all_cuts, all_duration, all_len
+            
     
     @cached_property
     def dataset_duration_stats(self):
