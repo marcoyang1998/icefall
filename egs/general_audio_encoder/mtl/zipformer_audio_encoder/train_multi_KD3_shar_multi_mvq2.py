@@ -937,7 +937,8 @@ def compute_loss(
     language_masks = [is_en, is_zh]
     
     if is_training:
-        logging.info(f"Step: {params.batch_idx_train}, zh data: {is_zh.sum()}, en data: {is_en.sum()}")
+        if params.batch_idx_train % 100 == 0:
+            logging.info(f"Step: {params.batch_idx_train}, zh data: {is_zh.sum()}, en data: {is_en.sum()}")
     
     if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
