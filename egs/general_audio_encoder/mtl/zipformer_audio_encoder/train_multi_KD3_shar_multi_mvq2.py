@@ -1647,6 +1647,7 @@ def run(rank, world_size, args):
      
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
+        as_eval_cuts = as_eval_cuts.map(change_to_s3)
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
         as_eval_cuts = as_eval_cuts.map(partial(_add_language_id, "none"))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
