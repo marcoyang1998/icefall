@@ -76,6 +76,7 @@ from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+import torch.distributed as dist
 
 from utils import _add_task_id, _add_language_id, MetricsTracker, setup_distributed
 
@@ -1129,7 +1130,7 @@ def train_one_epoch(
         # for sh in shard_origin:
         #     count[sh] += 1
                
-        if batch_idx % 10 == 1:
+        if batch_idx % 100 == 1:
             shard_epoch = [int(c.shar_epoch) for c in cuts]
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
@@ -1190,6 +1191,7 @@ def train_one_epoch(
                 scaler=scaler,
                 rank=rank,
             )
+            dist.barrier()
             remove_checkpoints(
                 out_dir=params.exp_dir,
                 topk=params.keep_last_k,
