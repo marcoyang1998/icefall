@@ -1101,7 +1101,7 @@ def train_one_epoch(
             params=params,
             optimizer=optimizer,
             scheduler=scheduler,
-            sampler=train_dl.sampler,
+            sampler=train_dl.sampler if not params.use_shar else None,
             scaler=scaler,
             rank=0,
         )
@@ -1278,6 +1278,7 @@ def run(rank, world_size, args):
         It is a value between 0 and `world_size-1`, which is
         passed automatically by `mp.spawn()` in :func:`main`.
         The node with rank 0 is responsible for saving checkpoint.
+        Note that this is the global rank.
       world_size:
         Number of GPUs for DDP training.
       args:
@@ -1288,10 +1289,14 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed() # this will setup the device
+    else:
+        local_rank = 0
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
+    import torch.distributed as dist
+    logging.info(f"Global Rank: {dist.get_rank()}, Local Rank: {local_rank}, CUDA Device Count: {torch.cuda.device_count()}")
 
     if args.tensorboard and rank == 0:
         tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")
@@ -1300,7 +1305,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank) # this should be local rank
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1316,6 +1321,7 @@ def run(rank, world_size, args):
     model_avg: Optional[nn.Module] = None
     if rank == 0:
         # model_avg is only used with rank 0
+        logging.info(f"Inialisting the model avg")
         model_avg = copy.deepcopy(model).to(torch.float64)
 
     assert params.start_epoch > 0, params.start_epoch
@@ -1327,7 +1333,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1608,6 +1614,7 @@ def run(rank, world_size, args):
     else:
         sampler_state_dict = None
 
+    logging.info(f"World size: {world_size}, rank: {rank}")
     train_dl = librispeech.train_dataloaders(
         train_cuts,
         sampler_state_dict=sampler_state_dict, 
