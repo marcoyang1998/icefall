@@ -52,6 +52,7 @@ import argparse
 import copy
 import logging
 from functools import partial
+import io
 import random
 import warnings
 from pathlib import Path
@@ -534,6 +535,13 @@ def get_parser():
         help="Add hooks to check for infinite module outputs and gradients.",
     )
 
+    parser.add_argument(
+        "--save-with-client",
+        type=str2bool,
+        default=True,
+        help="If True, save the model to s3 client"
+    )
+    
     parser.add_argument(
         "--save-every-n",
         type=int,
@@ -1174,14 +1182,13 @@ def train_one_epoch(
                 model_cur=model,
                 model_avg=model_avg,
             )
-
+        
         if (
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            save_checkpoint_with_global_batch_idx(
-                out_dir=params.exp_dir,
-                global_batch_idx=params.batch_idx_train,
+            # this is a modified version of saving checkpoint
+            _save_checkpoint_with_global_batch_idx(
                 model=model,
                 model_avg=model_avg,
                 params=params,
@@ -1191,7 +1198,8 @@ def train_one_epoch(
                 scaler=scaler,
                 rank=rank,
             )
-            dist.barrier()
+            if world_size > 1:
+                dist.barrier()
             remove_checkpoints(
                 out_dir=params.exp_dir,
                 topk=params.keep_last_k,
@@ -1244,24 +1252,24 @@ def train_one_epoch(
                     )
 
         if params.batch_idx_train % params.valid_interval == 1 and not params.print_diagnostics:
-            for valid_set, valid_dl in zip(valid_sets, valid_dls):
-                logging.info("Computing validation loss")
-                valid_info = compute_validation_loss(
-                    params=params,
-                    model=model,
-                    sp=sp,
-                    valid_dl=valid_dl,
-                    world_size=world_size,
-                )
+            # for valid_set, valid_dl in zip(valid_sets, valid_dls):
+            #     logging.info("Computing validation loss")
+            #     valid_info = compute_validation_loss(
+            #         params=params,
+            #         model=model,
+            #         sp=sp,
+            #         valid_dl=valid_dl,
+            #         world_size=world_size,
+            #     )
             
-                logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
-                logging.info(
-                    f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-                )
-                if tb_writer is not None:
-                    valid_info.write_summary(
-                        tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
-                    )
+            #     logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
+            #     logging.info(
+            #         f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+            #     )
+            #     if tb_writer is not None:
+            #         valid_info.write_summary(
+            #             tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
+            #         )
             model.train()
         if params.use_shar and params.batch_idx_train > params.max_iters:
             return
@@ -1297,8 +1305,8 @@ def run(rank, world_size, args):
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
-    import torch.distributed as dist
-    logging.info(f"Global Rank: {dist.get_rank()}, Local Rank: {local_rank}, CUDA Device Count: {torch.cuda.device_count()}")
+    if world_size > 1:
+        logging.info(f"Global Rank: {dist.get_rank()}, Local Rank: {local_rank}, CUDA Device Count: {torch.cuda.device_count()}")
 
     if args.tensorboard and rank == 0:
         tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")
@@ -1325,6 +1333,15 @@ def run(rank, world_size, args):
         # model_avg is only used with rank 0
         logging.info(f"Inialisting the model avg")
         model_avg = copy.deepcopy(model).to(torch.float64)
+        
+    # save the model to client
+    if rank == 0 and params.save_with_client:
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/share_data/housiyuan/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
 
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
@@ -1723,6 +1740,54 @@ def run(rank, world_size, args):
         torch.distributed.barrier()
         cleanup_dist()
 
+def _save_checkpoint_with_global_batch_idx(
+    params,
+    model,
+    optimizer = None,
+    sampler = None,
+    scheduler = None,
+    scaler = None,
+    model_avg = None,
+    rank: int = 0,
+):
+    # only active when rank==0
+    if rank != 0:
+        return
+    
+    if isinstance(model, DDP):
+        model = model.module
+    else:
+        model = model
+        
+    checkpoint = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "grad_scaler": scaler.state_dict() if scaler is not None else None,
+        "sampler": sampler.state_dict() if sampler is not None else None,
+    }
+    
+    if model_avg is not None:
+        checkpoint["model_avg"] = model_avg.to(torch.float32).state_dict()
+
+    if params:
+        for k, v in params.items():
+            assert k not in checkpoint
+            checkpoint[k] = v
+    output_path = params.exp_dir / f"checkpoint-{params.batch_idx_train}.pt"
+        
+    if params.save_with_client:
+        logging.info(f"Saving checkpoint to {output_path}")
+        with io.BytesIO() as f:
+            output_path = "brainllm:s3://yangxiaoyu/" + str(output_path) 
+            torch.save(checkpoint, f)
+            f.seek(0)
+            params.client.put(output_path, f)
+        logging.info(f"Finish saving checkpoint to {output_path}")
+    else:
+        logging.info(f"Saving checkpoint to {output_path}")
+        torch.save(checkpoint, output_path)
+        
 
 def display_and_save_batch(
     batch: dict,
