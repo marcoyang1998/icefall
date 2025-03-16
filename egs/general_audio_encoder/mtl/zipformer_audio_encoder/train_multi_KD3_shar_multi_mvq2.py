@@ -1252,24 +1252,24 @@ def train_one_epoch(
                     )
 
         if params.batch_idx_train % params.valid_interval == 1 and not params.print_diagnostics:
-            # for valid_set, valid_dl in zip(valid_sets, valid_dls):
-            #     logging.info("Computing validation loss")
-            #     valid_info = compute_validation_loss(
-            #         params=params,
-            #         model=model,
-            #         sp=sp,
-            #         valid_dl=valid_dl,
-            #         world_size=world_size,
-            #     )
+            for valid_set, valid_dl in zip(valid_sets, valid_dls):
+                logging.info("Computing validation loss")
+                valid_info = compute_validation_loss(
+                    params=params,
+                    model=model,
+                    sp=sp,
+                    valid_dl=valid_dl,
+                    world_size=world_size,
+                )
             
-            #     logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
-            #     logging.info(
-            #         f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
-            #     )
-            #     if tb_writer is not None:
-            #         valid_info.write_summary(
-            #             tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
-            #         )
+                logging.info(f"Epoch {params.cur_epoch}, validation on {valid_set}: {valid_info}")
+                logging.info(
+                    f"Maximum memory allocated so far is {torch.cuda.max_memory_allocated()//1000000}MB"
+                )
+                if tb_writer is not None:
+                    valid_info.write_summary(
+                        tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
+                    )
             model.train()
         if params.use_shar and params.batch_idx_train > params.max_iters:
             return
