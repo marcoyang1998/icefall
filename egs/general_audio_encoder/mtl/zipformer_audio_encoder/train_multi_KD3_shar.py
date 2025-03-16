@@ -1095,8 +1095,13 @@ def train_one_epoch(
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
         
-        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
+        shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
         unique_origin = set(shard_origin)
+        for ori in shard_origin:
+            if ori in shard_count:
+                shard_count[ori] += 1
+            else:
+                shard_count[ori] = 1
         count = {orig: 0 for orig in unique_origin}
         for sh in shard_origin:
             count[sh] += 1
@@ -1106,6 +1111,7 @@ def train_one_epoch(
             max_epoch = max(shard_epoch)
             logging.info(f"Estimated epoch is {max_epoch}")
             logging.info(count)
+            logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1361,7 +1367,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
         
-    
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
@@ -1463,6 +1468,15 @@ def run(rank, world_size, args):
             )
         else:
             audioset_cuts = librispeech.audioset_cuts()
+            
+        def change_to_s3(c):
+            source = c.recording.sources[0].source
+            source = source.replace("download/", "brainllm:s3://yangxiaoyu/")
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            return c
+        
+        audioset_cuts = audioset_cuts.map(change_to_s3)
         
         audioset_cuts_lens = {
             "balanced": 21155,

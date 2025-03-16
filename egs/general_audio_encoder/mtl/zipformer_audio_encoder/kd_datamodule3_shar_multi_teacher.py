@@ -752,16 +752,29 @@ class MultiTaskDataModule:
     @lru_cache()
     def dev_clean_cuts(self) -> CutSet:
         logging.info("About to get dev-clean cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
-        )
+        if self.args.use_shar:
+            logging.info(f"Use share for librispeech dev-clean cuts")
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-clean",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
+            )
 
     @lru_cache()
     def dev_other_cuts(self) -> CutSet:
         logging.info("About to get dev-other cuts")
-        return load_manifest_lazy(
-            self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
-        )
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-other",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "librispeech_cuts_dev-other.jsonl.gz"
+            )
 
     @lru_cache()
     def test_clean_cuts(self) -> CutSet:
@@ -888,7 +901,17 @@ class MultiTaskDataModule:
     @lru_cache()
     def wenetspeech_valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_DEV.jsonl.gz")
+        if self.args.use_shar:
+            logging.info("Get wenetspeech dev cuts from shar")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/wenetspeech/DEV",
+                shuffle_shards=False,
+            )
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "wenetspeech_cuts_DEV.jsonl.gz"
+            )
 
     @lru_cache()
     def wenetspeech_test_net_cuts(self) -> List[CutSet]:
