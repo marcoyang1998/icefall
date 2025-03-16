@@ -501,10 +501,10 @@ def get_parser():
     
     # TODO: make this applicable to more than two losses
     parser.add_argument(
-        "--mvq-loss-ratio",
-        type=float,
-        default=0.5,
-        help="The ratio of two mvq losses"
+        "--mvq-loss-scales",
+        type=str,
+        default="0.5,0.5",
+        help="The scale of two mvq losses"
     )
     
     parser.add_argument(
@@ -967,13 +967,14 @@ def compute_loss(
         # task_id=2: AT data
 
         # MVQ loss 
+        mvq_loss_scales = tuple(map(float, params.mvq_loss_scales.split(",")))
         mvq_loss_values = []
         if params.do_mvq:
             mask = task_ids == 1 # ASR=1
-            for mvq_loss in mvq_losses:
+            for mvq_loss, scale in zip(mvq_losses, mvq_loss_scales):
                 mvq_loss = (mvq_loss * mask).sum()
                 mvq_loss_values.append(mvq_loss)
-                loss += mvq_loss * 0.5 # TODO: make this an option
+                loss += mvq_loss * scale # TODO: make this an option
             
         # AT loss
         if params.do_audio_tagging:
