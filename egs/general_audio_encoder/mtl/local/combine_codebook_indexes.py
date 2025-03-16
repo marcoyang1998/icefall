@@ -2,13 +2,13 @@ import os
 
 from lhotse import load_manifest_lazy, CutSet
 
-output_folder = "data/vq_whisper_turbo_cb16_firered_zh_en_cb16"
-#subsets = ["dev-clean", "dev-other", "train-all-shuf"]
+output_folder = "data_s3/vq_whisper_turbo_cb16_firered_zh_en_cb16"
+os.makedirs(output_folder, exist_ok=True)
 subsets = ["DEV", "L"]
 
 for subset in subsets:
-    cuts_whisper = load_manifest_lazy(f"data/vq_whisper_turbo_zh_en_16_v2/wenetspeech_cuts_{subset}.jsonl.gz")
-    cuts_firered = load_manifest_lazy(f"data/vq_firered_zh_en_16_v2/wenetspeech_cuts_{subset}.jsonl.gz")
+    cuts_whisper = load_manifest_lazy(f"data_s3/vq_whisper_turbo_zh_en_16_v2/wenetspeech_cuts_{subset}.jsonl.gz")
+    cuts_firered = load_manifest_lazy(f"data_s3/vq_firered_zh_en_16_v2/wenetspeech_cuts_{subset}.jsonl.gz")
     
     output_manifest = output_folder + f"/wenetspeech_cuts_{subset}.jsonl.gz"
     if os.path.exists(output_manifest):
@@ -21,9 +21,9 @@ for subset in subsets:
 
     new_cuts = []
     for whisper_cut, firered_cut in zip(cuts_whisper, cuts_firered):
+        assert whisper_cut.id == firered_cut.id
         whisper_cb = whisper_cut.codebook_indexes
         firered_cb = firered_cut.codebook_indexes
-        firered_cb.start = whisper_cb.start
         whisper_cut.firered_codebook_indexes = firered_cb
         new_cuts.append(whisper_cut)
     
