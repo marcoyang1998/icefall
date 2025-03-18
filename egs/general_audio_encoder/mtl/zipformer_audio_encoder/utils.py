@@ -1,5 +1,6 @@
 import logging
 import collections
+import io
 import os
 import re
 from typing import List, Tuple
@@ -7,6 +8,7 @@ from lhotse.array import Array, TemporalArray
 
 import torch
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from icefall.utils import tokenize_by_CJK_char
@@ -124,6 +126,99 @@ def _add_dummy_embeddings_and_taskIDs(task_ID: int, c):
     c = add_embeddings(c)
     return c
 
+def _save_checkpoint_with_global_batch_idx(
+    params,
+    model,
+    optimizer = None,
+    sampler = None,
+    scheduler = None,
+    scaler = None,
+    model_avg = None,
+    rank: int = 0,
+):
+    # only active when rank==0
+    if rank != 0:
+        return
+    
+    if isinstance(model, DDP):
+        model = model.module
+    else:
+        model = model
+        
+    checkpoint = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "grad_scaler": scaler.state_dict() if scaler is not None else None,
+        "sampler": sampler.state_dict() if sampler is not None else None,
+    }
+    
+    if model_avg is not None:
+        checkpoint["model_avg"] = model_avg.to(torch.float32).state_dict()
+
+    if params:
+        for k, v in params.items():
+            assert k not in checkpoint
+            checkpoint[k] = v
+    output_path = params.exp_dir / f"checkpoint-{params.batch_idx_train}.pt"
+        
+    if params.save_with_client:
+        output_path = "brainllm:s3://yangxiaoyu/" + str(output_path) 
+        logging.info(f"Saving checkpoint to {output_path}")
+        with io.BytesIO() as f:
+            torch.save(checkpoint, f)
+            f.seek(0)
+            params.client.put(output_path, f)
+        logging.info(f"Finish saving checkpoint to {output_path}")
+    else:
+        logging.info(f"Saving checkpoint to {output_path}")
+        torch.save(checkpoint, output_path)
+
+def _save_checkpoint(
+    filename,
+    model,
+    model_avg = None,
+    params = None,
+    optimizer = None,
+    scheduler = None,
+    scaler = None,
+    sampler = None,
+    rank: int = 0,
+):
+    if rank != 0:
+        return
+
+    logging.info(f"Saving checkpoint to {filename}")
+
+    if isinstance(model, DDP):
+        model = model.module
+
+    checkpoint = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "grad_scaler": scaler.state_dict() if scaler is not None else None,
+        "sampler": sampler.state_dict() if sampler is not None else None,
+    }
+
+    if model_avg is not None:
+        checkpoint["model_avg"] = model_avg.to(torch.float32).state_dict()
+
+    if params:
+        for k, v in params.items():
+            assert k not in checkpoint
+            checkpoint[k] = v
+            
+    if "s3://" in filename:
+        with io.BytesIO() as f:
+            torch.save(checkpoint, f)
+            f.seek(0)
+            params.client.put(filename, f)
+        logging.info(f"Finish saving checkpoint to {filename}")
+    else:
+        torch.save(checkpoint, filename)
+
+        
 def _add_task_id(task_id, c):
     c.task_id = task_id
     return c
