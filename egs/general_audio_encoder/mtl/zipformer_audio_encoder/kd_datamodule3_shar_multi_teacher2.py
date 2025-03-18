@@ -883,8 +883,15 @@ class MultiTaskDataModule:
 
     @lru_cache()
     def gigaspeech_dev_cuts(self) -> CutSet:
-        logging.info("About to get Gigaspeech dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
+        if self.args.use_shar:
+            logging.info(f"Use share for gigaspeech dev cuts")
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.en_shar_dir)}/gigaspeech/dev",
+                shuffle_shards=False,
+            )
+        else:
+            logging.info("About to get Gigaspeech dev cuts")
+            return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
 
     @lru_cache()
     def gigaspeech_test_cuts(self) -> CutSet:

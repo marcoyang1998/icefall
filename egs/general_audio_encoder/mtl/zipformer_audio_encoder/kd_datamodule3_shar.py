@@ -423,7 +423,7 @@ class MultiTaskDataModule:
         
         transforms = []
         if self.args.enable_rir:
-            logging.info("Enable MUSAN")
+            logging.info("Enable RIR")
             if self.args.rir_cuts is not None:
                 logging.info("About to get RIR cuts")
                 rir_cuts = load_manifest_lazy("data/rir/rir_cuts.jsonl.gz")

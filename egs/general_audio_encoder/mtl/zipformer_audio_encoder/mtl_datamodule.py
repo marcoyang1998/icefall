@@ -32,6 +32,7 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     DynamicBucketingSampler,
     K2SpeechRecognitionDataset,
     PrecomputedFeatures,
+    ReverbWithImpulseResponse,
     SimpleCutSampler,
     ZipSampler,
     SpecAugment,
@@ -229,6 +230,20 @@ class MultiTaskDataModule:
             "Larger values mean more warping. "
             "A value less than 1 means to disable time warp.",
         )
+        
+        group.add_argument(
+            "--enable-rir",
+            type=str2bool,
+            default=False,
+            help="When enabled, perform RIR on the cuts",
+        )
+        
+        group.add_argument(
+            "--rir-cuts",
+            type=str,
+            default="data/rir/rir_cuts.jsonl.gz",
+            help="If None, use the default fast random RIR generator"
+        )
 
         group.add_argument(
             "--enable-musan",
@@ -420,10 +435,22 @@ class MultiTaskDataModule:
             rank = 0
         
         transforms = []
+        if self.args.enable_rir:
+            logging.info("Enable MUSAN")
+            if self.args.rir_cuts is not None:
+                logging.info("About to get RIR cuts")
+                rir_cuts = load_manifest_lazy("data/rir/rir_cuts.jsonl.gz")
+            else:
+                logging.info("Use the fast random RIR generator as no RIR recordings are provided")
+                rir_cuts = None
+            transforms.append(
+                ReverbWithImpulseResponse(rir_recordings=rir_cuts, p=0.5)
+            )
+        
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/musan/musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/noise/noise_all.jsonl.gz")
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
