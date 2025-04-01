@@ -1,4 +1,5 @@
 import argparse
+import math
 
 from model import MultiKDModel
 from scaling import ScheduledFloat
@@ -222,7 +223,7 @@ def main(args):
     feature = [extractor.extract(audios, sampling_rate=fs)]
     feature_lens = [f.size(0) for f in feature]
 
-    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True).to(device)
+    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True, padding_value=math.log(1e-10)).to(device)
     feature_lens = torch.tensor(feature_lens, device=device)
 
     # batch inference
