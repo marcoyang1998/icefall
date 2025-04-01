@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union, List
 
 import torch
+import lhotse
 from lhotse import CutSet, Fbank, FbankConfig, load_manifest, load_manifest_lazy
 from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     CutConcatenate,
@@ -49,6 +50,8 @@ from torch.utils.data import DataLoader
 from dataset_multi_speech_mvq import MultiTaskKDDataset
 from icefall.utils import str2bool
 
+# for loading large audio from url
+lhotse.set_caching_enabled(True)
 
 class _SeedWorkers:
     def __init__(self, seed: int):
@@ -900,12 +903,14 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
-        import lhotse
-        lhotse.set_caching_enabled(True)
+        import glob
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
             medium_cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.en_shar_dir)}/libriheavy/medium",
+                fields={
+                    "cuts": sorted(glob.glob(f"{self.args.en_shar_dir}/libriheavy_fix_cut/medium/cuts.*.jsonl.gz")),
+                    "codebook_indexes": sorted(glob.glob(f"{self.args.en_shar_dir}/libriheavy/medium/codebook_indexes.*.tar")),
+                },
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -915,7 +920,10 @@ class MultiTaskDataModule:
             else:
                 assert self.args.libriheavy_subset == "large"
                 large_cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.en_shar_dir)}/libriheavy/large",
+                    fields={
+                        "cuts": sorted(glob.glob(f"{self.args.en_shar_dir}/libriheavy_fix_cut/large/cuts.*.jsonl.gz")),
+                        "codebook_indexes": sorted(glob.glob(f"{self.args.en_shar_dir}/libriheavy/large/codebook_indexes.*.tar")),
+                    },
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -939,7 +947,7 @@ class MultiTaskDataModule:
             num_splits = 10
             all_cuts = []
             for i in range(num_splits):
-                split_dir = f"{str(self.args.zh_shar_dir)}/wenetspeech/L/split_{i}"
+                split_dir = f"data-shar/data-shar-whisper-cb16-firered-cb16/wenetspeech/L/split_{i}"
                 logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
                     in_dir=split_dir,
@@ -966,7 +974,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info("Get wenetspeech dev cuts from shar")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.zh_shar_dir)}/wenetspeech/DEV",
+                in_dir=f"data-shar/data-shar-whisper-cb16-firered-cb16/wenetspeech/DEV",
                 shuffle_shards=False,
             )
             return cuts
@@ -1009,7 +1017,7 @@ class MultiTaskDataModule:
             ).resample(16000)
         else:
             cuts_train = load_manifest_lazy(
-                self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+                self.args.manifest_dir / f"mls_cuts_{self.args.training_subset}.jsonl.gz"
             )
             return cuts_train
     
@@ -1046,6 +1054,7 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def multi_chinese_cuts(self):
+        import glob
         logging.info("About to get various Chinese dataset cuts")
         datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","datatang1505"]
         datasets += ["dialog3k", "magicdata", "sensetime", "ximalaya", "acq", "cantonese", "cs_wav", "dialog"]
@@ -1057,7 +1066,11 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.zh_shar_dir}/{dataset}",
+                fields={
+                    "cuts": sorted(glob.glob(f"{self.args.zh_shar_dir}/{dataset}/cuts.*.jsonl.gz")),
+                    "codebook_indexes": sorted(glob.glob(f"{self.args.en_shar_dir}/{dataset}/codebook_indexes.*.tar")),
+                    "firered_codebook_indexes": sorted(glob.glob(f"{self.args.zh_shar_dir}/{dataset}/codebook_indexes.*.tar")),
+                },
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",

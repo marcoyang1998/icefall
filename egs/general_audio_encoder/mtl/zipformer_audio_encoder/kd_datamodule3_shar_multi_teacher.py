@@ -32,6 +32,7 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     DynamicBucketingSampler,
     K2SpeechRecognitionDataset,
     PrecomputedFeatures,
+    ReverbWithImpulseResponse,
     SimpleCutSampler,
     ZipSampler,
     SpecAugment,
@@ -228,6 +229,20 @@ class MultiTaskDataModule:
             "Larger values mean more warping. "
             "A value less than 1 means to disable time warp.",
         )
+        
+        group.add_argument(
+            "--enable-rir",
+            type=str2bool,
+            default=False,
+            help="When enabled, perform RIR on the cuts",
+        )
+        
+        group.add_argument(
+            "--rir-cuts",
+            type=str,
+            default="data/rir/rir_cuts.jsonl.gz",
+            help="If None, use the default fast random RIR generator"
+        )
 
         group.add_argument(
             "--enable-musan",
@@ -305,6 +320,12 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--repeat-wenetspeech",
+            type=int,
+            default=1,
+        )
+        
+        group.add_argument(
             "--use-libriheavy",
             type=str2bool,
             default=False,
@@ -331,6 +352,12 @@ class MultiTaskDataModule:
         
         group.add_argument(
             "--use-extra-english-dataset",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--use-weread",
             type=str2bool,
             default=False,
         )
@@ -407,10 +434,22 @@ class MultiTaskDataModule:
             # rank = 0
         
         transforms = []
+        if self.args.enable_rir:
+            logging.info("Enable MUSAN")
+            if self.args.rir_cuts is not None:
+                logging.info("About to get RIR cuts")
+                rir_cuts = load_manifest_lazy("data/rir/rir_cuts.jsonl.gz")
+            else:
+                logging.info("Use the fast random RIR generator as no RIR recordings are provided")
+                rir_cuts = None
+            transforms.append(
+                ReverbWithImpulseResponse(rir_recordings=rir_cuts, p=0.5)
+            )
+            
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/noise/noise_all.jsonl.gz")
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
@@ -810,7 +849,7 @@ class MultiTaskDataModule:
             weights.append(durations[i])
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/gigaspeech/{subset}",
+                    in_dir=f"data-shar/data-shar-whisper-zh-en-cb16-v2/gigaspeech/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -830,8 +869,15 @@ class MultiTaskDataModule:
 
     @lru_cache()
     def gigaspeech_dev_cuts(self) -> CutSet:
-        logging.info("About to get Gigaspeech dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
+        if self.args.use_shar:
+            logging.info(f"Use share for gigaspeech dev cuts")
+            return CutSet.from_shar(
+                in_dir=f"data-shar/data-shar-whisper-zh-en-cb16-v2/gigaspeech/dev",
+                shuffle_shards=False,
+            )
+        else:
+            logging.info("About to get Gigaspeech dev cuts")
+            return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
 
     @lru_cache()
     def gigaspeech_test_cuts(self) -> CutSet:
@@ -840,10 +886,14 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
+        import glob
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
             medium_cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
+                fields={
+                    "cuts": sorted(glob.glob(f"data-shar/data-shar-whisper-zh-en-cb16-v2/libriheavy_fix_cut/medium/cuts.*.jsonl.gz")),
+                    "codebook_indexes": sorted(glob.glob(f"data-shar/data-shar-whisper-zh-en-cb16-v2/libriheavy/medium/codebook_indexes.*.tar")),
+                },
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -853,7 +903,10 @@ class MultiTaskDataModule:
             else:
                 assert self.args.libriheavy_subset == "large"
                 large_cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+                    fields={
+                        "cuts": sorted(glob.glob(f"data-shar/data-shar-whisper-zh-en-cb16-v2/libriheavy_fix_cut/large/cuts.*.jsonl.gz")),
+                        "codebook_indexes": sorted(glob.glob(f"data-shar/data-shar-whisper-zh-en-cb16-v2/libriheavy/large/codebook_indexes.*.tar")),
+                    },
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -930,7 +983,7 @@ class MultiTaskDataModule:
             num_splits = 8
             all_cuts = []
             for i in range(num_splits):
-                split_dir = f"{str(self.args.shar_dir)}/MLS/split_{i}"
+                split_dir = f"data-shar/data-shar-whisper-zh-en-cb16-v2/MLS/split_{i}"
                 logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
                     in_dir=split_dir,
@@ -962,7 +1015,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"data-shar/data-shar-whisper-zh-en-cb16-v2/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -984,18 +1037,29 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def multi_chinese_cuts(self):
+        import glob
         logging.info("About to get various Chinese dataset cuts")
-        datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","common_voice_20200622","datatang1505"]
+        datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","datatang1505"]
         datasets += ["dialog3k", "magicdata", "sensetime", "ximalaya", "acq", "cantonese", "cs_wav", "dialog"]
         datasets += ["MagicData_dialog","primewords_md_2018_set1","zhvoice","phone","speech_wav"]
-        datasets += ["digital_library_202003", "ST-CMDS-20170001_1-OS", "20220309"]
+        datasets += ["ST-CMDS-20170001_1-OS", "20220309", "speech_annotations_2021"]
         all_cuts = []
         cuts_duration = []
         cuts_len = []
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
+            # cuts = CutSet.from_shar(
+            #     in_dir=f"{self.args.shar_dir}/{dataset}",
+            #     shuffle_shards=True,
+            #     stateful_shuffle=True,
+            #     seed="randomized",
+            # ).repeat()
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                fields={
+                    "cuts": sorted(glob.glob(f"data-shar/data-shar-firered-en-zh-cb16-v2/{dataset}/cuts.*.jsonl.gz")),
+                    "codebook_indexes": sorted(glob.glob(f"data-shar/data-shar-whisper-zh-en-cb16-v2/{dataset}/codebook_indexes.*.tar")),
+                    "firered_codebook_indexes": sorted(glob.glob(f"data-shar/data-shar-firered-en-zh-cb16-v2/{dataset}/codebook_indexes.*.tar")),
+                },
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1043,7 +1107,7 @@ class MultiTaskDataModule:
             if not self.args.at_weighted_sampler:
                 if self.args.use_shar:
                     cuts = CutSet.from_shar(
-                        in_dir=f"{str(self.args.shar_dir)}/audioset/full",
+                        in_dir="data-shar/data-shar-whisper-zh-en-cb16-v2/audioset/full",
                         shuffle_shards=True,
                         stateful_shuffle=True,
                         seed="randomized",
@@ -1060,7 +1124,7 @@ class MultiTaskDataModule:
         else:
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/audioset/{self.args.audioset_subset}",
+                    in_dir=f"data-shar/data-shar-whisper-zh-en-cb16-v2/audioset/balanced",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1069,14 +1133,21 @@ class MultiTaskDataModule:
                 cuts = load_manifest_lazy(
                     self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
                 )
-        return cuts
+        return cuts.drop_features()
 
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
         logging.info("About to get test-other cuts")
+        if self.args.use_shar:
+            logging.info(f"Use share for audioset eval cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"data-shar/data-shar-whisper-zh-en-cb16-v2/audioset/eval",
+                shuffle_shards=False,
+            )
+            return cuts
         return load_manifest_lazy(
             self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
-        )
+        ).drop_features()
         
     @lru_cache()
     def audioset_sampling_weights(self):

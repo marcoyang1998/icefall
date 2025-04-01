@@ -939,7 +939,7 @@ class MultiTaskDataModule:
             num_splits = 10
             all_cuts = []
             for i in range(num_splits):
-                split_dir = f"{str(self.args.zh_shar_dir)}/wenetspeech/L/split_{i}"
+                split_dir = f"data-shar/data-shar-whisper-cb16-firered-cb16/wenetspeech/L/split_{i}"
                 logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
                     in_dir=split_dir,
