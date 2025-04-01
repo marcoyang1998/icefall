@@ -389,6 +389,7 @@ def average_checkpoints_with_averaged_model(
     filename_start: str,
     filename_end: str,
     device: torch.device = torch.device("cpu"),
+    client = None,
 ) -> Dict[str, Tensor]:
     """Average model parameters over the range with given
     start model (excluded) and end model.
@@ -421,8 +422,17 @@ def average_checkpoints_with_averaged_model(
       device:
         Move checkpoints to this device before averaging.
     """
-    state_dict_start = torch.load(filename_start, map_location=device)
-    state_dict_end = torch.load(filename_end, map_location=device)
+    # if the checkpoint is from s3 storage
+    import io
+    if "s3://" in filename_start:
+        f = io.BytesIO(client.get(filename_start))
+        state_dict_start = torch.load(f, map_location=device)
+        
+        f = io.BytesIO(client.get(filename_end))
+        state_dict_end = torch.load(f, map_location=device)
+    else:
+        state_dict_start = torch.load(filename_start, map_location=device)
+        state_dict_end = torch.load(filename_end, map_location=device)
 
     batch_idx_train_start = state_dict_start["batch_idx_train"]
     batch_idx_train_end = state_dict_end["batch_idx_train"]
