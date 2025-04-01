@@ -323,6 +323,12 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--use-weread",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
             "--use-aishell",
             type=str2bool,
             default=False,
@@ -893,10 +899,12 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
+        import lhotse
+        lhotse.set_caching_enabled(True)
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
             medium_cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
+                in_dir=f"{str(self.args.shar_dir)}/libriheavy_fix_cut/medium",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -906,7 +914,7 @@ class MultiTaskDataModule:
             else:
                 assert self.args.libriheavy_subset == "large"
                 large_cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+                    in_dir=f"{str(self.args.shar_dir)}/libriheavy_fix_cut/large",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1052,17 +1060,17 @@ class MultiTaskDataModule:
     @lru_cache()
     def multi_chinese_cuts(self):
         logging.info("About to get various Chinese dataset cuts")
-        datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","common_voice_20200622","datatang1505"]
+        datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","datatang1505"]
         datasets += ["dialog3k", "magicdata", "sensetime", "ximalaya", "acq", "cantonese", "cs_wav", "dialog"]
         datasets += ["MagicData_dialog","primewords_md_2018_set1","zhvoice","phone","speech_wav"]
-        datasets += ["digital_library_202003", "ST-CMDS-20170001_1-OS", "20220309"]
+        datasets += ["ST-CMDS-20170001_1-OS", "20220309", "speech_annotations_2021"]
         all_cuts = []
         cuts_duration = []
         cuts_len = []
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"data-shar/data-shar-firered-en-zh-cb16-v2/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1071,11 +1079,6 @@ class MultiTaskDataModule:
             cuts_duration.append(self.dataset_duration_stats[dataset])
             cuts_len.append(self.dataset_len_stats[dataset])
 
-        # alimeeting_cuts, ali_dur, ali_num_cuts = self.alimeeting_cuts()
-        # all_cuts.append(alimeeting_cuts)
-        # cuts_duration.append(ali_dur)
-        # cuts_len.append(ali_num_cuts)
-        
         all_cuts = CutSet.mux(
             *all_cuts,
             weights=cuts_duration,
@@ -1112,9 +1115,37 @@ class MultiTaskDataModule:
         
         return cuts.drop_features(), 140, 186364
     
+    @lru_cache()
+    def weread_dataset_cuts(self):
+        logging.info("About to get weread dataset")
+        num_splits = 10
+        all_cuts = []
+        cuts_duration = []
+        cuts_len = []
+        for split in range(num_splits):
+            logging.info(f"Loading weread split {split}")
+            cuts = CutSet.from_shar(
+                in_dir=f"data-shar/data-shar-firered-en-zh-cb16-v2/weread/split_{split}",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            all_cuts.append(cuts)
+            cuts_duration.append(9000)
+            cuts_len.append(300)
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=[1]*len(all_cuts),  # each split is the same duration
+            stop_early=False
+        )
+        all_duration = num_splits * 6000
+        all_len = num_splits * 2999930
+        logging.info(f"Getting a total of {all_duration} hours ({all_len} samples) of weread data. ")
+        return all_cuts, all_duration, all_len
+    
     @cached_property
     def dataset_duration_stats(self):
-        stats_file = f"{self.args.shar_dir}/stats_duration.txt"
+        stats_file = f"data/stats/stats_duration.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:
@@ -1124,7 +1155,7 @@ class MultiTaskDataModule:
     
     @cached_property
     def dataset_len_stats(self):
-        stats_file = f"{self.args.shar_dir}/stats_len.txt"
+        stats_file = f"data/stats/stats_len.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:

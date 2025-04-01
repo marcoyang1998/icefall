@@ -874,6 +874,8 @@ class MultiTaskDataModule:
     
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
+        import lhotse
+        lhotse.set_caching_enabled(True)
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
             medium_cuts = CutSet.from_shar(
@@ -1018,10 +1020,10 @@ class MultiTaskDataModule:
     @lru_cache()
     def multi_chinese_cuts(self):
         logging.info("About to get various Chinese dataset cuts")
-        datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","common_voice_20200622","datatang1505"]
+        datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","datatang1505"]
         datasets += ["dialog3k", "magicdata", "sensetime", "ximalaya", "acq", "cantonese", "cs_wav", "dialog"]
         datasets += ["MagicData_dialog","primewords_md_2018_set1","zhvoice","phone","speech_wav"]
-        datasets += ["digital_library_202003", "ST-CMDS-20170001_1-OS", "20220309"]
+        datasets += ["ST-CMDS-20170001_1-OS", "20220309", "speech_annotations_2021"]
         all_cuts = []
         cuts_duration = []
         cuts_len = []
