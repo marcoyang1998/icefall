@@ -196,6 +196,18 @@ def get_parser():
         default="zipformer/exp",
         help="The experiment dir",
     )
+    
+    parser.add_argument(
+        "--use-s3-client",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--s3-prefix",
+        type=str,
+        default="brainllm:s3://yangxiaoyu",
+    )
 
     parser.add_argument(
         "--bpe-model",
@@ -426,6 +438,7 @@ def decode_one_batch(
     LM: Optional[LmScorer] = None,
     ngram_lm=None,
     ngram_lm_scale: float = 0.0,
+    is_en: bool = True,
 ) -> Dict[str, List[List[str]]]:
     """Decode one batch and return the result in a dict. The dict has the
     following format:
@@ -555,7 +568,10 @@ def decode_one_batch(
             blank_penalty=params.blank_penalty,
         )
         for hyp in sp.decode(hyp_tokens):
-            hyps.append("".join(smart_byte_decode(hyp).split()))
+            if is_en:
+                hyps.append(hyp.split())
+            else:
+                hyps.append("".join(smart_byte_decode(hyp).split()))
     elif params.decoding_method == "modified_beam_search":
         hyp_tokens = modified_beam_search(
             model=model,
@@ -684,6 +700,7 @@ def decode_dataset(
     LM: Optional[LmScorer] = None,
     ngram_lm=None,
     ngram_lm_scale: float = 0.0,
+    is_en: bool = True,
 ) -> Dict[str, List[Tuple[str, List[str], List[str]]]]:
     """Decode dataset.
 
@@ -737,6 +754,7 @@ def decode_dataset(
             LM=LM,
             ngram_lm=ngram_lm,
             ngram_lm_scale=ngram_lm_scale,
+            is_en=is_en,
         )
 
         for name, hyps in hyps_dict.items():
@@ -779,6 +797,7 @@ def save_wer_results(
     params: AttributeDict,
     test_set_name: str,
     results_dict: Dict[str, List[Tuple[str, List[str], List[str], Tuple]]],
+    compute_cer: bool = True,
 ):
     """
     Save WER and per-utterance word alignments.
@@ -790,7 +809,7 @@ def save_wer_results(
         errs_filename = params.res_dir / f"errs-{test_set_name}-{params.suffix}.txt"
         with open(errs_filename, "w", encoding="utf8") as fd:
             wer = write_error_stats(
-                fd, f"{test_set_name}-{key}", results, enable_log=True, compute_CER=True
+                fd, f"{test_set_name}-{key}", results, enable_log=True, compute_CER=compute_cer
             )
             test_set_wers[key] = wer
 
@@ -904,6 +923,14 @@ def main():
 
     logging.info(f"Device: {device}")
 
+    if params.use_s3_client:
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/share_data/housiyuan/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
+    
     sp = spm.SentencePieceProcessor()
     sp.load(params.bpe_model)
 
@@ -948,21 +975,26 @@ def main():
             model.load_state_dict(average_checkpoints(filenames, device=device))
     else:
         if params.iter > 0:
-            filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
-                : params.avg + 1
-            ]
-            if len(filenames) == 0:
-                raise ValueError(
-                    f"No checkpoints found for"
-                    f" --iter {params.iter}, --avg {params.avg}"
-                )
-            elif len(filenames) < params.avg + 1:
-                raise ValueError(
-                    f"Not enough checkpoints ({len(filenames)}) found for"
-                    f" --iter {params.iter}, --avg {params.avg}"
-                )
-            filename_start = filenames[-1]
-            filename_end = filenames[0]
+            if params.use_s3_client:
+                filename_end = f"{params.s3_prefix}/{params.exp_dir}/checkpoint-{params.iter}.pt"
+                start_iter = params.iter - 4000 * params.avg
+                filename_start = f"{params.s3_prefix}/{params.exp_dir}/checkpoint-{start_iter}.pt"
+            else:
+                filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
+                    : params.avg + 1
+                ]
+                if len(filenames) == 0:
+                    raise ValueError(
+                        f"No checkpoints found for"
+                        f" --iter {params.iter}, --avg {params.avg}"
+                    )
+                elif len(filenames) < params.avg + 1:
+                    raise ValueError(
+                        f"Not enough checkpoints ({len(filenames)}) found for"
+                        f" --iter {params.iter}, --avg {params.avg}"
+                    )
+                filename_start = filenames[-1]
+                filename_end = filenames[0]
             logging.info(
                 "Calculating the averaged model over iteration checkpoints"
                 f" from {filename_start} (excluded) to {filename_end}"
@@ -973,14 +1005,19 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
+                    client=params.client,
                 )
             )
         else:
             assert params.avg > 0, params.avg
             start = params.epoch - params.avg
             assert start >= 1, start
-            filename_start = f"{params.exp_dir}/epoch-{start}.pt"
-            filename_end = f"{params.exp_dir}/epoch-{params.epoch}.pt"
+            if params.use_s3_client:
+                filename_start = f"{params.s3_prefix}/{params.exp_dir}/epoch-{start}.pt"
+                filename_end = f"{params.s3_prefix}/{params.exp_dir}/epoch-{params.epoch}.pt"
+            else:
+                filename_start = f"{params.exp_dir}/epoch-{start}.pt"
+                filename_end = f"{params.exp_dir}/epoch-{params.epoch}.pt"
             logging.info(
                 f"Calculating the averaged model over epoch range from "
                 f"{start} (excluded) to {params.epoch}"
@@ -991,6 +1028,7 @@ def main():
                     filename_start=filename_start,
                     filename_end=filename_end,
                     device=device,
+                    client=params.client,
                 ),
                 strict=False,
             )
@@ -1124,6 +1162,7 @@ def main():
         test_sets += [ "aishell-dev", "aishell-test"]
 
     for test_set, test_dl in zip(test_sets, test_dls):
+        is_en = "ls" in test_set
         results_dict = decode_dataset(
             dl=test_dl,
             params=params,
@@ -1135,6 +1174,7 @@ def main():
             LM=LM,
             ngram_lm=ngram_lm,
             ngram_lm_scale=ngram_lm_scale,
+            is_en=is_en,
         )
 
         save_asr_output(
@@ -1148,6 +1188,7 @@ def main():
                 params=params,
                 test_set_name=test_set,
                 results_dict=results_dict,
+                compute_cer=True if not is_en else False
             )
 
     logging.info("Done!")

@@ -105,6 +105,18 @@ def get_parser():
         default="zipformer/exp",
         help="The experiment dir",
     )
+    
+    parser.add_argument(
+        "--use-s3-client",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--s3-prefix",
+        type=str,
+        default="brainllm:s3://yangxiaoyu",
+    )
 
     add_model_arguments(parser)
 
@@ -218,6 +230,14 @@ def main():
     device = torch.device("cpu")
     if torch.cuda.is_available():
         device = torch.device("cuda", 0)
+        
+    if params.use_s3_client:
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/share_data/housiyuan/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
 
     logging.info("About to create model")
 
@@ -256,21 +276,26 @@ def main():
             )
     else:
         if params.iter > 0:
-            filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
-                : params.avg + 1
-            ]
-            if len(filenames) == 0:
-                raise ValueError(
-                    f"No checkpoints found for"
-                    f" --iter {params.iter}, --avg {params.avg}"
-                )
-            elif len(filenames) < params.avg + 1:
-                raise ValueError(
-                    f"Not enough checkpoints ({len(filenames)}) found for"
-                    f" --iter {params.iter}, --avg {params.avg}"
-                )
-            filename_start = filenames[-1]
-            filename_end = filenames[0]
+            if params.use_s3_client:
+                start_iter = params.iter - 4000 * params.avg
+                filename_start = f"{params.s3_prefix}/{params.exp_dir}/checkpoint-{start_iter}.pt"
+                filename_end = f"{params.s3_prefix}/{params.exp_dir}/checkpoint-{params.iter}.pt"
+            else:
+                filenames = find_checkpoints(params.exp_dir, iteration=-params.iter)[
+                    : params.avg + 1
+                ]
+                if len(filenames) == 0:
+                    raise ValueError(
+                        f"No checkpoints found for"
+                        f" --iter {params.iter}, --avg {params.avg}"
+                    )
+                elif len(filenames) < params.avg + 1:
+                    raise ValueError(
+                        f"Not enough checkpoints ({len(filenames)}) found for"
+                        f" --iter {params.iter}, --avg {params.avg}"
+                    )
+                filename_start = filenames[-1]
+                filename_end = filenames[0]
             logging.info(
                 "Calculating the averaged model over iteration checkpoints"
                 f" from {filename_start} (excluded) to {filename_end}"
@@ -279,6 +304,7 @@ def main():
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
+                    client=params.client,
                 ),
                 strict=False,
             )
@@ -296,6 +322,7 @@ def main():
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
+                    client=params.client,
                 ),
                 strict=False,
             )
@@ -309,7 +336,14 @@ def main():
     args.return_cuts = True
     audioset = MultiTaskDataModule(args)
 
-    audioset_cuts = audioset.audioset_eval_cuts()
+    def change_to_s3(c):
+        source = c.recording.sources[0].source
+        source = source.replace("download/", "brainllm:s3://yangxiaoyu/")
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
+    
+    audioset_cuts = audioset.audioset_eval_cuts().map(change_to_s3)
     audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
 
     audioset_dl = audioset.valid_dataloaders(audioset_cuts)
