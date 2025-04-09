@@ -318,7 +318,6 @@ if __name__=="__main__":
         temporal_array=True,
         pad_value=-100
     )
-    import pdb; pdb.set_trace()
     print(gt_mvq_tokens)
     
     gt_beats_embed = collate_custom_field(augmented_cuts, "beats_embedding")

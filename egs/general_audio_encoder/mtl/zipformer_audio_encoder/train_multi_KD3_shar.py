@@ -54,6 +54,7 @@ import logging
 from functools import partial
 import random
 import warnings
+import io
 from pathlib import Path
 from shutil import copyfile
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -73,11 +74,12 @@ from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
 from torch import Tensor
+import torch.distributed as dist
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_task_id, MetricsTracker, setup_distributed
+from utils import _add_task_id, MetricsTracker, setup_distributed, _save_checkpoint_with_global_batch_idx
 
 from zipformer2 import Zipformer2
 
@@ -538,6 +540,13 @@ def get_parser():
         Note: It also saves checkpoint to `exp-dir/epoch-xxx.pt` at the
         end of each epoch where `xxx` is the epoch number counting from 1.
         """,
+    )
+    
+    parser.add_argument(
+        "--save-with-client",
+        type=str2bool,
+        default=True,
+        help="If True, save the model to s3 client"
     )
 
     parser.add_argument(
@@ -1150,14 +1159,12 @@ def train_one_epoch(
                 model_cur=model,
                 model_avg=model_avg,
             )
-
+            
         if (
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            save_checkpoint_with_global_batch_idx(
-                out_dir=params.exp_dir,
-                global_batch_idx=params.batch_idx_train,
+            _save_checkpoint_with_global_batch_idx(
                 model=model,
                 model_avg=model_avg,
                 params=params,
@@ -1265,10 +1272,14 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed() # this will setup the device
+    else:
+        local_rank = 0
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
+    if world_size > 1:
+        logging.info(f"Global Rank: {dist.get_rank()}, Local Rank: {local_rank}, CUDA Device Count: {torch.cuda.device_count()}")
 
     if args.tensorboard and rank == 0:
         tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")
@@ -1277,7 +1288,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1295,6 +1306,15 @@ def run(rank, world_size, args):
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
 
+    # save the model to client
+    if rank == 0 and params.save_with_client:
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/share_data/housiyuan/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
+    
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
         params=params, model=model, model_avg=model_avg
@@ -1304,7 +1324,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1569,7 +1589,7 @@ def run(rank, world_size, args):
         valid_dls.append(asr_wenet_valid_dl)
      
     if params.use_audioset and params.do_audio_tagging:
-        as_eval_cuts = librispeech.audioset_eval_cuts()
+        as_eval_cuts = librispeech.audioset_eval_cuts().map(change_to_s3)
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
@@ -1633,7 +1653,6 @@ def run(rank, world_size, args):
     if world_size > 1:
         torch.distributed.barrier()
         cleanup_dist()
-
 
 def display_and_save_batch(
     batch: dict,

@@ -30,7 +30,10 @@ def normalize_chinese_text(c):
 
 def _normalize_english_text(text):
     # 只保留字母、数字、空格和单引号，去掉其他标点符号
-    text = re.sub(r"[^\w\s']", "", text)
+    # 移除所有标点符号，但保留单引号（'）
+    text = re.sub(r"[^\w\s']", " ", text)
+    # 替换多个空格为单个空格
+    text = re.sub(r"\s+", " ", text).strip()
     # 转换为大写
     text = text.upper()
     return text
@@ -51,6 +54,13 @@ def remove_non_alphabetic(text: str, strict: bool = True) -> str:
     else:
         # only keeps space
         return re.sub(r"[^a-zA-Z\s]+", "", text)
+
+def tokenize_and_encode_text(c):
+    # Text normalize for each sample
+    text = c.supervisions[0].text
+    text = byte_encode(tokenize_by_CJK_char(text))
+    c.supervisions[0].text = text
+    return c
 
 def map_zh(c):
     text = c.supervisions[0].text
@@ -218,6 +228,68 @@ def _save_checkpoint(
     else:
         torch.save(checkpoint, filename)
 
+def find_checkpoints(out_dir, iteration: int = 0) -> List[str]:
+    """Find all available checkpoints in a directory.
+
+    The checkpoint filenames have the form: `checkpoint-xxx.pt`
+    where xxx is a numerical value.
+
+    Assume you have the following checkpoints in the folder `foo`:
+
+        - checkpoint-1.pt
+        - checkpoint-20.pt
+        - checkpoint-300.pt
+        - checkpoint-4000.pt
+
+    Case 1 (Return all checkpoints)::
+
+      find_checkpoints(out_dir='foo')
+
+    Case 2 (Return checkpoints newer than checkpoint-20.pt, i.e.,
+    checkpoint-4000.pt, checkpoint-300.pt, and checkpoint-20.pt)
+
+        find_checkpoints(out_dir='foo', iteration=20)
+
+    Case 3 (Return checkpoints older than checkpoint-20.pt, i.e.,
+    checkpoint-20.pt, checkpoint-1.pt)::
+
+        find_checkpoints(out_dir='foo', iteration=-20)
+
+    Args:
+      out_dir:
+        The directory where to search for checkpoints.
+      iteration:
+        If it is 0, return all available checkpoints.
+        If it is positive, return the checkpoints whose iteration number is
+        greater than or equal to `iteration`.
+        If it is negative, return the checkpoints whose iteration number is
+        less than or equal to `-iteration`.
+    Returns:
+      Return a list of checkpoint filenames, sorted in descending
+      order by the numerical value in the filename.
+    """
+    checkpoints = list(glob.glob(f"{out_dir}/checkpoint-[0-9]*.pt"))
+    pattern = re.compile(r"checkpoint-([0-9]+).pt")
+    iter_checkpoints = []
+    for c in checkpoints:
+        result = pattern.search(c)
+        if not result:
+            logging.warn(f"Invalid checkpoint filename {c}")
+            continue
+
+        iter_checkpoints.append((int(result.group(1)), c))
+
+    # iter_checkpoints is a list of tuples. Each tuple contains
+    # two elements: (iteration_number, checkpoint-iteration_number.pt)
+
+    iter_checkpoints = sorted(iter_checkpoints, reverse=True, key=lambda x: x[0])
+    if iteration >= 0:
+        ans = [ic[1] for ic in iter_checkpoints if ic[0] >= iteration]
+    else:
+        ans = [ic[1] for ic in iter_checkpoints if ic[0] <= -iteration]
+
+    return ans
+
         
 def _add_task_id(task_id, c):
     c.task_id = task_id
@@ -334,9 +406,9 @@ class MetricsTracker(collections.defaultdict):
 
 if __name__=="__main__":
     text = "你好 ， 这是 一个  测试 句子 ！Hello 希望 这段 代码 能正常 工作 。"
-    normalized_text = normalize_chinese_text(text)
+    normalized_text = _normalize_chinese_text(text)
     print(normalized_text)
     
     text = "Hello, world! It's a great day to learn NLP."
-    normalized_text = normalize_english_text(text)
+    normalized_text = _normalize_english_text(text)
     print(normalized_text)

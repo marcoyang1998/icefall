@@ -64,7 +64,8 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar_multi_teacher2 import MultiTaskDataModule
+from kd_datamodule3_shar_multi_teacher3 import MultiTaskDataModule
+import lhotse
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
@@ -105,7 +106,7 @@ from icefall.utils import (
 )
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
-
+lhotse.set_caching_enabled(True)
 
 def get_adjusted_batch_count(params: AttributeDict) -> float:
     # returns the number of batches we would have used so far if we had used the reference
@@ -943,7 +944,6 @@ def compute_loss(
     task_ids = batch["task_ids"].int().to(device)
     is_zh = torch.tensor([c.language_id == "zh" for c in cuts]).to(device)
     is_en = torch.tensor([c.language_id == "en" for c in cuts]).to(device)
-    language_masks = [is_en, is_zh]
     
     if is_training:
         if params.batch_idx_train % 100 == 0:
@@ -985,10 +985,21 @@ def compute_loss(
         mvq_loss_values = []
         if params.do_mvq:
             mask = task_ids == 1 # ASR=1
-            for mvq_loss, scale, language_mask in zip(mvq_losses, mvq_loss_scales, language_masks):
-                mvq_loss = (mvq_loss * mask * language_mask).sum()
-                mvq_loss_values.append(mvq_loss)
-                loss += mvq_loss * scale # TODO: make this an option
+            whisper_mvq_loss, firered_mvq_loss = mvq_losses
+            
+            # comute whisper mvq loss for all ASR data
+            whisper_mask = (task_ids == 1).float()
+            whisper_mask[is_zh] = 0.2 # the loss scale of whisper mvq loss on chinese data is smaller
+            whisper_mvq_loss = (whisper_mvq_loss * whisper_mask).sum()
+            loss += whisper_mvq_loss
+            mvq_loss_values.append(whisper_mvq_loss)
+            
+            # compute firered mvq loss only for chinese data
+            firered_mask = (task_ids == 1).float()
+            firered_mask[is_en] = 0.0
+            firered_mvq_loss  = (firered_mvq_loss * firered_mask).sum()
+            loss += firered_mvq_loss
+            mvq_loss_values.append(firered_mvq_loss)
             
         # AT loss
         if params.do_audio_tagging:
@@ -1450,6 +1461,14 @@ def run(rank, world_size, args):
             "medium": 3687,
             "large": 37218,
         }
+        def fix_start(cut):
+            # make the start of codebook indexes the same as the cut
+            if cut.has_custom("codebook_indexes"):
+                cut.codebook_indexes.start = cut.start
+            if cut.has_custom("firered_codebook_indexes"):
+                cut.firered_codebook_indexes.start = cut.start
+            return cut
+        libriheavy_cuts = libriheavy_cuts.map(fix_start)
         en_asr_training_cuts.append(libriheavy_cuts)
         en_asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         en_asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
@@ -1481,17 +1500,6 @@ def run(rank, world_size, args):
     en_asr_training_cuts = en_asr_training_cuts.map(partial(_add_language_id, "en"))
     logging.info(f"Total English data: {sum(en_asr_training_cuts_duration)} hours, {sum(en_asr_training_cuts_lens)} cuts.")
     
-    # from now on, Chinese cuts
-    def change_codebook_indexes(c):
-        if c.has_custom("firered_codebook_indexes"): # if the cut already has firered cb, do nothing
-            del c.codebook_indexes
-            return c
-        else:
-            assert c.has_custom("codebook_indexes")
-            c.firered_codebook_indexes = c.codebook_indexes
-            del c.codebook_indexes
-            return c
-    
     zh_asr_training_cuts = []
     zh_asr_training_cuts_lens = []
     zh_asr_training_cuts_duration = []
@@ -1508,10 +1516,16 @@ def run(rank, world_size, args):
             "M": 1000,
             "L": 9700,
         }
-        wenetspeech_cuts = wenetspeech_cuts.map(change_codebook_indexes)
         zh_asr_training_cuts.append(wenetspeech_cuts)
         zh_asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
         zh_asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+    
+    def change_codebook_indexes(c):
+        # some of the cuts only has firered codebook_indexes (but the field name is still codebook_indexes), 
+        # so we have to rename them to firered_codebook_indexes and delete codebook_indexes
+        c.firered_codebook_indexes = c.codebook_indexes
+        del c.codebook_indexes
+        return c
     
     if params.use_weread:
         weread_cuts, weread_cut_durations, weread_cuts_len = librispeech.weread_dataset_cuts()
@@ -1522,7 +1536,6 @@ def run(rank, world_size, args):
     
     if params.use_extra_chinese_dataset:
         chinese_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chinese_cuts = chinese_cuts.map(change_codebook_indexes)
         zh_asr_training_cuts.append(chinese_cuts)
         zh_asr_training_cuts_lens.append(chinese_cuts_len)
         zh_asr_training_cuts_duration.append(chinese_cut_durations)
@@ -1667,7 +1680,6 @@ def run(rank, world_size, args):
         wenet_dev_cuts = librispeech.wenetspeech_valid_cuts()
         wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_task_id, 1))
         wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_language_id, "zh"))
-        wenet_dev_cuts = wenet_dev_cuts.map(change_codebook_indexes)
         asr_wenet_valid_dl = librispeech.valid_dataloaders(wenet_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_wenet")
         valid_dls.append(asr_wenet_valid_dl)

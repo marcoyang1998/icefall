@@ -77,7 +77,7 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_task_id, MetricsTracker, setup_distributed
+from utils import _add_task_id, _add_language_id, MetricsTracker, setup_distributed, _save_checkpoint_with_global_batch_idx
 
 from zipformer2 import Zipformer2
 
@@ -508,6 +508,12 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--separate-mvq",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
         "--speaker-verification-loss-scale",
         type=float,
         default=1.0,
@@ -533,6 +539,13 @@ def get_parser():
         type=str2bool,
         default=False,
         help="Add hooks to check for infinite module outputs and gradients.",
+    )
+    
+    parser.add_argument(
+        "--save-with-client",
+        type=str2bool,
+        default=True,
+        help="If True, save the model to s3 client"
     )
 
     parser.add_argument(
@@ -774,6 +787,8 @@ def load_checkpoint_if_available(
     assert params.start_epoch == 1
     if params.start_batch > 0:
         filename = params.exp_dir / f"checkpoint-{params.start_batch}.pt"
+        if params.save_with_client:
+            filename = "brainllm:s3://yangxiaoyu" + str(filename)
     else:
         return None
 
@@ -934,12 +949,19 @@ def compute_loss(
         
     feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
+    is_zh = torch.tensor([c.language_id == "zh" for c in cuts]).to(device)
+    is_en = torch.tensor([c.language_id == "en" for c in cuts]).to(device)
+    language_masks = [is_en, is_zh]
+    
+    if is_training:
+        if params.batch_idx_train % 100 == 0:
+            logging.info(f"Step: {params.batch_idx_train}, zh data: {is_zh.sum()}, en data: {is_en.sum()}")
     
     if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
             duration = sum([c.duration for c in cuts if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
-            logging.info(f"Total duration of task {t}: {duration}")
+            logging.info(f"Total duration of task {t}: {duration}")        
 
     # mvq tokens
     mvq_tokens = batch["cb_indexes"]
@@ -971,8 +993,10 @@ def compute_loss(
         mvq_loss_values = []
         if params.do_mvq:
             mask = task_ids == 1 # ASR=1
-            for mvq_loss, scale in zip(mvq_losses, mvq_loss_scales):
-                mvq_loss = (mvq_loss * mask).sum()
+            for mvq_loss, scale, language_mask in zip(mvq_losses, mvq_loss_scales, language_masks):
+                if params.separate_mvq:
+                    mvq_loss = mvq_loss * language_mask # only compute on specific language
+                mvq_loss = (mvq_loss * mask).sum() # only ASR data
                 mvq_loss_values.append(mvq_loss)
                 loss += mvq_loss * scale # TODO: make this an option
             
@@ -1166,9 +1190,7 @@ def train_one_epoch(
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            save_checkpoint_with_global_batch_idx(
-                out_dir=params.exp_dir,
-                global_batch_idx=params.batch_idx_train,
+            _save_checkpoint_with_global_batch_idx(
                 model=model,
                 model_avg=model_avg,
                 params=params,
@@ -1305,6 +1327,15 @@ def run(rank, world_size, args):
     if rank == 0:
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
+        
+    # save the model to client
+    if rank == 0 and params.save_with_client:
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/share_data/housiyuan/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
 
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
@@ -1374,6 +1405,7 @@ def run(rank, world_size, args):
             librispeech_cuts_len = 281239
             librispeech_cuts_duration = 960
         librispeech_cuts = librispeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+        librispeech_cuts = librispeech_cuts.map(partial(_add_language_id, "en"))
         asr_training_cuts.append(librispeech_cuts)
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
@@ -1396,6 +1428,7 @@ def run(rank, world_size, args):
             "xl": 10000 # 10000 hrs
         }
         gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_language_id, "en"))
         asr_training_cuts.append(gigaspeech_cuts)
         asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
         asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
@@ -1413,9 +1446,10 @@ def run(rank, world_size, args):
             "L": 9700,
         }
         wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_language_id, "zh"))
         asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset] * params.repeat_wenetspeech)
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset] * params.repeat_wenetspeech)
     
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
@@ -1429,7 +1463,16 @@ def run(rank, world_size, args):
             "medium": 3687,
             "large": 37218,
         }
+        def fix_start(cut):
+            # make the start of codebook indexes the same as the cut
+            if cut.has_custom("codebook_indexes"):
+                cut.codebook_indexes.start = cut.start
+            if cut.has_custom("firered_codebook_indexes"):
+                cut.firered_codebook_indexes.start = cut.start
+            return cut
+        libriheavy_cuts = libriheavy_cuts.map(fix_start)
         libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        libriheavy_cuts = libriheavy_cuts.map(partial(_add_language_id, "en"))
         asr_training_cuts.append(libriheavy_cuts)
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
@@ -1437,6 +1480,7 @@ def run(rank, world_size, args):
     if params.use_mls:
         mls_cuts = librispeech.mls_cuts()
         mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
+        mls_cuts = mls_cuts.map(partial(_add_language_id, "en"))
         # mls cuts: 10801 hrs, 2619190 cuts
         asr_training_cuts.append(mls_cuts)
         asr_training_cuts_lens.append(2619190)
@@ -1461,7 +1505,7 @@ def run(rank, world_size, args):
     if len(asr_training_cuts) > 1:
         asr_training_cuts = CutSet.mux(
             *asr_training_cuts,
-            weights=asr_training_cuts_lens,
+            weights=asr_training_cuts_duration,
             stop_early=False,
         )
     else:
@@ -1469,6 +1513,13 @@ def run(rank, world_size, args):
     
     train_cuts["cuts_asr"] = asr_training_cuts
     train_cuts_duration.append(sum(asr_training_cuts_duration))
+    
+    def change_to_s3(c):
+        source = c.recording.sources[0].source
+        source = source.replace("download/", "brainllm:s3://yangxiaoyu/")
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
     
     # audio data
     if params.use_audioset and params.do_audio_tagging:
@@ -1490,6 +1541,8 @@ def run(rank, world_size, args):
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+        audioset_cuts = audioset_cuts.map(partial(_add_language_id, "none"))
+        audioset_cuts = audioset_cuts.map(change_to_s3)
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
@@ -1553,6 +1606,7 @@ def run(rank, world_size, args):
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_task_id, 1))
+        ls_valid_cuts = ls_valid_cuts.map(partial(_add_language_id, "en"))
         asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_ls")
         valid_dls.append(asr_ls_valid_dl)
@@ -1560,6 +1614,7 @@ def run(rank, world_size, args):
     if params.use_gigaspeech:
         giga_dev_cuts = librispeech.gigaspeech_dev_cuts()
         giga_dev_cuts = giga_dev_cuts.map(partial(_add_task_id, 1))
+        giga_dev_cuts = giga_dev_cuts.map(partial(_add_language_id, "en"))
         asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_giga")
         valid_dls.append(asr_giga_valid_dl)
@@ -1567,6 +1622,7 @@ def run(rank, world_size, args):
     if params.use_wenetspeech:
         wenet_dev_cuts = librispeech.wenetspeech_valid_cuts()
         wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_task_id, 1))
+        wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_language_id, "zh"))
         asr_wenet_valid_dl = librispeech.valid_dataloaders(wenet_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_wenet")
         valid_dls.append(asr_wenet_valid_dl)
@@ -1574,6 +1630,8 @@ def run(rank, world_size, args):
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
+        as_eval_cuts = as_eval_cuts.map(partial(_add_language_id, "none"))
+        as_eval_cuts = as_eval_cuts.map(change_to_s3)
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
