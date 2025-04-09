@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+source ~/anaconda3/bin/activate && conda activate encoder
+source /mnt/cache/share_data/housiyuan/softwares/activate-cuda-11.8.sh
+
+# export PYTHONPATH=/mnt/cache/share_data/housiyuan/icefall_audio_encoder:$PYTHONPATH
+export PYTHONPATH=/mnt/cache/share_data/housiyuan/lhotse:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
 
 # data related
 use_librispeech=1
@@ -15,7 +20,7 @@ do_audio_tagging=0
 at_KD=0 # need to set this to 0 for efficiency
 mvq_KD=0
 
-finetune_ckpt=zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-mvq-out-ds-2-mask-ratio-1.0-musan-0-firered-quantizer-en-zh-v2-cb16/iter-224000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-mvq-out-ds-2-mask-ratio-1.0-musan-1-rir-1-whisper-quantizer-v2-cb16/iter-224000-avg-4.pt
 
 freeze_encoder=0
 freeze_encoder_steps=-1
@@ -30,7 +35,7 @@ md=600
 exp_dir=zipformer_audio_encoder_finetune/exp-finetune-95M-ls-100h-\
 lr-${lr}-causal-${causal}-freeze-encoder-${freeze_encoder}\
 -freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-firered-en-zh-mvq-cb16-no-musan-mask-ratio-1.0-224k
+-from-whisper-mvq-cb16--v2-musan-rir-224k
 
 # exp_dir=zipformer_audio_encoder_finetune/exp-finetune-95M-ls-100h-lr-0.02-causal-0-freeze-encoder-0-freeze--1-step-encoder-lr-scale-0.1-from-firered-mvq-cb16-with-musan-mask-ratio-1.0-224k
 
@@ -42,7 +47,7 @@ torchrun --nproc_per_node=8 --master_port=19132 \
     --use-librispeech $use_librispeech --full-libri $full_libri \
     --use-gigaspeech $use_gigaspeech --gigaspeech-subset $gigaspeech_subset \
     --exp-dir $exp_dir \
-    --manifest-dir data/fbank_mtl \
+    --manifest-dir data_s3/fbank_librispeech \
     --base-lr $lr \
     --do-audio-tagging $do_audio_tagging \
     --mvq-KD $mvq_KD --at-KD $at_KD \

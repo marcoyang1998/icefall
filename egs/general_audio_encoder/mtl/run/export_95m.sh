@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+source ~/anaconda3/bin/activate && conda activate encoder
+source /mnt/cache/share_data/housiyuan/softwares/activate-cuda-11.8.sh
+
+# export PYTHONPATH=/mnt/cache/share_data/housiyuan/icefall_audio_encoder:$PYTHONPATH
+export PYTHONPATH=/mnt/cache/share_data/housiyuan/lhotse:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
+
 
 num_codebooks=16
 delta=0
 output_ds=2
-teacher_frame_ratio=1
+teacher_frame_ratio=2
 
 python zipformer_audio_encoder/export.py \
     --iter 224000 \
     --avg 4 \
-    --exp-dir zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-mvq-out-ds-2-mask-ratio-1.0-musan-0-firered-quantizer-en-zh-v2-cb16 \
+    --exp-dir zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-mvq-out-ds-2-mask-ratio-1.0-musan-1-rir-1-whisper-quantizer-v2-cb16 \
     --output-downsampling-factor $output_ds \
     --use-averaged-model 1 \
     --causal 0 \

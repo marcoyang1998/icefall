@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+source ~/anaconda3/bin/activate && conda activate encoder
+source /mnt/cache/share_data/housiyuan/softwares/activate-cuda-11.8.sh
+
+export PYTHONPATH=/mnt/cache/share_data/housiyuan/lhotse:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
+
+master_addr=$(scontrol show hostname $SLURM_NODELIST | head -n 1)
 
 # data related
 use_librispeech=1
@@ -15,7 +21,7 @@ do_audio_tagging=0
 at_KD=0 # need to set this to 0 for efficiency
 mvq_KD=0
 
-finetune_ckpt=zipformer_audio_encoder/exp-xlarge-lr-0.04-full-en-zh-baoxiang-data-audio-multi-kd-time-mask-ratio-1.0-shar/iter-350000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-lr-0.04-causal-ls-giga-xl-lh-large-mls-1-extra-zh-en-use-weread-1-as-full-multi-mvq-kd-at-kd-scale-5.0-whisper-all-firered-zh-bucket-sampler-md-320-fix/iter-300000-avg-4.pt
 
 freeze_encoder=0
 freeze_encoder_steps=2000
@@ -28,11 +34,10 @@ md=1000
 exp_dir=zipformer_audio_encoder_finetune/exp-finetune-ls-100h-\
 lr-${lr}-causal-${causal}-freeze-encoder-${freeze_encoder}\
 -freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-xlarge-extra-baoxiang-data-350k
+-from-xlarge-all-data-with-musan-rir-300k-fix
 
-
-export CUDA_VISIBLE_DEVICES="1,3"
-torchrun --nproc_per_node=2 --master_port=19134 \
+export CUDA_VISIBLE_DEVICES="0,1"
+torchrun --nproc_per_node 2 --nnodes 1 --node_rank $SLURM_PROCID --master_addr $master_addr \
   zipformer_audio_encoder/finetune_mtl.py \
     --num-epochs 30 \
     --use-fp16 1 \
@@ -40,7 +45,7 @@ torchrun --nproc_per_node=2 --master_port=19134 \
     --use-librispeech $use_librispeech --full-libri $full_libri \
     --use-gigaspeech $use_gigaspeech --gigaspeech-subset $gigaspeech_subset \
     --exp-dir $exp_dir \
-    --manifest-dir data/fbank_mtl \
+    --manifest-dir data_s3/fbank_librispeech \
     --base-lr $lr \
     --do-audio-tagging $do_audio_tagging \
     --mvq-KD $mvq_KD --at-KD $at_KD \
@@ -55,6 +60,7 @@ torchrun --nproc_per_node=2 --master_port=19134 \
     --encoder-dim 192,384,768,1024,768,384 \
     --encoder-unmasked-dim 192,256,320,512,320,256 \
     --on-the-fly-feats 1 \
+    --num-workers 20 \
     --max-duration $md
 
 echo "Done"
