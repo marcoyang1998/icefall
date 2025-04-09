@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-firered_root=/fs-computility/INTERN6/shared/yangxiaoyu/workspace/FireRedASR
+
+firered_root=/mnt/cache/share_data/housiyuan/FireRedASR
+
 export PATH=$firered_root/fireredasr/:$firered_root/fireredasr/utils/:$PATH
 export PYTHONPATH=$firered_root/:$PYTHONPATH
 export PYTHONPATH=./../../..:$PYTHONPATH
+
+export PYTHONPATH=/mnt/cache/share_data/housiyuan/lhotse:$PYTHONPATH
 
 set -eou pipefail
 
@@ -219,4 +223,80 @@ if [ $stage -le 14 ] && [ $stop_stage -ge 14 ]; then
             --quantizer-path $quantizer_path \
             --max-duration 200
     done
+fi
+
+if [ $stage -le 15 ] && [ $stop_stage -ge 15 ]; then
+    log "Stage 15: Collect MVQ tokens on Libriheavy small"
+    
+    subset=small
+    num_splits=4
+    split_dir=$vq_dir/libriheavy_${subset}_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split $num_splits data/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+    
+    for i in $(seq 0 1 $(($num_splits-1))); do
+        log "Start encoding libriheavy small split ${i}"
+        if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
+            python firered/extract_mvq.py \
+                --num-jobs 4 \
+                --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
+                --model-dir $model_dir \
+                --embedding-dim 1280 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-lh-$subset-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer -1 \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+        log "Combining the processed cuts of libriheavy small"
+        pieces=$(find $split_dir -name "libriheavy_cuts_small.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/libriheavy_cuts_small.jsonl.gz
+    fi
+fi
+
+if [ $stage -le 16 ] && [ $stop_stage -ge 16 ]; then
+    log "Stage 16: Collect MVQ tokens on Libriheavy medium"
+    
+    subset=medium
+    num_splits=5
+    split_dir=$vq_dir/libriheavy_${subset}_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split $num_splits data_s3/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+    
+    for i in $(seq 0 1 $(($num_splits-1))); do
+        log "Start encoding libriheavy medium split ${i}"
+        if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
+            python firered/extract_mvq.py \
+                --num-jobs 1 \
+                --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
+                --model-dir $model_dir \
+                --embedding-dim 1280 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-lh-$subset-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer -1 \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+        log "Combining the processed cuts of libriheavy medium"
+        pieces=$(find $split_dir -name "libriheavy_cuts_medium.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/libriheavy_cuts_medium.jsonl.gz
+    fi
 fi

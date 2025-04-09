@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+
+source ~/anaconda3/bin/activate && conda activate encoder
+source /mnt/cache/share_data/housiyuan/softwares/activate-cuda-11.8.sh
+
+export PYTHONPATH=/mnt/cache/share_data/housiyuan/lhotse:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
+
+master_addr=$(scontrol show hostname $SLURM_NODELIST | head -n 1)
 
 # data related
 use_librispeech=0
@@ -18,7 +25,7 @@ do_audio_tagging=0
 at_KD=0 # need to set this to 0 for efficiency
 mvq_KD=0
 
-finetune_ckpt=zipformer_audio_encoder/exp-xlarge-lr-0.04-full-en-zh-baoxiang-data-audio-multi-kd-time-mask-ratio-1.0-shar/iter-350000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-lr-0.04-causal-ls-giga-xl-lh-large-mls-1-extra-zh-en-use-weread-1-as-full-multi-mvq-kd-at-kd-scale-5.0-whisper-all-firered-zh-bucket-sampler-md-320-fix/iter-348000-avg-4.pt
 
 freeze_encoder=0
 freeze_encoder_steps=2000
@@ -31,12 +38,12 @@ md=500
 exp_dir=zipformer_audio_encoder_finetune/exp-finetune-wenetspeech-${wenetspeech_subset}-\
 lr-${lr}-causal-${causal}-freeze-encoder-${freeze_encoder}\
 -freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-xlarge-zh-en-audio-baoxiang-data-mvq-350k
+-from-xlarge-all-data-with-musan-rir-348k-fix
 # exp_dir=zipformer_audio_encoder_finetune/exp-debug
 
-# export CUDA_VISIBLE_DEVICES="0,1,2,3"
-torchrun \
-  --nproc_per_node 4 --master_port 18834 \
+# export CUDA_VISIBLE_DEVICES="4,5,6,7"
+
+torchrun --nproc_per_node 4 --nnodes 1 --node_rank $SLURM_PROCID --master_addr $master_addr \
   zipformer_audio_encoder/finetune_mtl.py \
     --num-epochs 30 \
     --use-fp16 1 \
@@ -46,7 +53,7 @@ torchrun \
     --use-wenetspeech $use_wenetspeech --wenetspeech-subset $wenetspeech_subset \
     --use-aishell $use_aishell \
     --exp-dir $exp_dir \
-    --manifest-dir data/fbank_mtl \
+    --manifest-dir data_s3/fbank_wenetspeech \
     --base-lr $lr \
     --do-audio-tagging $do_audio_tagging \
     --mvq-KD $mvq_KD --at-KD $at_KD \
@@ -61,6 +68,7 @@ torchrun \
     --feedforward-dim 512,1024,2048,3072,2048,1024 \
     --encoder-dim 192,384,768,1024,768,384 \
     --encoder-unmasked-dim 192,256,320,512,320,256 \
+    --num-workers 20 \
     --on-the-fly-feats 1 \
     --max-duration $md
 

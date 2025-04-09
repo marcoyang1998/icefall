@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
-export CUDA_VISIBLE_DEVICES="1"
+source ~/anaconda3/bin/activate && conda activate encoder
+source /mnt/cache/share_data/housiyuan/softwares/activate-cuda-11.8.sh
+
+export PYTHONPATH=/mnt/cache/share_data/housiyuan/lhotse:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
+
 
 output_ds=2
 post_output_ds=1
 
-for epoch in 30 40; do
+for epoch in 30; do
     for avg in 15 20; do
         python zipformer_audio_encoder/decode_byte.py \
             --epoch $epoch \
@@ -23,9 +27,9 @@ for epoch in 30 40; do
             --manifest-dir data/fbank_mtl \
             --bpe-model data/lang_bbpe_2000/bbpe.model \
             --on-the-fly-feats 1 \
-            --exp-dir zipformer_audio_encoder_finetune/exp-finetune-95M-wenet-S-lr-0.02-causal-0-freeze-encoder-0-freeze--1-step-encoder-lr-scale-0.1-from-firered-en-zh-mvq-cb16-no-musan-mask-ratio-1.0-200k \
+            --exp-dir zipformer_audio_encoder_finetune/exp-finetune-wenetspeech-S-lr-0.045-causal-1-freeze-encoder-0-freeze-2000-step-encoder-lr-scale-0.05-from-xlarge-all-data-with-musan-rir-348k-fix \
             --decoding-method greedy_search \
             --blank-penalty 0.0 \
-            --max-duration 500
+            --max-duration 800
     done
 done
