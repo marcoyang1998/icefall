@@ -1,9 +1,102 @@
 import os
 from lhotse import load_manifest_lazy
 
-def convert():
+def convert_librispeech():
     old_folder = "data/vq_firered_zh_en_16_v2/"
     new_folder = "data_s3/vq_firered_zh_en_16_v2/"
+    
+    def change_source(c):
+        source = c.recording.sources[0].source
+        source = source.replace("/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder/egs/librispeech/ASR/download/LibriSpeech/", "brainllm:s3://yangxiaoyu/LibriSpeech/")
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
+        
+    subsets = [ "dev-clean", "dev-other", "train-all-shuf"]
+    for subset in subsets:
+        manifest_name = f"librispeech_cuts_{subset}.jsonl.gz"
+        print(f"Start converting {subset}.")
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+        cuts = load_manifest_lazy(old_folder + manifest_name)
+        
+        cuts = cuts.map(change_source)
+        # audio = cuts[0].load_audio()
+        # print(audio.shape)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+        
+def convert_libriheavy2():
+    old_folder = "data/fbank_libriheavy/"
+    new_folder = "data_s3/fbank_libriheavy/"
+    
+    def change_source(c):
+        source = c.recording.sources[0].source
+        source = source.replace("download/", "langchao2:s3://libriheavy/download/")
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
+        
+    subsets = ["small", "medium", "large"]
+    for subset in subsets:
+        manifest_name = f"libriheavy_cuts_{subset}.jsonl.gz"
+        print(f"Start converting {subset}.")
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+        cuts = load_manifest_lazy(old_folder + manifest_name)
+        
+        cuts = cuts.map(change_source)
+        # audio = cuts[0].load_audio()
+        # print(audio.shape)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+    
+def convert_libriheavy_single_audio():
+    old_folder = "data/fbank_libriheavy/"
+    new_folder = "data_s3/fbank_libriheavy_split/"
+    
+    def change_source(c):
+        # need to change the cut start
+        c.start = 0.0
+        c.codebook_indexes = 0.0
+        
+        source = c.recording.sources[0].source
+        source = source.replace("download/", "aliyun:s3://pjlab-lingjun-speechllm/housiyuan/")
+        source = f"aliyun:s3://pjlab-lingjun-speechllm/housiyuan/librilight/{c.id}.flac"
+        
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        c.recording.sources[0].duration = c.duration
+        return c
+        
+    subsets = ["small", "medium", "large"]
+    for subset in subsets:
+        manifest_name = f"libriheavy_cuts_{subset}.jsonl.gz"
+        print(f"Start converting {subset}.")
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+        import pdb; pdb.set_trace()
+        cuts = load_manifest_lazy(old_folder + manifest_name)
+        
+        cuts = cuts.map(change_source)
+        # audio = cuts[0].load_audio()
+        # print(audio.shape)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+
+
+def convert():
+    old_folder = "data/vq_whisper_turbo_zh_en_16_v2/"
+    new_folder = "data_s3/vq_whisper_turbo_zh_en_16_v2/"
     
     os.makedirs(new_folder, exist_ok=True)
     
@@ -24,7 +117,7 @@ def convert():
     datasets = ["accent", "aidatatang_200zh", "aishell3", "aishell2","baidu_en_cn","datatang1505"]
     datasets += ["dialog3k", "magicdata", "sensetime", "ximalaya", "acq", "cantonese", "cs_wav", "dialog"]
     datasets += ["MagicData_dialog","primewords_md_2018_set1","zhvoice","phone","speech_wav"]
-    datasets += ["digital_library_202003", "ST-CMDS-20170001_1-OS", "20220309", "speech_annotations_2021"]
+    datasets += ["ST-CMDS-20170001_1-OS", "20220309", "speech_annotations_2021"]
     datasets = ["speech_annotations_2021"]
     
     # datasets = [f"weread-16k-res-0{i}" for i in range(10)]
@@ -36,11 +129,16 @@ def convert():
         if os.path.exists(target_manifest):
             print(f"Manifest already generated, skipping it")
             continue
+        
+        orig_manifest = old_folder + manifest_name
+        if not os.path.exists(orig_manifest):
+            print(f"The original manifest for {dataset} does not exist!")
+            continue
         cuts = load_manifest_lazy(old_folder + manifest_name)
         
         cuts = cuts.map(change_source)
-        audio = cuts[0].load_audio()
-        print(audio.shape)
+        # audio = cuts[0].load_audio()
+        # print(audio.shape)
         
         print(f"Saving to {target_manifest}")
         cuts.to_jsonl(target_manifest)
@@ -116,7 +214,6 @@ def convert_mls():
         if os.path.exists(target_manifest):
             print(f"Manifest already generated, skipping it")
             continue
-        
         cuts = load_manifest_lazy(old_folder + manifest_name)
         
         cuts = cuts.map(change_source)
@@ -127,6 +224,6 @@ def convert_mls():
         cuts.to_jsonl(target_manifest)
 
 if __name__=="__main__":
-    convert()
+    convert_libriheavy_single_audio()
         
         

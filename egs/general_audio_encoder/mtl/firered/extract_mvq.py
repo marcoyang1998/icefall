@@ -20,6 +20,8 @@ from lhotse.utils import fastcopy
 import multi_quantization as quantization
 import numpy as np
 
+import lhotse
+lhotse.set_caching_enabled(True)
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -147,7 +149,7 @@ def extract_embeddings(
         dataset,
         sampler=sampler,
         batch_size=None,
-        num_workers=2,
+        num_workers=16,
         persistent_workers=False,
     )
     
@@ -234,6 +236,14 @@ def remove_sp(c):
         return False
     return True
 
+def change_source(c):
+    source = c.recording.sources[0].source
+    source = source.replace("download/", "langchao2:s3://libriheavy/download/")
+    c.recording.sources[0].source = source
+    c.recording.sources[0].type = "url"
+    return c
+    
+
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
@@ -249,6 +259,7 @@ if __name__=="__main__":
     cuts = load_manifest(params.input_manifest)
     cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
     cuts = cuts.filter(remove_sp) # remove speed perturb
+    cuts = cuts.map(change_source)
     print(f"Finished loading manifest")
     print(cuts)
     
