@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+export PYTHONPATH=/mnt/cache/share_data/housiyuan/lhotse:$PYTHONPATH
+
 stage=-1
 stop_stage=-1
 num_codebooks=16
@@ -76,14 +78,14 @@ fi
 
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
     log "Processing Libriheavy"
-    shar_dir=${root_shar_dir}/libriheavy
+    shar_dir=${root_shar_dir}/libriheavy_fix_cut
     mkdir -p $shar_dir
     for subset in medium large; do
         manifest=$fbank_dir/libriheavy_cuts_${subset}.jsonl.gz
         if [ ! -f $shar_dir/.shar.$subset.complete ]; then
             log "Start exporting libriheavy ${subset}"
+            # -c codebook_indexes:numpy \
             lhotse shar export -j 8 \
-                -c codebook_indexes:numpy \
                 $manifest \
                 $shar_dir/$subset
             touch $shar_dir/.shar.$subset.complete
@@ -131,12 +133,10 @@ fi
 if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
     log "Processing various chinese datasets"
     
-    # for dataset in datatang1505 dialog dialog3k magicdata MagicData_dialog ximalaya aidatatang_200zh aishell3 aishell2 cs_wav acq zhvoice; do
-    # for dataset in sensetime primewords_md_2018_set1 common_voice_20200622 accent baidu_en_cn cantonese; do
-    # for dataset in digital_library_202003 ST-CMDS-20170001_1-OS en_us_english en8848 ljspeech tatoeba ted vctk voase voaSplider; do
-    # for dataset in speech_annotations_2021; do
-    # for dataset in speech_wav peoplespeech; do
-    for dataset in phone 20220309; do
+    for dataset in accent aidatatang_200zh aishell3 aishell2 baidu_en_cn datatang1505 \
+        dialog3k magicdata sensetime ximalaya acq cantonese cs_wav dialog \
+        MagicData_dialog primewords_md_2018_set1 zhvoice phone speech_wav \
+        ST-CMDS-20170001_1-OS 20220309 speech_annotations_2021; do
         shar_dir=${root_shar_dir}/$dataset
         mkdir -p $shar_dir
         manifest=$fbank_dir/${dataset}_cuts.jsonl.gz
