@@ -77,7 +77,7 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_dummy_embeddings_and_taskIDs, _add_task_id, MetricsTracker, setup_distributed
+from utils import _add_task_id, MetricsTracker, setup_distributed
 
 from zipformer import Zipformer2
 

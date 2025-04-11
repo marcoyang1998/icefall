@@ -323,7 +323,7 @@ class AudioTaggingModel(nn.Module):
         )
 
         # for multi-class classification
-        self.criterion = torch.nn.BCEWithLogitsLoss(reduction="sum")
+        self.criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -345,11 +345,16 @@ class AudioTaggingModel(nn.Module):
         # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
         x, x_lens = self.encoder_embed(x, x_lens)
         # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
-        encoder_out, encoder_out_lens, all_hidden_states = self.encoder(x, x_lens)
-        
+
+        src_key_padding_mask = make_pad_mask(x_lens)
+        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+
+        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
+
+        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
-        return encoder_out, encoder_out_lens, all_hidden_states
+        return encoder_out, encoder_out_lens
 
 
     def forward(
@@ -374,7 +379,7 @@ class AudioTaggingModel(nn.Module):
         assert x_lens.ndim == 1, x_lens.shape
 
         # Compute encoder outputs
-        encoder_out, encoder_out_lens, _ = self.forward_encoder(x, x_lens)
+        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
 
         # Forward the speaker module
         logits = self.forward_audio_tagging(
