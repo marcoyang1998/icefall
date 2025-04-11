@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
 
 set -eou pipefail
 
@@ -16,7 +16,7 @@ log() {
   echo -e "$(date '+%Y-%m-%d %H:%M:%S') (${fname}:${BASH_LINENO[0]}:${FUNCNAME[1]}) $*"
 }
 
-vq_dir=data/vq_whisper_turbo_zh_en_${num_codebooks}_v2
+vq_dir=data/vq_whisper_turbo_zh_en_${num_codebooks}_v2_lh
 mkdir -p $vq_dir
 
 quantizer_path=data/quantizer/whisper-turbo-zh-en-cb-${num_codebooks}-v2.pt
@@ -94,7 +94,7 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
     for subset in m l; do
         log "Processing $subset"
         python whisper/extract_whisper_mvq.py \
-            --num-jobs 8 \
+            --num-jobs 4 \
             --input-manifest data/fbank_gigaspeech/gigaspeech_cuts_${subset}_raw.jsonl.gz \
             --target-manifest-file $vq_dir/gigaspeech_cuts_${subset}.jsonl.gz \
             --n-mels 128 \

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-firered_root=/fs-computility/INTERN6/shared/yangxiaoyu/workspace/FireRedASR
+firered_root=/cpfs02/shared/speechllm/xiaoyu/FireRedASR
 export PATH=$firered_root/fireredasr/:$firered_root/fireredasr/utils/:$PATH
 export PYTHONPATH=$firered_root/:$PYTHONPATH
 export PYTHONPATH=./../../..:$PYTHONPATH
@@ -215,6 +215,44 @@ if [ $stage -le 14 ] && [ $stop_stage -ge 14 ]; then
             --num-codebooks $num_codebooks \
             --manifest-name codebook-indexes-${dataset} \
             --embedding-dir $vq_dir/${dataset} \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 15 ] && [ $stop_stage -ge 15 ]; then
+    log "Stage 15: Collect MVQ tokens on GigaSpeech"
+    for subset in s; do
+        log "Processing $subset"
+        python firered/extract_mvq.py \
+            --num-jobs 2 \
+            --model-dir $model_dir \
+            --input-manifest data/fbank_gigaspeech/gigaspeech_cuts_${subset}_raw.jsonl.gz \
+            --target-manifest-file $vq_dir/gigaspeech_cuts_${subset}.jsonl.gz \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-giga-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 16 ] && [ $stop_stage -ge 16 ]; then
+    log "Stage 16: Collect MVQ tokens on GigaSpeech"
+    for subset in m l; do
+        log "Processing $subset"
+        python firered/extract_mvq.py \
+            --num-jobs 8 \
+            --model-dir $model_dir \
+            --input-manifest data/fbank_gigaspeech/gigaspeech_cuts_${subset}_raw.jsonl.gz \
+            --target-manifest-file $vq_dir/gigaspeech_cuts_${subset}.jsonl.gz \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-giga-${subset} \
+            --embedding-dir $vq_dir \
             --embedding-layer -1 \
             --quantizer-path $quantizer_path \
             --max-duration 200

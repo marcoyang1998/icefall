@@ -14,37 +14,39 @@ use_libriheavy=1
 libriheavy_subset=large
 use_wenetspeech=0
 wenetspeech_subset=L
-use_audioset=0
-repeat_audioset=2
+use_audioset=1
+repeat_audioset=4
 audioset_subset=full
 
 # augmentation
-enable_rir=1
 enable_musan=1
 enable_spec_aug=1
 time_mask_ratio=1.0
 
+# audio tagging
+do_at=0
+
 # mvq KD
 output_downsampling_factor=2
-num_codebooks=16
-delta=0
-frame_rate_ratio=2
+num_codebooks="16,16"
+delta="0,0"
+frame_rate_ratio="2,1"
 
 # at KD
 audio_tagging_loss_scale=5.0
 at_KD=1
 
 # data related
-use_shar=0
-zip_sampler=0
-bucket_sampler=1
+use_shar=1
+zip_sampler=1
+bucket_sampler=0
 at_weighted_sampler=0
 at_num_samples=400000
-max_duration=600
+max_duration=1000
 
-exp_dir=zipformer_audio_encoder/exp-96M-zipformer-non-streaming-lh-${libriheavy_subset}\
-out-ds-${output_downsampling_factor}-mask-ratio-${time_mask_ratio}-musan-${enable_musan}-rir-${enable_rir}-\
-whisper-mvq-v2-cb${num_codebooks}
+exp_dir=zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-\
+whisper-dasheng-multi-mvq-cb16-\
+do-at-${do_at}-mask-ratio-${time_mask_ratio}-musan-${enable_musan}\
 
 # exp_dir=zipformer_audio_encoder/exp-debug
 
@@ -53,13 +55,13 @@ echo $exp_dir
 # torchrun \
 #   --nproc_per_node $MLP_WORKER_GPU --master_addr $MLP_WORKER_0_HOST \
 #   --node_rank $MLP_ROLE_INDEX --master_port $MLP_WORKER_0_PORT --nnodes $MLP_WORKER_NUM \
-torchrun \
-  --nproc_per_node 8 \
-  zipformer_audio_encoder/train_multi_KD3_shar.py \
-    --num-epochs 30 \
+torchrun --nproc_per_node=4 --master_port=19132 \
+  zipformer_audio_encoder/train_multi_KD3_shar_speech_audio_multi_mvq.py \
+    --num-epochs 2 \
     --start-epoch 1 \
-    --max-iter 400000 \
-    --use-shar $use_shar --shar-dir data-shar-firered-en-zh-no-feat-cb-16-v2 \
+    --max-iter 300000 \
+    --start-batch 68000 \
+    --use-shar $use_shar --shar-dir data-shar/data-shar-whisper-zh-en-cb16-v2 \
     --base-lr $lr \
     --use-fp16 1 \
     --exp-dir $exp_dir \
@@ -69,8 +71,8 @@ torchrun \
     --use-gigaspeech $use_gigaspeech --gigaspeech-subset $gigaspeech_subset \
     --use-libriheavy $use_libriheavy --libriheavy-subset $libriheavy_subset \
     --use-wenetspeech $use_wenetspeech --wenetspeech-subset $wenetspeech_subset \
+    --do-audio-tagging $do_at \
     --at-KD 1 --do-mvq 1 \
-    --enable-rir $enable_rir --rir-cuts None \
     --enable-musan $enable_musan --enable-spec-aug $enable_spec_aug --time-mask-ratio $time_mask_ratio \
     --output-downsampling-factor $output_downsampling_factor \
     --num-encoder-layers 2,2,3,4,3,2 \
@@ -78,11 +80,11 @@ torchrun \
     --encoder-dim 192,256,448,768,448,192 \
     --encoder-unmasked-dim 192,192,256,256,256,192 \
     --causal 0 \
-    --manifest-dir data/vq_whisper_turbo_zh_en_16_v2 \
+    --manifest-dir data/vq_whisper_turbo_cb16_firered_zh_en_cb32 \
     --spec-aug-time-warp-factor -1 \
     --num-codebooks $num_codebooks --distillation-delta $delta --teacher-frame-ratio $frame_rate_ratio \
     --bucketing-sampler $bucket_sampler --zip-sampler $zip_sampler --at-weighted-sampler $at_weighted_sampler --at-num-samples $at_num_samples \
     --num-buckets 30 \
     --on-the-fly-feats 1 \
     --max-duration $max_duration \
-    --num-workers 20
+    --num-workers 6

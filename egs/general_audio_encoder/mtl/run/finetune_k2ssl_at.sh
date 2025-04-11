@@ -3,15 +3,19 @@
 export PYTHONPATH=./../../../:$PYTHONPATH
 
 # data related
-use_librispeech=1
+use_shar=0
+use_librispeech=0
 full_libri=0
 use_gigaspeech=0
 gigaspeech_subset=s
+use_audioset=1
+repeat_audioset=3
+audioset_subset=balanced
 
 causal=0
 lr=0.02
 
-do_audio_tagging=0
+do_audio_tagging=1
 at_KD=0 # need to set this to 0 for efficiency
 mvq_KD=0
 
@@ -27,25 +31,29 @@ large_batch_count=0
 
 md=1200
 
-exp_dir=zipformer_audio_encoder_finetune/exp-finetune-95M-ls-100h-\
+exp_dir=zipformer_audio_encoder_finetune/exp-finetune-95M-as-${audioset_subset}-\
 lr-${lr}-causal-${causal}-freeze-encoder-${freeze_encoder}\
 -freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-lh-large-shar-whisper-dasheng-multi-mvq-cb16-musan-mask-ratio-1.0-224k
+-from-lh-large-shar-whisper-dasheng-multi-mvq-cb16-musan-mask-ratio-1.0-224k-rerun
 
-# exp_dir=zipformer_audio_encoder_finetune/exp-finetune-95M-ls-100h-lr-0.02-causal-0-freeze-encoder-0-freeze--1-step-encoder-lr-scale-0.1-from-firered-mvq-cb16-with-musan-mask-ratio-1.0-224k
+# exp_dir=zipformer_audio_encoder_finetune/exp-debug
 
-torchrun --nproc_per_node=4 --master_port=19132 \
-  zipformer_audio_encoder/finetune_mtl.py \
-    --num-epochs 222 \
+export CUDA_VISIBLE_DEVICES="2,3"
+
+torchrun --nproc_per_node=2 --master_port=19134 \
+  zipformer_audio_encoder/finetune_at.py \
+    --num-epochs 50 \
     --use-fp16 1 \
     --start-epoch 1 \
     --use-librispeech $use_librispeech --full-libri $full_libri \
-    --use-gigaspeech $use_gigaspeech --gigaspeech-subset $gigaspeech_subset \
+    --use-audioset $use_audioset --audioset-subset $audioset_subset \
+    --repeat-audioset $repeat_audioset \
     --exp-dir $exp_dir \
-    --manifest-dir data/fbank \
+    --use-shar $use_shar --shar-dir data-shar/data-shar-whisper-zh-en-cb16-v2 \
+    --manifest-dir data/fbank_as_ced_mAP50 \
     --base-lr $lr \
     --do-audio-tagging $do_audio_tagging \
-    --mvq-KD $mvq_KD --at-KD $at_KD \
+    --at-KD $at_KD \
     --do-finetune 1 --init-modules "encoder_embed,encoder" --finetune-ckpt $finetune_ckpt \
     --freeze-encoder $freeze_encoder --freeze-encoder-steps $freeze_encoder_steps \
     --encoder-lr-scale $encoder_lr_scale \
