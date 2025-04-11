@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 icefall_root=$(realpath ../../..)
 export PYTHONPATH=${icefall_root}:$PYTHONPATH
-export PYTHONPATH=/mnt/petrelfs/share_data/housiyuan/lhotse:$PYTHONPATH
+# export PYTHONPATH=/mnt/petrelfs/share_data/housiyuan/lhotse:$PYTHONPATH
 
 set -eou pipefail
 
@@ -39,15 +39,15 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
     log "Stage 2: Collect MVQ tokens on LibriSpeech dev/test sets"
 
     for subset in dev-clean dev-other; do
-        python whisper/extract_whisper_mvq_client.py \
+        python whisper/extract_whisper_mvq_npy.py \
             --num-jobs 1 \
-            --input-manifest data_s3/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
+            --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \
             --n-mels 128 \
             --embedding-dim 1280 \
             --num-codebooks $num_codebooks \
             --manifest-name codebook-indexes-libri-${subset} \
-            --s3-prefix "brainllm:s3://yangxiaoyu/LibriSpeech/${subset}" \
+            --s3-prefix "/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/librispeech" \
             --embedding-dir $vq_dir \
             --embedding-layer -1 \
             --quantizer-path $quantizer_path \
@@ -178,14 +178,14 @@ if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
     mkdir -p $split_dir
 
     if [ ! -f $split_dir/.split_completed ]; then
-        lhotse split $num_splits --no-pad data_s3/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        lhotse split $num_splits --no-pad data/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
         touch $split_dir/.split_completed
     fi
     
     for i in $(seq 0 1 $(($num_splits-1))); do
         log "Start encoding libriheavy small split ${i}"
         if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
-            python whisper/extract_whisper_mvq_client.py \
+            python whisper/extract_whisper_mvq_npy.py \
                 --num-jobs 4 \
                 --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
                 --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
@@ -193,7 +193,7 @@ if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
                 --embedding-dim 1280 \
                 --num-codebooks $num_codebooks \
                 --manifest-name codebook-indexes-lh-$subset-split-${i} \
-                --s3-prefix "brainllm:s3://yangxiaoyu/librilight" \
+                --s3-prefix "/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/librilight" \
                 --embedding-dir $split_dir \
                 --embedding-layer -1 \
                 --quantizer-path $quantizer_path \
@@ -208,6 +208,29 @@ if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
     fi
 fi
 
+if [ $stage -le 70 ] && [ $stop_stage -ge 70 ]; then
+    log "Stage 70: Collect MVQ tokens on Libriheavy small"
+    
+    subset=small
+    
+    log "Start encoding libriheavy small "
+    if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+        python whisper/extract_whisper_mvq_npy.py \
+            --num-jobs 1 \
+            --input-manifest data/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz \
+            --target-manifest-file data/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz \
+            --n-mels 128 \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-lh-$subset \
+            --s3-prefix /cpfs02/user/housiyuan/xiaoyu/codebook_indexes/librilight \
+            --embedding-dir $vq_dir \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 250
+    fi
+fi
+
 if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
     log "Stage 8: Collect MVQ tokens on Libriheavy medium"
     
@@ -217,22 +240,22 @@ if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
     mkdir -p $split_dir
 
     if [ ! -f $split_dir/.split_completed ]; then
-        lhotse split $num_splits data_s3/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        lhotse split $num_splits data/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
         touch $split_dir/.split_completed
     fi
     
     for i in $(seq 0 1 $(($num_splits-1))); do
         log "Start encoding libriheavy medium split ${i}"
         if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
-            python whisper/extract_whisper_mvq_client.py \
-                --num-jobs 8 \
+            python whisper/extract_whisper_mvq_npy.py \
+                --num-jobs 4 \
                 --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
                 --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
                 --n-mels 128 \
                 --embedding-dim 1280 \
                 --num-codebooks $num_codebooks \
                 --manifest-name codebook-indexes-lh-$subset-split-${i} \
-                --s3-prefix "brainllm:s3://yangxiaoyu/librilight" \
+                --s3-prefix /cpfs02/user/housiyuan/xiaoyu/codebook_indexes/librilight \
                 --embedding-dir $split_dir \
                 --embedding-layer -1 \
                 --quantizer-path $quantizer_path \
@@ -256,15 +279,15 @@ if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
     mkdir -p $split_dir
 
     if [ ! -f $split_dir/.split_completed ]; then
-        lhotse split $num_splits --no-pad data_s3/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        lhotse split $num_splits --no-pad data/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz $split_dir
         touch $split_dir/.split_completed
     fi
     
-    for i in $(seq 0 1 $(($num_splits-1))); do
+    for i in $(seq 21 1 $(($num_splits-1))); do
         log "Start encoding libriheavy ${subset} split ${i}"
         if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
-            python whisper/extract_whisper_mvq_client.py \
-                --num-jobs 8 \
+            python whisper/extract_whisper_mvq_npy.py \
+                --num-jobs 4 \
                 --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
                 --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
                 --n-mels 128 \
@@ -273,16 +296,17 @@ if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
                 --manifest-name codebook-indexes-lh-$subset-split-${i} \
                 --embedding-dir $split_dir \
                 --embedding-layer -1 \
+                --s3-prefix /cpfs02/user/housiyuan/xiaoyu/codebook_indexes/librilight \
                 --quantizer-path $quantizer_path \
                 --max-duration 250
         fi
     done
 
-    if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
-        log "Combining the processed cuts of libriheavy ${subset}"
-        pieces=$(find $split_dir -name "libriheavy_cuts_${subset}.*.processed.jsonl.gz")
-        lhotse combine $pieces $vq_dir/libriheavy_cuts_${subset}.jsonl.gz
-    fi
+    # if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+    #     log "Combining the processed cuts of libriheavy ${subset}"
+    #     pieces=$(find $split_dir -name "libriheavy_cuts_${subset}.*.processed.jsonl.gz")
+    #     lhotse combine $pieces $vq_dir/libriheavy_cuts_${subset}.jsonl.gz
+    # fi
 fi
 
 

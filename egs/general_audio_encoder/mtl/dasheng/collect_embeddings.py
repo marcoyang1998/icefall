@@ -5,46 +5,22 @@ import logging
 from pathlib import Path
 
 from icefall.utils import AttributeDict, setup_logger
-from model import FireRedEncoder
+from model import DashengEncoder
 
 import torch
 import torch.multiprocessing as mp
-import torchaudio
 from torch.utils.data import DataLoader
 
 from lhotse import load_manifest, CutSet
 from lhotse.cut import MonoCut
 from lhotse.dataset import UnsupervisedWaveformDataset, DynamicBucketingSampler
 from lhotse.features.io import NumpyHdf5Writer
-from lhotse.utils import fastcopy
-import multi_quantization as quantization
-import numpy as np
-
 
 def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # quantizer related
-    parser.add_argument(
-        "--embedding-dim",
-        type=int,
-        default=512,
-    )
     
-    parser.add_argument(
-        "--num-codebooks",
-        type=int,
-        default=4,
-    )
-    
-    parser.add_argument(
-        "--quantizer-path",
-        type=str,
-        required=True,
-    )
-    
-    # others
     parser.add_argument(
         "--num-jobs",
         type=int,
@@ -67,7 +43,7 @@ def get_parser():
     parser.add_argument(
         "--embedding-dir",
         type=str,
-        default="data/vq_firered"
+        default="data/embeddings"
     )
 
     parser.add_argument(
@@ -87,12 +63,12 @@ def get_parser():
         "--target-manifest-file",
         type=str,
         required=True,
-        help="Where to store the manifest augmented with firered features"
+        help="Where to store the manifest augmented with whisper features"
     )
     
-    # firered related args
+    # dasheng related args
     parser.add_argument(
-        "--model-dir",
+        "--model-version",
         type=str,
         required=True
     )
@@ -105,32 +81,25 @@ def extract_embeddings(
     manifest: str,
     params: AttributeDict,
 ):
-    setup_logger(f"data/vq_firered/log/log-firered-cb-indexes")
+    setup_logger(f"data/embeddings/log/log-dasheng-embeddings")
     if params.num_jobs > 1:
         manifest = manifest[rank]
-        output_manifest = params.embedding_dir / f"firered-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'firered-layer-{params.embedding_layer}-{params.manifest_name}-{rank}'
+        output_manifest = params.embedding_dir / f"dasheng-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.jsonl.gz"
+        embedding_path = params.embedding_dir / f'dasheng-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}'
     else:
-        output_manifest = params.embedding_dir / f"firered-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'firered-layer-{params.embedding_layer}-{params.manifest_name}'
+        output_manifest = params.embedding_dir / f"dasheng-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
+        embedding_path =  params.embedding_dir / f'dasheng-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}'
     
     device = torch.device("cuda", rank)
     
-    # currently only use the encoder of firered
+    # currently only use the encoder of dasheng
     logging.info(params)
-    model = FireRedEncoder(model_dir=params.model_dir)
+    model = DashengEncoder(model_version=params.model_version)
     model.to(device)
     model.eval()
-    logging.info(f"Number of firered encoder params: {sum(p.numel() for p in model.parameters())}")
-    logging.info(f"Successfully loaded firered model.")
     
-    quantizer = quantization.Quantizer(
-        dim=params.embedding_dim,
-        num_codebooks=params.num_codebooks,
-        codebook_size=256,
-    )
-    quantizer.load_state_dict(torch.load(params.quantizer_path))
-    quantizer.to(device)
+    logging.info(f"Number of dasheng encoder params: {sum(p.numel() for p in model.parameters())}")
+    logging.info(f"Successfully loaded dasheng model.")
     
     dataset = UnsupervisedWaveformDataset(
         manifest
@@ -155,52 +124,39 @@ def extract_embeddings(
     num_cuts = 0
     
     with NumpyHdf5Writer(embedding_path) as writer:
-        logging.info(f"Writing firered indexes to {embedding_path}")
+        logging.info(f"Writing dasheng embeddings to {embedding_path}")
         for i, batch in enumerate(dl):
             cuts = batch["cuts"]
-            audio_path = [c.recording.sources[0].source for c in cuts]
-            start_list = [c.start for c in cuts]
-            dur_list = [c.duration for c in cuts]
+            audios = batch["audio"].to(device)
+            audio_lens = batch["audio_lens"].to(device)
             
-            embeddings, embedding_lens, _ = model.get_embeddings(
-                wav_path_list=audio_path,
-                start_list=start_list,
-                dur_list=dur_list,
+            embeddings, embedding_lens = model.get_embeddings(
+                audio=audios,
+                audio_lens=audio_lens,
+                layer_idx=params.embedding_layer,
             )
-            
-            # codebook_indexes = quantizer.encode(embeddings) # [N, T, C]
-            N,T,C = embeddings.shape
-            embeddings = embeddings.reshape(-1, C)
-            B = 2000
-            splits = embeddings.split(B)
-            codebook_indexes = []
-            for chunk in splits:
-                chunk_indexes = quantizer.encode(chunk)
-                codebook_indexes.append(chunk_indexes)
-            codebook_indexes = torch.cat(codebook_indexes).reshape(N,T,params.num_codebooks)
-            codebook_indexes = codebook_indexes.to("cpu").numpy()
-            assert np.min(codebook_indexes) >= 0
-            assert np.max(codebook_indexes) < 256
+            embeddings = embeddings.detach().to("cpu").numpy()
             
             for idx, cut in enumerate(cuts):    
-                cb_index = writer.store_array(
-                    key=cut.id,
-                    value=codebook_indexes[idx][: embedding_lens[idx]],
-                    temporal_dim=0,
-                    frame_shift=0.04,
+                new_cut = MonoCut(
+                    id=cut.id,
                     start=cut.start,
+                    duration=cut.duration,
+                    channel=cut.channel,
                 )
-                new_cut = fastcopy(
-                    cut,
-                    custom={"codebook_indexes": cb_index}
+                new_cut.embedding = writer.store_array(
+                    key=cut.id,
+                    value=embeddings[idx][: embedding_lens[idx]],
+                    temporal_dim=0,
+                    frame_shift=0.04, # 25 Hz
+                    start=cut.start,
                 )
                 new_cuts.append(new_cut)
                 num_cuts += 1
-                if num_cuts and num_cuts % 100 == 0:
-                    logging.info(f"Cuts processed until now: {num_cuts}")
-                    # torch.cuda.empty_cache()
+            if i and i % 100 == 0:
+                logging.info(f"Cuts processed until now: {num_cuts}")
                 
-    logging.info(f"Finished extracting firered codebook indexes, processed a total of {num_cuts} cuts.")
+    logging.info(f"Finished extracting dasheng embeddings, processed a total of {num_cuts} cuts.")
                 
     CutSet.from_cuts(new_cuts).to_jsonl(output_manifest)
     logging.info(f"Saved manifest to {output_manifest}")
@@ -219,24 +175,13 @@ def join_manifests(
     embedding_cuts = embedding_cuts.sort_like(input_cuts)
     for cut_idx, (ori_cut, embed_cut) in enumerate(zip(input_cuts, embedding_cuts)):
         assert ori_cut.id == embed_cut.id
-        ori_cut.codebook_indexes = embed_cut.codebook_indexes
+        ori_cut.embedding = embed_cut.embedding
     
     input_cuts.to_jsonl(output_dir)
-    logging.info(f"Saved the joined manifest to {output_dir}")
-
-def change_recording(c):
-    source = c.recording.sources[0].source
-    source = source.replace("/mnt/workspace/xiaoyu/workspace/icefall_multi_kd/egs/librispeech/ASR/", "")
-    c.recording.sources[0].source = source
-    return c
-
+    print(f"Saved the joined manifest to {output_dir}")
+    
 def remove_short_and_long_utt(c):
-    if c.duration < 1.0 or c.duration > 24.0:
-        return False
-    return True
-
-def remove_sp(c):
-    if "sp0.9" in c.id or "sp1.1" in c.id:
+    if c.duration < 1.0 or c.duration > 29.9:
         return False
     return True
 
@@ -251,15 +196,11 @@ if __name__=="__main__":
     params.embedding_dir = Path(params.embedding_dir)
     
     nj = params.num_jobs
-    print(f"Start loading manifest")
     cuts = load_manifest(params.input_manifest)
     cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
-    cuts = cuts.filter(remove_sp) # remove speed perturb
-    cuts = cuts.map(change_recording)
     print(f"Finished loading manifest")
-    print(cuts)
     
-    embedding_manifest = params.embedding_dir / f"firered-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
+    embedding_manifest = params.embedding_dir / f"dasheng-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
     
     if not embedding_manifest.exists():
         if nj == 1:
@@ -270,12 +211,12 @@ if __name__=="__main__":
             )
         else:
             splitted_cuts = cuts.split(num_splits=nj)
-            logging.info(f"Finished splitting manifest")
+            print(f"Finished splitting manifest")
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
-            manifests =  f"{str(params.embedding_dir)}/firered-layer-{params.embedding_layer}-{params.manifest_name}-*.jsonl.gz"
+            manifests =  f"{str(params.embedding_dir)}/dasheng-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}-*.jsonl.gz"
             os.system(f"lhotse combine {manifests} {embedding_manifest}")
     else:
-        logging.info(f"Skip embedding extraction: the manifest is already generated.")
+        print(f"Skip embedding extraction: the manifest is already generated.")
     
     output_manifest = params.target_manifest_file
     if not os.path.exists(output_manifest):

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
 
-num_codebooks=16
+num_codebooks=0
 delta=0
 output_ds=2
-teacher_frame_ratio=1
+teacher_frame_ratio=2
 
 python zipformer_audio_encoder/export.py \
-    --iter 224000 \
-    --avg 4 \
-    --exp-dir zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-mvq-out-ds-2-mask-ratio-1.0-musan-0-firered-quantizer-en-zh-v2-cb16 \
+    --iter 100000 \
+    --avg 2 \
+    --exp-dir zipformer_audio_encoder/exp-96M-zipformer-non-streaming-as-full-dasheng-mvq-cb16-do-at-0-mask-ratio-1.0-musan-1 \
     --output-downsampling-factor $output_ds \
     --use-averaged-model 1 \
     --causal 0 \

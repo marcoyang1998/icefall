@@ -69,7 +69,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from mtl_datamodule import MultiTaskDataModule
+from at_datamodule import MultiTaskDataModule
 from attention_decoder import AttentionDecoderModel
 from decoder import Decoder
 from joiner import Joiner
@@ -803,11 +803,11 @@ def get_attention_decoder_model(params: AttributeDict) -> nn.Module:
 
 
 def get_model(params: AttributeDict) -> nn.Module:
-    assert params.use_transducer or params.use_ctc, (
-        f"At least one of them should be True, "
-        f"but got params.use_transducer={params.use_transducer}, "
-        f"params.use_ctc={params.use_ctc}"
-    )
+    # assert params.use_transducer or params.use_ctc, (
+    #     f"At least one of them should be True, "
+    #     f"but got params.use_transducer={params.use_transducer}, "
+    #     f"params.use_ctc={params.use_ctc}"
+    # )
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
@@ -1082,6 +1082,7 @@ def compute_loss(
             lm_scale=params.lm_scale,
             at_targets=at_targets,
             freeze_encoder=freeze_encoder,
+            skip_asr=not params.do_asr,
         )
         simple_loss, pruned_loss, ctc_loss, attention_decoder_loss, audio_tagging_loss = losses
 
@@ -1089,7 +1090,7 @@ def compute_loss(
 
         # ASR related loss
         asr_mask = task_ids == 1
-        if params.use_transducer:
+        if params.use_transducer and params.do_asr:
             s = params.simple_loss_scale
             # take down the scale on the simple loss from 1.0 at the start
             # to params.simple_loss scale by warm_step.
@@ -1109,11 +1110,11 @@ def compute_loss(
             
             loss += simple_loss_scale * simple_loss + pruned_loss_scale * pruned_loss
             
-        if params.use_attention_decoder:
+        if params.use_attention_decoder and params.do_asr:
             attention_decoder_loss = (attention_decoder_loss * asr_mask).sum()
             loss += params.attention_decoder_loss_scale * attention_decoder_loss
 
-        if params.use_ctc:
+        if params.use_ctc and params.do_asr:
             ctc_loss = (ctc_loss * asr_mask).sum()
             loss += params.ctc_loss_scale * ctc_loss
         
@@ -1132,12 +1133,12 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.use_transducer:
+    if params.use_transducer and params.do_asr:
         info["simple_loss"] = simple_loss.detach().cpu().item()
         info["pruned_loss"] = pruned_loss.detach().cpu().item()
-    if params.use_ctc:
+    if params.use_ctc and params.do_asr:
         info["ctc_loss"] = ctc_loss.detach().cpu().item()
-    if params.use_attention_decoder:
+    if params.use_attention_decoder and params.do_asr:
         info["attention_decoder_loss"] = attention_decoder_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
