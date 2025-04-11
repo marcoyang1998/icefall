@@ -235,7 +235,7 @@ def join_manifests(
     logging.info(f"Saved the joined manifest to {output_dir}")
     
 def remove_short_and_long_utt(c):
-    if c.duration < 1.0 or c.duration > 24.0:
+    if c.duration < 1.0 or c.duration > 29.9:
         return False
     return True
 
