@@ -6,6 +6,7 @@ from torch.utils.data.dataloader import DataLoader, default_collate
 import numpy as np
 
 from lhotse import validate
+from lhotse import Fbank, FbankConfig
 from lhotse.cut import CutSet, MonoCut
 from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
 from lhotse.dataset.collation import collate_custom_field
@@ -14,6 +15,8 @@ from lhotse.workarounds import Hdf5MemoryIssueFix
 
 def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     # generate multi-hot class labels
+    if not isinstance(events, list):
+        events = [events]
     labels = [list(map(int, event.split(";"))) for event in events]
     batch_size = len(labels)
     out = torch.zeros(batch_size, n_classes)
