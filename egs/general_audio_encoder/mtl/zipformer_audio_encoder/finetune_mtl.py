@@ -340,6 +340,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "be converted to a number of chunks.  If splitting into chunks, "
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
+    
+    parser.add_argument(
+        "--do-asr",
+        type=str2bool,
+        default=True,
+    )
 
     parser.add_argument(
         "--do-audio-tagging",
@@ -1540,151 +1546,158 @@ def run(rank, world_size, args):
     train_cuts = {}
     train_cuts_duration = []
     
-    # NOTE: We combine all the ASR data together, and use one sampler.
-    # We use CutSet.mux to sample with weight, the weight is the number 
-    # of training samples (NOT the total duration)!
-    asr_training_cuts = []
-    asr_training_cuts_lens = []
-    asr_training_cuts_duration = []
-    if params.use_librispeech:
-        if not params.full_libri: 
-            librispeech_cuts = librispeech.train_clean_100_cuts()
-            librispeech_cuts_len = 85617 # n_cuts
-            librispeech_cuts_duration = 100
-        else:
-            librispeech_cuts = librispeech.train_all_shuf_cuts()
-            librispeech_cuts_len = 281239
-            librispeech_cuts_duration = 960
-        librispeech_cuts = librispeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
-        asr_training_cuts.append(librispeech_cuts)
-        asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
-        asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
+    assert params.do_asr or params.do_audio_tagging, "At least perform on task!"
+    
+    if params.do_asr:
+        # NOTE: We combine all the ASR data together, and use one sampler.
+        # We use CutSet.mux to sample with weight, the weight is the number 
+        # of training samples (NOT the total duration)!
+        asr_training_cuts = []
+        asr_training_cuts_lens = []
+        asr_training_cuts_duration = []
+        if params.use_librispeech:
+            if not params.full_libri: 
+                librispeech_cuts = librispeech.train_clean_100_cuts()
+                librispeech_cuts_len = 85617 # n_cuts
+                librispeech_cuts_duration = 100
+            else:
+                librispeech_cuts = librispeech.train_all_shuf_cuts()
+                librispeech_cuts_len = 281239
+                librispeech_cuts_duration = 960
+            librispeech_cuts = librispeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+            asr_training_cuts.append(librispeech_cuts)
+            asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
+            asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
+            
         
-    
-    if params.use_gigaspeech:
-        gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
-        gigaspeech_cuts_len = {
-            "s": 210012, # 250 hrs
-            "m": 859493, # 1000 hrs
-            "l": 2152879, # 2500 hrs
-            "xl": 8611516 # 10000 hrs
-        }
-        gigaspeech_cuts_duration = {
-            "s": 250, # 250 hrs
-            "m": 1000, # 1000 hrs
-            "l": 2500, # 2500 hrs
-            "xl": 10000 # 10000 hrs
-        }
-        gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(gigaspeech_cuts)
-        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
-        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
+        if params.use_gigaspeech:
+            gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
+            gigaspeech_cuts_len = {
+                "s": 210012, # 250 hrs
+                "m": 859493, # 1000 hrs
+                "l": 2152879, # 2500 hrs
+                "xl": 8611516 # 10000 hrs
+            }
+            gigaspeech_cuts_duration = {
+                "s": 250, # 250 hrs
+                "m": 1000, # 1000 hrs
+                "l": 2500, # 2500 hrs
+                "xl": 10000 # 10000 hrs
+            }
+            gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+            asr_training_cuts.append(gigaspeech_cuts)
+            asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
+            asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
+            
+        if params.use_libriheavy:
+            libriheavy_cuts = librispeech.libriheavy_train_cuts()
+            libriheavy_cuts = libriheavy_cuts.map(normalize_english_text)
+            libriheavy_cuts_len = {
+                "small": 122512 * 0.9, # 122512
+                "medium": 996017, # 1093040, fewer after filtering
+                "large": 10093746,
+            }
+            libriheavy_cuts_duration = {
+                "small": 500 * 0.9,
+                "medium": 3687,
+                "large": 37218,
+            }
+            libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+            asr_training_cuts.append(libriheavy_cuts)
+            asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
+            asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
         
-    if params.use_libriheavy:
-        libriheavy_cuts = librispeech.libriheavy_train_cuts()
-        libriheavy_cuts = libriheavy_cuts.map(normalize_english_text)
-        libriheavy_cuts_len = {
-            "small": 122512 * 0.9, # 122512
-            "medium": 996017, # 1093040, fewer after filtering
-            "large": 10093746,
-        }
-        libriheavy_cuts_duration = {
-            "small": 500 * 0.9,
-            "medium": 3687,
-            "large": 37218,
-        }
-        libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(libriheavy_cuts)
-        asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
-        asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
-    
-    if params.use_mls:
-        mls_cuts = librispeech.mls_cuts()
-        mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
-        mls_cuts = mls_cuts.map(normalize_english_text)
-        # mls cuts: 10801 hrs, 2619190 cuts
-        asr_training_cuts.append(mls_cuts)
-        asr_training_cuts_lens.append(2619190)
-        asr_training_cuts_duration.append(10801)
-    
-    if params.use_wenetspeech:
-        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
-        wenetspeech_cuts = wenetspeech_cuts.map(map_zh)
-        wenetspeech_cuts_len = {
-            "S": 151600, 
-            "M": 1514500, 
-            "L": 14621270,
-        }
-        wenetspeech_cuts_duration = {
-            "S": 100, # 100 hrs
-            "M": 1000, # 1000 hrs
-            "L": 10000, # 10000 hrs
-        }
-        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset] * params.repeat_wenetspeech)
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset] * params.repeat_wenetspeech)
+        if params.use_mls:
+            mls_cuts = librispeech.mls_cuts()
+            mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
+            mls_cuts = mls_cuts.map(normalize_english_text)
+            # mls cuts: 10801 hrs, 2619190 cuts
+            asr_training_cuts.append(mls_cuts)
+            asr_training_cuts_lens.append(2619190)
+            asr_training_cuts_duration.append(10801)
         
-    if params.use_aishell:
-        aishell_cuts = librispeech.aishell_train_cuts()
-        aishell_cuts = aishell_cuts.map(map_zh)
-        aishell_cuts = aishell_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        # aishell stats: 170 hrs, 120098 cuts
-        asr_training_cuts.append(aishell_cuts)
-        asr_training_cuts_lens.append(120098)
-        asr_training_cuts_duration.append(150)
-    
-    if params.use_extra_chinese_dataset:
-        chinese_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chinese_cuts = chinese_cuts.map(partial(_add_task_id, 1))
-        chinese_cuts = chinese_cuts.map(normalize_chinese_text)
-        chinese_cuts = chinese_cuts.map(map_zh)
-        asr_training_cuts.append(chinese_cuts)
-        asr_training_cuts_lens.append(chinese_cuts_len)
-        asr_training_cuts_duration.append(chinese_cut_durations)
+        if params.use_wenetspeech:
+            wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+            wenetspeech_cuts = wenetspeech_cuts.map(map_zh)
+            wenetspeech_cuts_len = {
+                "S": 151600, 
+                "M": 1514500, 
+                "L": 14621270,
+            }
+            wenetspeech_cuts_duration = {
+                "S": 100, # 100 hrs
+                "M": 1000, # 1000 hrs
+                "L": 10000, # 10000 hrs
+            }
+            wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+            asr_training_cuts.append(wenetspeech_cuts)
+            asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset] * params.repeat_wenetspeech)
+            asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset] * params.repeat_wenetspeech)
+            
+        if params.use_aishell:
+            aishell_cuts = librispeech.aishell_train_cuts()
+            aishell_cuts = aishell_cuts.map(map_zh)
+            aishell_cuts = aishell_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+            # aishell stats: 170 hrs, 120098 cuts
+            asr_training_cuts.append(aishell_cuts)
+            asr_training_cuts_lens.append(120098)
+            asr_training_cuts_duration.append(150)
         
-    if params.use_extra_english_dataset:
-        englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
-        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
-        englishs_cuts = englishs_cuts.map(normalize_english_text)
-        asr_training_cuts.append(englishs_cuts)
-        asr_training_cuts_lens.append(english_cuts_len)
-        asr_training_cuts_duration.append(english_cut_durations)
-    
-    # combine the asr data
-    # import pdb; pdb.set_trace()
-    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
-    if len(asr_training_cuts) > 1:
-        asr_training_cuts = CutSet.mux(
-            *asr_training_cuts,
-            weights=asr_training_cuts_lens,
-            stop_early=True,
-        )
-    else:
-        asr_training_cuts = asr_training_cuts[0]
-    asr_training_cuts_duration = sum(asr_training_cuts_duration)
-    num_audio_cuts = sum(asr_training_cuts_lens)
-    
-    # audio data
-    train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(asr_training_cuts_duration)
-
-    if params.use_audioset and params.do_audio_tagging:
-        logging.info(f"Getting audioset cuts")
-        if params.repeat_audioset > 1:
-            audioset_cuts = librispeech.audioset_cuts().repeat(
-                times=params.repeat_audioset,
-                preserve_id=False
+        if params.use_extra_chinese_dataset:
+            chinese_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+            chinese_cuts = chinese_cuts.map(partial(_add_task_id, 1))
+            chinese_cuts = chinese_cuts.map(normalize_chinese_text)
+            chinese_cuts = chinese_cuts.map(map_zh)
+            asr_training_cuts.append(chinese_cuts)
+            asr_training_cuts_lens.append(chinese_cuts_len)
+            asr_training_cuts_duration.append(chinese_cut_durations)
+            
+        if params.use_extra_english_dataset:
+            englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
+            englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
+            englishs_cuts = englishs_cuts.map(normalize_english_text)
+            asr_training_cuts.append(englishs_cuts)
+            asr_training_cuts_lens.append(english_cuts_len)
+            asr_training_cuts_duration.append(english_cut_durations)
+        
+        # combine the asr data
+        assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+        if len(asr_training_cuts) > 1:
+            asr_training_cuts = CutSet.mux(
+                *asr_training_cuts,
+                weights=asr_training_cuts_lens,
+                stop_early=True,
             )
         else:
-            audioset_cuts = librispeech.audioset_cuts()
-        audioset_cuts_lens = {
-            "balanced": 50,
-            "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5000,
-        }
-        audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
-        train_cuts["cuts_audioset"] = audioset_cuts
-        train_cuts_duration.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
+            asr_training_cuts = asr_training_cuts[0]
+        asr_training_cuts_duration = sum(asr_training_cuts_duration)
+        num_asr_cuts = sum(asr_training_cuts_lens)
+        
+        if params.on_the_fly_feats:
+            asr_training_cuts = asr_training_cuts.drop_features()
+        train_cuts["cuts_asr"] = asr_training_cuts
+        train_cuts_duration.append(asr_training_cuts_duration)
+
+    # audio data
+    if params.do_audio_tagging:
+        if params.use_audioset:
+            logging.info(f"Getting audioset cuts")
+            if params.repeat_audioset > 1:
+                audioset_cuts = librispeech.audioset_cuts().repeat(
+                    times=params.repeat_audioset,
+                    preserve_id=False
+                )
+            else:
+                audioset_cuts = librispeech.audioset_cuts()
+            audioset_cuts_lens = {
+                "balanced": 50,
+                "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5000,
+            }
+            audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+            if params.on_the_fly_feats:
+                audioset_cuts = audioset_cuts.drop_features()
+            train_cuts["cuts_audioset"] = audioset_cuts
+            train_cuts_duration.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
         
     assert len(train_cuts) >= 1, "At least one task should be done!"
     logging.info(train_cuts)
@@ -1710,7 +1723,7 @@ def run(rank, world_size, args):
         if len(train_cuts) > 1:
             logging.info(f"Using mux to combine data")
             logging.info(f"Training cuts: {train_cuts}")
-            train_cuts_lens = [sum(asr_training_cuts_lens), num_audio_cuts] 
+            train_cuts_lens = [sum(asr_training_cuts_lens), num_asr_cuts] 
             logging.info(f"Training cuts lens: {train_cuts_lens}")
             train_cuts = CutSet.mux(
                 *train_cuts,
@@ -1733,8 +1746,6 @@ def run(rank, world_size, args):
         train_cuts, 
         sampler_state_dict=sampler_state_dict,
         sampling_weight=train_cuts_duration,
-        # world_size=world_size,
-        # rank=rank
     )
 
     # TODO: add more validation sets
@@ -1772,6 +1783,13 @@ def run(rank, world_size, args):
         asr_aishell_valid_dl = librispeech.valid_dataloaders(aishell_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("aishell")
         valid_dls.append(asr_aishell_valid_dl)
+        
+    if params.use_audioset and params.do_audio_tagging:
+        as_eval_cuts = librispeech.audioset_eval_cuts()
+        as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
+        at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("AT_as")
+        valid_dls.append(at_valid_dl)
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:

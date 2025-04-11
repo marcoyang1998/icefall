@@ -1095,23 +1095,24 @@ def train_one_epoch(
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
         
-        shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
-        unique_origin = set(shard_origin)
-        for ori in shard_origin:
-            if ori in shard_count:
-                shard_count[ori] += 1
-            else:
-                shard_count[ori] = 1
-        count = {orig: 0 for orig in unique_origin}
-        for sh in shard_origin:
-            count[sh] += 1
-               
-        if batch_idx % 200 == 1:
-            shard_epoch = [int(c.shar_epoch) for c in cuts]
-            max_epoch = max(shard_epoch)
-            logging.info(f"Estimated epoch is {max_epoch}")
-            logging.info(count)
-            logging.info(f"All shards source by far: {shard_count}")
+        if params.use_shar:
+            shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
+            unique_origin = set(shard_origin)
+            for ori in shard_origin:
+                if ori in shard_count:
+                    shard_count[ori] += 1
+                else:
+                    shard_count[ori] = 1
+            count = {orig: 0 for orig in unique_origin}
+            for sh in shard_origin:
+                count[sh] += 1
+                
+            if batch_idx % 200 == 1:
+                shard_epoch = [int(c.shar_epoch) for c in cuts]
+                max_epoch = max(shard_epoch)
+                logging.info(f"Estimated epoch is {max_epoch}")
+                logging.info(count)
+                logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1396,9 +1397,9 @@ def run(rank, world_size, args):
             "large": 10093746,
         }
         libriheavy_cuts_duration = {
-            "small": 500 * 0.9,
-            "medium": 3687,
-            "large": 37218,
+            "small": 466,
+            "medium": 4148,
+            "large": 42074,
         }
         libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(libriheavy_cuts)
@@ -1459,6 +1460,7 @@ def run(rank, world_size, args):
     train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # audio data
+    import pdb; pdb.set_trace()
     if params.use_audioset and params.do_audio_tagging:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
@@ -1468,15 +1470,6 @@ def run(rank, world_size, args):
             )
         else:
             audioset_cuts = librispeech.audioset_cuts()
-            
-        def change_to_s3(c):
-            source = c.recording.sources[0].source
-            source = source.replace("download/", "brainllm:s3://yangxiaoyu/")
-            c.recording.sources[0].source = source
-            c.recording.sources[0].type = "url"
-            return c
-        
-        audioset_cuts = audioset_cuts.map(change_to_s3)
         
         audioset_cuts_lens = {
             "balanced": 21155,
@@ -1497,7 +1490,7 @@ def run(rank, world_size, args):
     logging.info(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 0.98 or c.duration > 29.0:
+        if c.duration < 0.98 or c.duration > 29.9:
             return False
 
         return True
@@ -1546,7 +1539,7 @@ def run(rank, world_size, args):
     valid_dls = []
     
     # valid dataloaders
-    if params.use_librispeech:
+    if params.use_librispeech or params.use_libriheavy:
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_task_id, 1))
@@ -1568,7 +1561,8 @@ def run(rank, world_size, args):
         valid_sets.append("ASR_wenet")
         valid_dls.append(asr_wenet_valid_dl)
      
-    if params.use_audioset and params.do_audio_tagging:
+    import pdb; pdb.set_trace()
+    if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)

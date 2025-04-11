@@ -20,6 +20,7 @@
 import argparse
 import inspect
 import logging
+import os
 from functools import lru_cache, cached_property
 from pathlib import Path
 from typing import Any, Dict, Optional, Union, List
@@ -46,7 +47,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
-from dataset2_dummy import MultiTaskKDDataset
+from dataset2_npy import MultiTaskKDDataset
 from icefall.utils import str2bool
 
 
@@ -423,10 +424,10 @@ class MultiTaskDataModule:
         
         transforms = []
         if self.args.enable_rir:
-            logging.info("Enable MUSAN")
-            if self.args.rir_cuts is not None:
+            logging.info("Enable RIR")
+            if os.path.exists(self.args.rir_cuts):
                 logging.info("About to get RIR cuts")
-                rir_cuts = load_manifest_lazy("data/rir/rir_cuts.jsonl.gz")
+                rir_cuts = load_manifest_lazy(self.args.rir_cuts)
             else:
                 logging.info("Use the fast random RIR generator as no RIR recordings are provided")
                 rir_cuts = None
@@ -437,7 +438,7 @@ class MultiTaskDataModule:
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/noise/noise_all.jsonl.gz")
+            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
@@ -495,8 +496,8 @@ class MultiTaskDataModule:
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
-            at_KD=True,
-            sv_KD=True
+            at_KD=self.args.at_KD,
+            sv_KD=self.args.sv_KD,
         )
 
         if self.args.on_the_fly_feats:
@@ -875,34 +876,34 @@ class MultiTaskDataModule:
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
-        if self.args.use_shar:
-            medium_cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            if self.args.libriheavy_subset == "medium":
-                return medium_cuts
-            else:
-                assert self.args.libriheavy_subset == "large"
-                large_cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+        libriheavy_list = ["small", "medium", "large"]
+        durations = [466, 4148, 42074]
+        
+        all_cuts = CutSet()
+        all_cuts = []
+        weights = []
+        for i, subset in enumerate(libriheavy_list):
+            logging.info(f"Getting libriheavy subset {subset}")
+            weights.append(durations[i])
+            if self.args.use_shar:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
                 ).repeat()
-                cuts = [medium_cuts, large_cuts]
-                return CutSet.mux(
-                    *cuts,
-                    weights=[1, 9],
-                    stop_early=False,
-                )
-                
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
-            )
+            else:
+                cuts = load_manifest_lazy(f"data/vq_whisper_turbo_zh_en_16_v2_numpy/libriheavy_cuts_{subset}.jsonl.gz")
+            
+            all_cuts.append(cuts)
+            if self.args.libriheavy_subset == subset:
+                break
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=weights,
+            stop_early=False,
+        ).drop_features()
+        return all_cuts
     
     @lru_cache()
     def wenetspeech_train_cuts(self) -> CutSet:

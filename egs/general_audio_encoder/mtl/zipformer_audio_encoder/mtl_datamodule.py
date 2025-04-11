@@ -423,7 +423,7 @@ class MultiTaskDataModule:
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/musan/musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
@@ -481,7 +481,7 @@ class MultiTaskDataModule:
             input_strategy=eval(self.args.input_strategy)(),
             cut_transforms=transforms,
             input_transforms=input_transforms,
-            return_cuts=self.args.return_cuts,
+            return_cuts=self.git,
             mvq_KD=self.args.mvq_KD,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD,
