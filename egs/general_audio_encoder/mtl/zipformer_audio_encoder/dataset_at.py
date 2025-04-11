@@ -40,6 +40,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         input_strategy: BatchIO = PrecomputedFeatures(),
         mixup_cuts: CutSet = None,
         mixup_prob: float = 0.5,
+        mvq_KD: bool = False,
         at_KD: bool = False,
         sv_KD: bool = False
     ):
@@ -51,6 +52,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self.input_strategy = input_strategy
         self.extractor = Fbank(FbankConfig(num_mel_bins=128))
         
+        self.mvq_KD = mvq_KD
         self.at_KD = at_KD
         self.sv_KD = sv_KD
         
@@ -71,7 +73,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         cuts = cuts.sort_by_duration(ascending=False)
         audios, cuts, mix_labels = self.read_and_mix_audio(cuts, p=self.mixup_prob)
         
-        import pdb; pdb.set_trace()
         inputs, input_lens = compute_feature(audios, cuts, self.extractor)
         
         supervision_intervals = self.input_strategy.supervision_intervals(cuts)
@@ -86,13 +87,17 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
         # cuts_pre_mixed = fix_start(cuts_pre_mixed)
         
-        mvq_tokens, mvq_token_lens = _collate_custom_field(
-            cuts_pre_mixed,
-            "codebook_indexes",
-            dummy=self.dummy_codebook_indexes,
-            temporal_array=True,
-            pad_value=-100,
-        )
+        if self.mvq_KD:
+            mvq_tokens, mvq_token_lens = _collate_custom_field(
+                cuts_pre_mixed,
+                "codebook_indexes",
+                dummy=self.dummy_codebook_indexes,
+                temporal_array=True,
+                pad_value=-100,
+            )
+        else:
+            mvq_tokens = None
+            mvq_token_lens = None
         
         if self.at_KD:
             # at_targets = collate_custom_field(
@@ -154,7 +159,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
             out_cuts.append(cut)
             labels.append(label)
             
-        import pdb; pdb.set_trace()
         labels = torch.cat(labels, dim=0) # (B,num_classes)
                 
         return audios, CutSet.from_cuts(out_cuts), labels
@@ -165,11 +169,10 @@ def _read_and_mix_audio_single(cut, mix_cut):
     audio2 = mix_cut.load_audio()
     if audio1.shape[1] > audio2.shape[1]:
         diff = audio1.shape[1] - audio2.shape[1]
-        padding = np.zeros((1, diff))
-        import pdb; pdb.set_trace()
+        padding = np.zeros((1, diff), dtype=np.float32)
         audio2 = np.concatenate((audio2, padding), axis=1)
     else:
-        audio2 = audio2[0, :audio1.shape[1]]
+        audio2 = audio2[:, :audio1.shape[1]]
     
     # mix the audio waveform
     mix_audio = audio1 * mix_lambda + audio2 * (1 - mix_lambda)
@@ -276,7 +279,6 @@ def test_dataset():
     
 
 def test_mix():
-    import pdb; pdb.set_trace()
     musan_cuts = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
     noise_cuts = CutSet.from_cuts([musan_cuts[0]])
 
@@ -291,8 +293,6 @@ def test_mix():
     
     extractor = Fbank(FbankConfig(num_mel_bins=128))
 
-    import pdb; pdb.set_trace()
-    
     for mixed_cut, pre_mixed_cut in zip(mixed_cuts, cuts_pre_mixed):
         
         mixed_audio = mixed_cut.load_audio()
@@ -304,7 +304,6 @@ def test_read_audio():
     audio_cuts = load_manifest_lazy("data/fbank_as_ced_mAP50/audioset_cuts_balanced.jsonl.gz").drop_features()
     cuts = audio_cuts.subset(first=10)
     
-    import pdb; pdb.set_trace()
     audios, cuts = read_audio_from_cuts(cuts)
     
     print(audios)

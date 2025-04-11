@@ -633,6 +633,7 @@ class MultiTaskModel(nn.Module):
         lm_scale: float = 0.0,
         at_targets: torch.Tensor = None,
         freeze_encoder: bool = False,
+        skip_asr: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -680,7 +681,7 @@ class MultiTaskModel(nn.Module):
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1]
 
-        if self.use_transducer:
+        if self.use_transducer and not skip_asr:
             # Compute transducer loss
             simple_loss, pruned_loss = self.forward_transducer(
                 encoder_out=encoder_out,
@@ -695,7 +696,7 @@ class MultiTaskModel(nn.Module):
             simple_loss = torch.empty(0)
             pruned_loss = torch.empty(0)
 
-        if self.use_ctc:
+        if self.use_ctc and not skip_asr:
             # Compute CTC loss
             targets = y.values
             ctc_loss = self.forward_ctc(
