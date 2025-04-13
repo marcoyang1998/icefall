@@ -228,6 +228,20 @@ class MultiTaskDataModule:
             "Larger values mean more warping. "
             "A value less than 1 means to disable time warp.",
         )
+        
+        group.add_argument(
+            "--features-mask-size",
+            type=int,
+            default=27,
+            help="The maximum mask bins along the frequency axis in specaug"
+        )
+        
+        group.add_argument(
+            "--frames-mask-size",
+            type=int,
+            default=100,
+            help="The maximum mask length along the time axis in specaug"
+        )
 
         group.add_argument(
             "--enable-musan",
@@ -446,18 +460,20 @@ class MultiTaskDataModule:
                 num_frame_masks = 2
             num_frame_masks = int(10 * self.args.time_mask_ratio)
             max_frames_mask_fraction = 0.15 * self.args.time_mask_ratio
-            logging.info(
-                f"num_frame_masks: {num_frame_masks}, "
-                f"max_frames_mask_fraction: {max_frames_mask_fraction}"
-            )
             input_transforms.append(
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
+                    features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
-                    frames_mask_size=100,
+                    frames_mask_size=self.args.frames_mask_size,
                 )
+            )
+            logging.info(
+                f"num_frame_masks: {num_frame_masks}, "
+                f"max_frames_mask_fraction: {max_frames_mask_fraction}, "
+                f"frames_mask_size: {self.args.frames_mask_size}, "
+                f"features_mask_size: {self.args.features_mask_size}"
             )
         else:
             logging.info("Disable SpecAugment")
@@ -841,34 +857,34 @@ class MultiTaskDataModule:
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
-        if self.args.use_shar:
-            medium_cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            if self.args.libriheavy_subset == "medium":
-                return medium_cuts
-            else:
-                assert self.args.libriheavy_subset == "large"
-                large_cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+        libriheavy_list = ["small", "medium", "large"]
+        durations = [466, 4148, 42074]
+        
+        all_cuts = CutSet()
+        all_cuts = []
+        weights = []
+        for i, subset in enumerate(libriheavy_list):
+            logging.info(f"Getting libriheavy subset {subset}")
+            weights.append(durations[i])
+            if self.args.use_shar:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
                 ).repeat()
-                cuts = [medium_cuts, large_cuts]
-                return CutSet.mux(
-                    *cuts,
-                    weights=[1, 9],
-                    stop_early=False,
-                )
-                
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
-            )
+            else:
+                cuts = load_manifest_lazy(f"data/vq_whisper_turbo_zh_en_16_v2_numpy/libriheavy_cuts_{subset}.jsonl.gz")
+            
+            all_cuts.append(cuts)
+            if self.args.libriheavy_subset == subset:
+                break
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=weights,
+            stop_early=False,
+        ).drop_features()
+        return all_cuts
     
     @lru_cache()
     def wenetspeech_train_cuts(self) -> CutSet:
