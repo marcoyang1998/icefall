@@ -1460,7 +1460,6 @@ def run(rank, world_size, args):
     train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # audio data
-    import pdb; pdb.set_trace()
     if params.use_audioset and params.do_audio_tagging:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
@@ -1561,7 +1560,6 @@ def run(rank, world_size, args):
         valid_sets.append("ASR_wenet")
         valid_dls.append(asr_wenet_valid_dl)
      
-    import pdb; pdb.set_trace()
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))

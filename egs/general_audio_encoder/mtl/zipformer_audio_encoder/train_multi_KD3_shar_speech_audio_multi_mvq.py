@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 #
 # Copyright    2024  University of Cambridge  (authors: Xiaoyu Yang,
 #
@@ -1469,7 +1469,7 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(english_cut_durations)
     
     # combine the asr data into a BIG cut
-    if len(asr_training_cuts) > 1:
+    if len(asr_training_cuts) >= 1:
         assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
         if len(asr_training_cuts) > 1:
             asr_training_cuts = CutSet.mux(
@@ -1479,9 +1479,10 @@ def run(rank, world_size, args):
             )
         else:
             asr_training_cuts = asr_training_cuts[0]
-            asr_training_cuts_duration = [0]
     else:
         asr_training_cuts = CutSet()
+    train_cuts["cuts_asr"] = asr_training_cuts
+    train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # general audio data
     if params.do_audio_tagging:

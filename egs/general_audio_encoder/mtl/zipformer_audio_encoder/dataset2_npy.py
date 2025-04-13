@@ -179,7 +179,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
                 cuts_pre_mixed, "beats_embedding", dummy=self.dummy_audio_logits, temporal_array=False
             ) # (N,C)
         else:        
-            audio_events = [c.supervisions[0].audio_event for c in cuts_pre_mixed] # the label indices are in CED format
+            audio_events = [getattr(c.supervisions[0], "audio_event", "0") for c in cuts_pre_mixed] # the label indices are in CED format
             at_targets, _ = str2multihot(audio_events) # (N, num_events)
             
         sv_targets = None
