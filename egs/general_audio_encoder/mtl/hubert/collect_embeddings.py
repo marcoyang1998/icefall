@@ -5,19 +5,16 @@ import logging
 from pathlib import Path
 
 from icefall.utils import AttributeDict, setup_logger
-from teachers import WhisperTeacher
+from model import HubertModel
 
 import torch
 import torch.multiprocessing as mp
-import torchaudio
 from torch.utils.data import DataLoader
 
 from lhotse import load_manifest, CutSet
 from lhotse.cut import MonoCut
 from lhotse.dataset import UnsupervisedWaveformDataset, DynamicBucketingSampler
 from lhotse.features.io import NumpyHdf5Writer
-
-import whisper
 
 
 def get_parser():
@@ -54,7 +51,8 @@ def get_parser():
         "--embedding-layer",
         type=int,
         default=-1,
-        help="Which layer's representation should be extracted",
+        help="Which layer's representation should be extracted, index start from 1, i.e the 10-th layer requires"
+        "--embedding-layer 10"
     )
     
     parser.add_argument(
@@ -72,44 +70,37 @@ def get_parser():
     
     # whisper related args
     parser.add_argument(
-        "--whisper-version",
+        "--hubert-version",
         type=str,
-        default="small.en"
-    )
-
-    parser.add_argument(
-        "--n-mels",
-        type=int,
-        default=128,
+        default="large"
     )
     
     return parser
 
+@torch.no_grad()
 def extract_embeddings(
     rank: int,
     manifest: str,
     params: AttributeDict,
 ):
-    setup_logger(f"data/embeddings/log/log-whisper-embeddings")
+    setup_logger(f"data/embeddings/log/log-hubert-embeddings")
     if params.num_jobs > 1:
         manifest = manifest[rank]
-        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}'
+        output_manifest = params.embedding_dir / f"hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.jsonl.gz"
+        embedding_path = params.embedding_dir / f'hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}'
     else:
-        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}'
+        output_manifest = params.embedding_dir / f"hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
+        embedding_path =  params.embedding_dir / f'hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}'
     
     device = torch.device("cuda", rank)
     
     # currently only use the encoder of whisper
     logging.info(params)
-    model = whisper.load_model(params.whisper_version, device)
-    model = model.encoder
+    model = HubertModel(model_version=params.hubert_version)
+    model.to(device)
     model.eval()
-    logging.info(f"Number of whisper encoder params: {sum(p.numel() for p in model.parameters())}")
-    logging.info(f"Successfully loaded Whisper model.")
-    
-    whisper_model = WhisperTeacher(model=model, n_mels=params.n_mels)
+    logging.info(f"Number of hubert model params: {sum(p.numel() for p in model.parameters())}")
+    logging.info(f"Successfully loaded hubert model.")
     
     dataset = UnsupervisedWaveformDataset(
         manifest
@@ -134,15 +125,12 @@ def extract_embeddings(
     num_cuts = 0
     
     with NumpyHdf5Writer(embedding_path) as writer:
-        logging.info(f"Writing Whisper embeddings to {embedding_path}")
+        logging.info(f"Writing hubert embeddings to {embedding_path}")
         for i, batch in enumerate(dl):
             cuts = batch["cuts"]
-            audio = batch["audio"]
-            audio_lens = batch["audio_lens"]
             
-            embeddings, embedding_lens = whisper_model.get_embeddings(
-                audio, 
-                audio_lens,
+            embeddings, embedding_lens = model.get_embeddings(
+                batch=batch,
                 layer_idx=params.embedding_layer # which layer's embedding to be stored
             )
             embeddings = embeddings.detach().to("cpu").numpy()
@@ -163,10 +151,10 @@ def extract_embeddings(
                 )
                 new_cuts.append(new_cut)
                 num_cuts += 1
-            if num_cuts and num_cuts % 100 == 0:
+            if num_cuts and i % 100 == 0:
                 logging.info(f"Cuts processed until now: {num_cuts}")
                 
-    logging.info(f"Finished extracting Whisper embeddings, processed a total of {num_cuts} cuts.")
+    logging.info(f"Finished extracting hubert embeddings, processed a total of {num_cuts} cuts.")
                 
     CutSet.from_cuts(new_cuts).to_jsonl(output_manifest)
     logging.info(f"Saved manifest to {output_manifest}")
@@ -216,7 +204,7 @@ if __name__=="__main__":
     cuts = cuts.filter(remove_sp) # remove the speed perturbed audio
     print(f"Finished loading manifest")
     
-    embedding_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
+    embedding_manifest = params.embedding_dir / f"hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
     
     if not embedding_manifest.exists():
         if nj == 1:
@@ -229,7 +217,7 @@ if __name__=="__main__":
             splitted_cuts = cuts.split(num_splits=nj)
             print(f"Finished splitting manifest")
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
-            manifests =  f"{str(params.embedding_dir)}/whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-*.jsonl.gz"
+            manifests =  f"{str(params.embedding_dir)}/hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}-*.jsonl.gz"
             os.system(f"lhotse combine {manifests} {embedding_manifest}")
     else:
         print(f"Skip embedding extraction: the manifest is already generated.")
