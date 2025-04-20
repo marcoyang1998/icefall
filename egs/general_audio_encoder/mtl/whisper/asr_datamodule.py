@@ -25,7 +25,7 @@ import pickle
 from typing import Any, Dict, Optional
 
 import torch
-from lhotse import CutSet, WhisperFbank, WhisperFbankConfig, load_manifest, load_manifest_lazy
+from lhotse import CutSet, Fbank, FbankConfig, load_manifest, load_manifest_lazy
 from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     CutConcatenate,
     CutMix,
@@ -35,6 +35,7 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     SimpleCutSampler,
     SpecAugment,
 )
+from waveform_dataset import K2SpeechRecognitionDataset
 from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
     AudioSamples,
     OnTheFlyFeatures,
@@ -231,79 +232,18 @@ class LibriSpeechAsrDataModule:
         )
         
         group.add_argument(
-            "--use-beats",
-            type=str2bool,
-            help="If use BEATs teacher model",
-            default=True,
-        )
-        
-        group.add_argument(
-            "--use-ecapa",
-            type=str2bool,
-            help="If use ECAPA teacher model",
-            default=True,
-        )
-        
-        group.add_argument(
-            "--use-whisper",
-            type=str2bool,
-            help="If use whisper teacher model when collecting batch;",
-            default=True,
-        )
-        
-        group.add_argument(
             "--use-librispeech",
             type=str2bool,
             default=False,
             help="If use librispeech as the training set.",
-        )
-        
-        group.add_argument(
-            "--use-wenetspeech",
-            type=str2bool,
-            default=False,
-            help="If use wenetspeech as the training set.",
-        )
-
-        group.add_argument(
-            "--use-voxceleb",
-            type=str2bool,
-            default=False,
-            help="If use voxceleb as training set. This will not affet the model params.",
-        )
-
-        group.add_argument(
-            "--voxceleb-subset",
-            type=str,
-            default="vox1",
-            choices=["vox1", "vox2", "only_vox2"],
-            help="Which subset of voxceleb to use. If vox2, then vox1 and vox2 will be used.",
-        )
-        
-        group.add_argument(
-            "--use-audioset",
-            type=str2bool,
-            default=True,
-        )
-
-        group.add_argument(
-            "--audioset-subset",
-            type=str,
-            default="balanced",
-            choices=["balanced", "unbalanced"]
-        )
-
-        group.add_argument(
-            "--whisper-version",
-            type=str,
-            default="small.en",
-            help="The version of whisper to be used"
         )
 
     def train_dataloaders(
         self,
         cuts_train: CutSet,
         sampler_state_dict: Optional[Dict[str, Any]] = None,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> DataLoader:
         """
         Args:
@@ -316,7 +256,7 @@ class LibriSpeechAsrDataModule:
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest(self.args.manifest_dir / "musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
@@ -384,7 +324,7 @@ class LibriSpeechAsrDataModule:
             # Drop feats to be on the safe side.
             train = K2SpeechRecognitionDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(WhisperFbank(WhisperFbank(num_mel_bins=128))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
             )
@@ -397,6 +337,8 @@ class LibriSpeechAsrDataModule:
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
                 drop_last=self.args.drop_last,
+                world_size=world_size,
+                rank=rank,
             )
         else:
             logging.info("Using SimpleCutSampler.")
@@ -405,6 +347,8 @@ class LibriSpeechAsrDataModule:
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
                 drop_last=self.args.drop_last,
+                world_size=world_size,
+                rank=rank,
             )
         logging.info("About to create train dataloader")
 
@@ -428,7 +372,7 @@ class LibriSpeechAsrDataModule:
 
         return train_dl
 
-    def valid_dataloaders(self, cuts_valid: CutSet) -> DataLoader:
+    def valid_dataloaders(self, cuts_valid: CutSet, rank: int = 0, world_size: int = 1) -> DataLoader:
         transforms = []
         if self.args.concatenate_cuts:
             transforms = [
@@ -441,7 +385,7 @@ class LibriSpeechAsrDataModule:
         if self.args.on_the_fly_feats:
             validate = K2SpeechRecognitionDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(WhisperFbank(WhisperFbank(num_mel_bins=128))),
+                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80))),
                 return_cuts=self.args.return_cuts,
             )
         else:
@@ -453,6 +397,8 @@ class LibriSpeechAsrDataModule:
             cuts_valid,
             max_duration=self.args.max_duration,
             shuffle=False,
+            world_size=world_size,
+            rank=rank,
         )
         logging.info("About to create dev dataloader")
         valid_dl = DataLoader(
@@ -468,7 +414,7 @@ class LibriSpeechAsrDataModule:
     def test_dataloaders(self, cuts: CutSet) -> DataLoader:
         logging.debug("About to create test dataset")
         test = K2SpeechRecognitionDataset(
-            input_strategy=OnTheFlyFeatures(WhisperFbank(WhisperFbankConfig(num_mel_bins=128)))
+            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=80)))
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
