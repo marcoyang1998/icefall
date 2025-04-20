@@ -4,7 +4,7 @@ import os
 import logging
 from pathlib import Path
 
-from icefall.utils import AttributeDict, setup_logger
+from icefall.utils import AttributeDict, setup_logger, str2bool
 from model import DashengEncoder
 
 import torch
@@ -89,6 +89,12 @@ def get_parser():
         help="Where to store the manifest augmented with dasheng features"
     )
     
+    parser.add_argument(
+        "--normalize",
+        type=str2bool,
+        default=False,
+        help="If True, compute the channel-wise mean and std on the training se for nomalization."
+    )
     # dasheng related args
     parser.add_argument(
         "--model-version",
@@ -97,6 +103,9 @@ def get_parser():
     )
     
     return parser
+
+def normalize_data(data, mean, std):
+    return (data - mean) / std
 
 @torch.no_grad()
 def extract_embeddings(
@@ -128,7 +137,17 @@ def extract_embeddings(
         num_codebooks=params.num_codebooks,
         codebook_size=256,
     )
-    quantizer.load_state_dict(torch.load(params.quantizer_path))
+    
+    state_dict = torch.load(params.quantizer_path)
+    if "quantizer" not in state_dict:
+        # with out normalization stats
+        assert not params.normalize, "No normalization stats is found!"
+        state_dict = {"quantizer": state_dict}
+    
+    if params.normalize:
+        mu = state_dict["mean"].to(device)
+        std = state_dict["std"].to(device)
+    quantizer.load_state_dict(state_dict["quantizer"])
     quantizer.to(device)
     
     dataset = UnsupervisedWaveformDataset(
@@ -165,6 +184,9 @@ def extract_embeddings(
                 audio_lens=audio_lens,
                 layer_idx=params.embedding_layer,
             )
+
+            if params.normalize:
+                embeddings = normalize_data(embeddings, mu, std)
             
             # codebook_indexes = quantizer.encode(embeddings) # [N, T, C]
             N,T,C = embeddings.shape
@@ -228,7 +250,7 @@ def change_recording(c):
     return c
 
 def remove_short_and_long_utt(c):
-    if c.duration < 1.0 or c.duration > 24.0:
+    if c.duration < 1.0 or c.duration > 29.9:
         return False
     return True
 
@@ -251,7 +273,7 @@ if __name__=="__main__":
     print(f"Start loading manifest")
     cuts = load_manifest(params.input_manifest)
     cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
-    # cuts = cuts.filter(remove_sp) # remove speed perturb
+    cuts = cuts.filter(remove_sp) # remove speed perturb
     # cuts = cuts.map(change_recording)
     print(f"Finished loading manifest")
     print(cuts)

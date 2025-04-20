@@ -50,7 +50,7 @@ def get_parser():
         "--embedding-layer",
         type=int,
         default=-1,
-        help="Which layer's representation should be extracted",
+        help="Which layer's representation should be extracted. Index starts from 1. ",
     )
     
     parser.add_argument(

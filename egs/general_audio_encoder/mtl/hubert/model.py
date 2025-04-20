@@ -16,6 +16,9 @@ class HubertModel(torch.nn.Module):
         if model_version == "large":
             self.processor = Wav2Vec2FeatureExtractor.from_pretrained(f"facebook/hubert-{model_version}-ll60k")
             self.model = AutoModel.from_pretrained(f"facebook/hubert-{model_version}-ll60k")
+        elif model_version == "xlarge":
+            self.processor = Wav2Vec2FeatureExtractor.from_pretrained("models/hubert-xlarge-ll60k/")
+            self.model = AutoModel.from_pretrained("models/hubert-xlarge-ll60k/")
         elif model_version == "base":
             self.processor = Wav2Vec2FeatureExtractor.from_pretrained(f"facebook/hubert-{model_version}-ls960")
             self.model = AutoModel.from_pretrained(f"facebook/hubert-{model_version}-ls960")

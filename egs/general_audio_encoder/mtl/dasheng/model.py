@@ -37,7 +37,7 @@ class DashengEncoder(nn.Module):
         self.model = get_encoder_model(model_version)
         
     def get_embeddings(self, audio, audio_lens, layer_idx=-1):
-        x = self.model(audio) # (B,T,C)
+        x = self.model(audio, layer_idx=layer_idx) # (B,T,C)
         x_lens = (audio_lens / 16000 * 25).int() # the frame rate is 25 Hz
         
         return x, x_lens

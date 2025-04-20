@@ -50,7 +50,14 @@ def get_parser():
     )
     
     parser.add_argument(
-        "quantizer_training_manifests",
+        "--quantizer-training-manifests",
+        type=str,
+        nargs="+",
+        help="The manifests used for quantizer training."
+    )
+    
+    parser.add_argument(
+        "--quantizer-evaluation-manifests",
         type=str,
         nargs="+",
         help="The manifests used for quantizer training."
@@ -100,6 +107,7 @@ def train_quantizer(args):
     )
     
     train, valid = prepare_data(training_manifest, split=True)
+    
     if args.normalize:
         mu = train.mean(dim=0)
         std = train.std(dim=0)
@@ -164,6 +172,7 @@ def main(args):
     device = torch.device("cuda")
     
     if os.path.exists(args.quantizer_path):
+        import pdb; pdb.set_trace()
         logging.info(f"Loading from pre-trained quantizer: {args.quantizer_path}")
         
         quantizer = quantization.Quantizer(
@@ -187,10 +196,7 @@ def main(args):
         assert mu is not None and std is not None
         
     # evaluate quantizer
-    valid_manifests = [
-        "hubert-large-layer-21-dev-clean.jsonl.gz",
-        "hubert-large-layer-21-dev-other.jsonl.gz",
-    ]
+    valid_manifests = args.quantizer_evaluation_manifests
     for valid_manifest in valid_manifests:
         valid_data = prepare_data([valid_manifest], split=False)
         if args.normalize:

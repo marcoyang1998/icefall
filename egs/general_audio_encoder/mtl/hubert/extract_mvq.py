@@ -5,7 +5,7 @@ import io
 import logging
 from pathlib import Path
 
-from icefall.utils import AttributeDict, setup_logger
+from icefall.utils import AttributeDict, setup_logger, str2bool
 from model import HubertModel
 
 import torch
@@ -98,10 +98,17 @@ def get_parser():
         "--target-manifest-file",
         type=str,
         required=True,
-        help="Where to store the manifest augmented with whisper features"
+        help="Where to store the manifest augmented with hubert features"
     )
     
-    # whisper related args
+    parser.add_argument(
+        "--normalize",
+        type=str2bool,
+        default=False,
+        help="If True, compute the channel-wise mean and std on the training se for nomalization."
+    )
+    
+    # hubert related args
     parser.add_argument(
         "--hubert-version",
         type=str,
@@ -109,6 +116,9 @@ def get_parser():
     )
     
     return parser
+
+def normalize_data(data, mean, std):
+    return (data - mean) / std
 
 @torch.no_grad()
 def extract_embeddings(
@@ -138,7 +148,16 @@ def extract_embeddings(
         num_codebooks=params.num_codebooks,
         codebook_size=256,
     )
-    quantizer.load_state_dict(torch.load(params.quantizer_path))
+    state_dict = torch.load(params.quantizer_path)
+    if "quantizer" not in state_dict:
+        # with out normalization stats
+        assert not params.normalize, "No normalization stats is found!"
+        state_dict = {"quantizer": state_dict}
+    
+    if params.normalize:
+        mu = state_dict["mean"].to(device)
+        std = state_dict["std"].to(device)
+    quantizer.load_state_dict(state_dict["quantizer"])
     quantizer.to(device)
     
     dataset = UnsupervisedWaveformDataset(
@@ -171,6 +190,8 @@ def extract_embeddings(
             batch,
             layer_idx=params.embedding_layer # which layer's embedding to be stored
         )
+        if params.normalize:
+            embeddings = normalize_data(embeddings, mu, std)
         
         # codebook_indexes = quantizer.encode(embeddings) # [N, T, C]
         N,T,C = embeddings.shape
