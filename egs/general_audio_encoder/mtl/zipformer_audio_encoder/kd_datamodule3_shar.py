@@ -246,6 +246,20 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--features-mask-size",
+            type=int,
+            default=27,
+            help="The maximum mask bins along the frequency axis in specaug"
+        )
+        
+        group.add_argument(
+            "--frames-mask-size",
+            type=int,
+            default=100,
+            help="The maximum mask length along the time axis in specaug"
+        )
+        
+        group.add_argument(
             "--enable-musan",
             type=str2bool,
             default=True,
@@ -482,9 +496,10 @@ class MultiTaskDataModule:
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
+                    features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
-                    frames_mask_size=100,
+                    frames_mask_size=self.args.frames_mask_size,
+                    max_frames_mask_fraction=max_frames_mask_fraction,
                 )
             )
         else:

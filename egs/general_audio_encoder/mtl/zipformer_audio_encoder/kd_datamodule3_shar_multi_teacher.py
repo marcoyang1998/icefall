@@ -238,6 +238,20 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--features-mask-size",
+            type=int,
+            default=27,
+            help="The maximum mask bins along the frequency axis in specaug"
+        )
+        
+        group.add_argument(
+            "--frames-mask-size",
+            type=int,
+            default=100,
+            help="The maximum mask length along the time axis in specaug"
+        )
+        
+        group.add_argument(
             "--time-mask-ratio",
             type=float,
             default=1.0,
@@ -454,9 +468,10 @@ class MultiTaskDataModule:
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
+                    features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
-                    frames_mask_size=100,
+                    frames_mask_size=self.args.frames_mask_size,
+                    max_frames_mask_fraction=max_frames_mask_fraction,
                 )
             )
         else:
@@ -659,7 +674,7 @@ class MultiTaskDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=2,
+            num_workers=self.args.num_workers,
             persistent_workers=False,
         )
 
@@ -1074,6 +1089,13 @@ class MultiTaskDataModule:
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
         logging.info("About to get test-other cuts")
+        if self.args.use_shar:
+            logging.info(f"Use share for audioset eval cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/audioset/eval",
+                shuffle_shards=False,
+            )
+            return cuts
         return load_manifest_lazy(
             self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
         )

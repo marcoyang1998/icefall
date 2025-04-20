@@ -229,6 +229,20 @@ class MultiTaskDataModule:
             "Larger values mean more warping. "
             "A value less than 1 means to disable time warp.",
         )
+        
+        group.add_argument(
+            "--features-mask-size",
+            type=int,
+            default=27,
+            help="The maximum mask bins along the frequency axis in specaug"
+        )
+        
+        group.add_argument(
+            "--frames-mask-size",
+            type=int,
+            default=100,
+            help="The maximum mask length along the time axis in specaug"
+        )
 
         group.add_argument(
             "--enable-musan",
@@ -423,7 +437,7 @@ class MultiTaskDataModule:
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
+            cuts_musan = load_manifest("data/musan/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
@@ -459,19 +473,21 @@ class MultiTaskDataModule:
                 num_frame_masks = 2
             num_frame_masks = int(10 * self.args.time_mask_ratio)
             max_frames_mask_fraction = 0.15 * self.args.time_mask_ratio
-            logging.info(
-                f"num_frame_masks: {num_frame_masks}, "
-                f"max_frames_mask_fraction: {max_frames_mask_fraction}"
-            )
             input_transforms.append(
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
+                    features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
-                    frames_mask_size=100,
-                    max_frames_mask_fraction=max_frames_mask_fraction
+                    frames_mask_size=self.args.frames_mask_size,
+                    max_frames_mask_fraction=max_frames_mask_fraction,
                 )
+            )
+            logging.info(
+                f"num_frame_masks: {num_frame_masks}, "
+                f"max_frames_mask_fraction: {max_frames_mask_fraction}, "
+                f"frames_mask_size: {self.args.frames_mask_size}, "
+                f"features_mask_size: {self.args.features_mask_size}"
             )
         else:
             logging.info("Disable SpecAugment")
@@ -481,7 +497,7 @@ class MultiTaskDataModule:
             input_strategy=eval(self.args.input_strategy)(),
             cut_transforms=transforms,
             input_transforms=input_transforms,
-            return_cuts=self.git,
+            return_cuts=self.args.return_cuts,
             mvq_KD=self.args.mvq_KD,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD,
@@ -580,12 +596,25 @@ class MultiTaskDataModule:
                 merge_batches=True,
             )
         else:
-            logging.info("Using SimpleCutSampler.")
-            train_sampler = SimpleCutSampler(
-                cuts_train,
-                max_duration=self.args.max_duration,
-                shuffle=self.args.shuffle,
-            )
+            assert len(cuts_train) == 1, f"The training cuts contain {len(cuts_train)} cutsets"
+            cuts_train = list(cuts_train.values())[0]
+            if self.args.at_weighted_sampler:
+                weights = self.audioset_sampling_weights()
+                train_sampler = WeightedSimpleCutSampler(
+                    cuts_train,
+                    weights,
+                    num_samples=self.args.at_num_samples,
+                    max_duration=self.args.max_duration,
+                    shuffle=False,  # do not support shuffle
+                    drop_last=self.args.drop_last,
+                )
+            else:
+                logging.info("Using SimpleCutSampler.")
+                train_sampler = SimpleCutSampler(
+                    cuts_train,
+                    max_duration=self.args.max_duration,
+                    shuffle=self.args.shuffle,
+                )
         logging.info("About to create train dataloader")
 
         if sampler_state_dict is not None:

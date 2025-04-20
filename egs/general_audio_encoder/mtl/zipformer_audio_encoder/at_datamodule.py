@@ -243,7 +243,6 @@ class MultiTaskDataModule:
             default=100,
             help="The maximum mask length along the time axis in specaug"
         )
-        
 
         group.add_argument(
             "--enable-musan",
@@ -497,6 +496,7 @@ class MultiTaskDataModule:
                     features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
                     frames_mask_size=self.args.frames_mask_size,
+                    max_frames_mask_fraction=max_frames_mask_fraction,
                 )
             )
             logging.info(
