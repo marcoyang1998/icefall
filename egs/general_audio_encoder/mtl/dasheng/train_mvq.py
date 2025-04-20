@@ -4,11 +4,11 @@ import os
 from tqdm import tqdm
 
 import torch
-from lhotse import load_manifest_lazy
+from lhotse import load_manifest_lazy, CutSet
 import multi_quantization as quantization
 import numpy as np
 
-from icefall.utils import setup_logger
+from icefall.utils import setup_logger, str2bool
 
 def get_parser():
     parser = argparse.ArgumentParser()
@@ -31,6 +31,13 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--normalize",
+        type=str2bool,
+        default=False,
+        help="If True, compute the channel-wise mean and std on the training se for nomalization."
+    )
+    
+    parser.add_argument(
         "--quantizer-path",
         type=str,
         required=True,
@@ -44,7 +51,10 @@ def get_parser():
     )
     return parser.parse_args()
 
-def prepare_data(manifest_list, split=True):
+def normalize_data(data, mean, std):
+    return (data-mean) / std
+
+def prepare_data(manifest_list: list[CutSet], split: bool=True):
     # split needs to be True to enable shuffling! 
     logging.info(f"Preparing the data")
     all_data = []
@@ -84,6 +94,14 @@ def train_quantizer(args):
     )
     
     train, valid = prepare_data(training_manifest, split=True)
+    if args.normalize:
+        mu = train.mean(dim=0)
+        std = train.std(dim=0)
+        train = normalize_data(train, mu, std)
+        valid = normalize_data(valid, mu, std)
+    else:
+        mu, std = None, None
+    
     B = 1024  # Minibatch size, this is very arbitrary,
     # it's close to what we used when we tuned this method.
 
@@ -105,9 +123,14 @@ def train_quantizer(args):
 
     quantizer = trainer.get_quantizer()
     logging.info(f"Saving the quantizer to {args.quantizer_path}")
-    torch.save(quantizer.state_dict(), args.quantizer_path)
+    state_dict = {
+        "quantizer": quantizer.state_dict(),
+        "mean": mu,
+        "std": std,
+    }
+    torch.save(state_dict, args.quantizer_path)
     
-    return quantizer
+    return quantizer, state_dict
 
 @torch.no_grad()
 def evaluate_quantizer(quantizer, valid):
@@ -131,7 +154,7 @@ def evaluate_quantizer(quantizer, valid):
     
     logging.info(f"Relative reconstruction loss: {sum(rel_losses)/len(rel_losses)}")
     logging.info(f"Log probs: {sum(log_probs)/len(log_probs)}")
-    
+
 def main(args):
     device = torch.device("cuda")
     
@@ -143,19 +166,33 @@ def main(args):
             num_codebooks=args.num_codebooks,
             codebook_size=256,
         )
-        quantizer.load_state_dict(torch.load(args.quantizer_path))
+        state_dict = torch.load(args.quantizer_path)
+        if "quantizer" not in state_dict:
+            state_dict = {"quantizer": state_dict}
+        quantizer.load_state_dict(state_dict["quantizer"])
         quantizer.to(device)
     else:
-        quantizer = train_quantizer(args)
+        quantizer, state_dict = train_quantizer(args)
         quantizer.to(device)
         
+    if args.normalize:
+        logging.info(f"Using the collected normalization stats")
+        mu = state_dict["mean"]
+        std = state_dict["std"]
+        assert mu is not None and std is not None
+    
     # evaluate quantizer
     valid_manifests = [
-        "data/manifests/dasheng/dasheng-layer--1-audioset-balanced.jsonl.gz",
-        "data/manifests/dasheng/dasheng-layer--1-audioset-eval.jsonl.gz",
+        "data/manifests/dasheng/dasheng-layer-25-audioset-eval.jsonl.gz",
+        # "data/embeddings/dasheng/dasheng-large-layer--1-ls-dev-clean.jsonl.gz",
+        # "data/embeddings/dasheng/dasheng-large-layer--1-ls-dev-other.jsonl.gz",
+        # "data/manifests/dasheng/dasheng-layer--1-audioset-eval.jsonl.gz",
     ]
     for valid_manifest in valid_manifests:
         valid_data = prepare_data([valid_manifest], split=False)
+        if args.normalize:
+            valid_data = normalize_data(valid_data, mu, std)
+        logging.info(f"Evaluating quantizer on {valid_manifest}")
         evaluate_quantizer(quantizer, valid_data)
     
 if __name__=="__main__":

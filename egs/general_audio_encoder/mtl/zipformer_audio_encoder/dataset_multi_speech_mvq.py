@@ -159,7 +159,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
-        cuts_pre_mixed = fix_start(cuts_pre_mixed)
+        # cuts_pre_mixed = fix_start(cuts_pre_mixed)
         #mvq_tokens, mvq_token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=-100)
         mvq_tokens, mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
@@ -169,10 +169,9 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             pad_value=-100,
             frame_rate=50,
         )
-        
-        firered_mvq_tokens, firered_mvq_token_lens = _collate_custom_field(
+        mvq_tokens2, mvq_token2_lens = _collate_custom_field(
             cuts_pre_mixed,
-            "firered_codebook_indexes",
+            "codebook_indexes2",
             dummy=self.dummy_codebook_indexes,
             temporal_array=True,
             pad_value=-100,
@@ -187,7 +186,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
                 cuts_pre_mixed, "beats_embedding", dummy=self.dummy_audio_logits, temporal_array=False
             ) # (N,C)
         else:        
-            audio_events = [c.supervisions[0].audio_event for c in cuts_pre_mixed] # the label indices are in CED format
+            audio_events = [getattr(c.supervisions[0], "audio_event", "0") for c in cuts_pre_mixed] # the label indices are in CED format
             at_targets, _ = str2multihot(audio_events) # (N, num_events)
             
         sv_targets = None
@@ -200,8 +199,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         batch = {
             "inputs": inputs,
-            "cb_indexes": [mvq_tokens, firered_mvq_tokens],
-            "cb_indexes_len": [mvq_token_lens, firered_mvq_token_lens],
+            "cb_indexes": [mvq_tokens, mvq_tokens2],
+            "cb_indexes_len": [mvq_token_lens, mvq_token2_lens],
             "supervisions": default_collate(
                 [
                     {
@@ -246,7 +245,16 @@ def validate_multi_kd(cuts: CutSet) -> None:
         elif cut.task_id == 2:
             # audio cuts, should have audio logits
             assert cut.has_custom("beats_embedding")
-            
+
+def load_codebook_indexes(c, field: str = "codebook_indexes"):
+    info = getattr(c, field)
+    if isinstance(info, dict):
+        filename = info["path"]
+        return np.load(filename)
+    else:
+        return c.load_custom(field)
+
+
 def _collate_custom_field(
     cuts: CutSet, 
     field: str,
@@ -263,7 +271,7 @@ def _collate_custom_field(
         temporal_dim = 0
         pad_value = -100
         arrs = [
-            torch.from_numpy(c.load_custom(field)) if c.has_custom(field) else dummy for c in cuts
+            torch.from_numpy(load_codebook_indexes(c, field)) if c.has_custom(field) else dummy for c in cuts
         ]
         for i, arr in enumerate(arrs):
             arrs[i] = arr[:max_frames[i],:]
