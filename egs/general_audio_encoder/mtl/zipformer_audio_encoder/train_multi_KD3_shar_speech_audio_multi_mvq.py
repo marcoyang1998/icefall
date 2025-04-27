@@ -63,6 +63,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
+import torch.distributed as dist
 from kd_datamodule3_shar_speech_audio_multi_teacher import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
@@ -77,7 +78,13 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_task_id, MetricsTracker, setup_distributed
+from utils import (
+    _add_task_id, 
+    MetricsTracker, 
+    setup_distributed,
+    _save_checkpoint,
+    _save_checkpoint_with_global_batch_idx,
+)
 
 from zipformer2 import Zipformer2
 
@@ -501,14 +508,14 @@ def get_parser():
     
     # TODO: make this applicable to more than two losses
     parser.add_argument(
-        "--whisper-mvq-loss-scale",
+        "--speech-mvq-loss-scale",
         type=float,
         default=1.0,
         help="The scale of whisper mvq losses"
     )
 
     parser.add_argument(
-        "--dasheng-mvq-loss-scale",
+        "--audio-mvq-loss-scale",
         type=float,
         default=1.0,
         help="The scale of dasheng mvq losses"
@@ -553,6 +560,13 @@ def get_parser():
         Note: It also saves checkpoint to `exp-dir/epoch-xxx.pt` at the
         end of each epoch where `xxx` is the epoch number counting from 1.
         """,
+    )
+    
+    parser.add_argument(
+        "--save-with-client",
+        type=str2bool,
+        default=True,
+        help="If True, save the model to s3 client"
     )
 
     parser.add_argument(
@@ -883,26 +897,41 @@ def save_checkpoint(
     """
     if rank != 0:
         return
-    filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
-    save_checkpoint_impl(
-        filename=filename,
-        model=model,
-        model_avg=model_avg,
-        params=params,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        sampler=sampler,
-        scaler=scaler,
-        rank=rank,
-    )
+    if params.save_with_client:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        filename = "brainllm:s3://yangxiaoyu/" + str(filename) 
+        _save_checkpoint(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
+    else:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        save_checkpoint_impl(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
 
-    if params.best_train_epoch == params.cur_epoch:
-        best_train_filename = params.exp_dir / "best-train-loss.pt"
-        copyfile(src=filename, dst=best_train_filename)
+        if params.best_train_epoch == params.cur_epoch:
+            best_train_filename = params.exp_dir / "best-train-loss.pt"
+            copyfile(src=filename, dst=best_train_filename)
 
-    if params.best_valid_epoch == params.cur_epoch:
-        best_valid_filename = params.exp_dir / "best-valid-loss.pt"
-        copyfile(src=filename, dst=best_valid_filename)
+        if params.best_valid_epoch == params.cur_epoch:
+            best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+            copyfile(src=filename, dst=best_valid_filename)
 
 
 def compute_loss(
@@ -951,6 +980,7 @@ def compute_loss(
     # mvq tokens
     mvq_tokens = batch["cb_indexes"]
     mvq_tokens = [tokens.to(device) for tokens in mvq_tokens]
+    mvq_token_lens = batch["cb_indexes_len"]
     
     # audio tagging label
     if params.do_audio_tagging:
@@ -966,7 +996,7 @@ def compute_loss(
             at_targets=at_targets,
         )
 
-        whisper_mvq_loss, dasheng_mvq_loss = losses[:-1]
+        speech_mvq_loss, audio_mvq_loss = losses[:-1]
         audio_tagging_loss = losses[-1]
         loss = 0.0
 
@@ -976,17 +1006,17 @@ def compute_loss(
         # MVQ loss, first is whisper MVQ, second is Dasheng MVQ
         mvq_loss_values = []
         if params.do_mvq:
-            whisper_mask = task_ids == 1 # ASR data task_id=1
+            speech_mask = task_ids == 1 # ASR data task_id=1
             
-            whisper_mvq_loss = (whisper_mvq_loss * whisper_mask).sum()
-            mvq_loss_values.append(whisper_mvq_loss)
-            loss += whisper_mvq_loss * params.whisper_mvq_loss_scale # TODO: make this an option
+            speech_mvq_loss = (speech_mvq_loss * speech_mask).sum()
+            mvq_loss_values.append(speech_mvq_loss)
+            loss += speech_mvq_loss * params.speech_mvq_loss_scale # TODO: make this an option
 
-            dasheng_mask = task_ids == 2
+            audio_mask = task_ids == 2
             
-            dasheng_mvq_loss = (dasheng_mvq_loss * dasheng_mask).sum()
-            mvq_loss_values.append(dasheng_mvq_loss)
-            loss += dasheng_mvq_loss * params.dasheng_mvq_loss_scale # TODO: make this an option
+            audio_mvq_loss = (audio_mvq_loss * audio_mask).sum()
+            mvq_loss_values.append(audio_mvq_loss)
+            loss += audio_mvq_loss * params.audio_mvq_loss_scale # TODO: make this an option
             
         # AT loss
         if params.do_audio_tagging:
@@ -1005,7 +1035,7 @@ def compute_loss(
     # Note: We use reduction=sum while computing the loss
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
-        teachers = ["whisper", "dasheng"]
+        teachers = ["speech", "audio"]
         for i, mvq_loss in enumerate(mvq_loss_values):
             info[f"{teachers[i]}_mvq_loss"] = mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
@@ -1173,28 +1203,42 @@ def train_one_epoch(
                 model_cur=model,
                 model_avg=model_avg,
             )
-
+        
         if (
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            save_checkpoint_with_global_batch_idx(
-                out_dir=params.exp_dir,
-                global_batch_idx=params.batch_idx_train,
-                model=model,
-                model_avg=model_avg,
-                params=params,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                sampler=train_dl.sampler if not params.use_shar else None,
-                scaler=scaler,
-                rank=rank,
-            )
-            remove_checkpoints(
-                out_dir=params.exp_dir,
-                topk=params.keep_last_k,
-                rank=rank,
-            )
+            if params.save_with_client:
+                _save_checkpoint_with_global_batch_idx(
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                if world_size > 1:
+                    dist.barrier()
+            else:
+                save_checkpoint_with_global_batch_idx(
+                    out_dir=params.exp_dir,
+                    global_batch_idx=params.batch_idx_train,
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                remove_checkpoints(
+                    out_dir=params.exp_dir,
+                    topk=params.keep_last_k,
+                    rank=rank,
+                )
 
         if batch_idx % 100 == 0 and params.use_fp16:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
@@ -1317,6 +1361,16 @@ def run(rank, world_size, args):
     if rank == 0:
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
+        
+    # save the model to client
+    if rank == 0 and params.save_with_client:
+        logging.info(f"Saving the checkpoints with s3 client.")
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/zhangchen/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
 
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
@@ -1469,7 +1523,7 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(english_cut_durations)
     
     # combine the asr data into a BIG cut
-    if len(asr_training_cuts) > 1:
+    if len(asr_training_cuts) >= 1:
         assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
         if len(asr_training_cuts) > 1:
             asr_training_cuts = CutSet.mux(
@@ -1479,9 +1533,10 @@ def run(rank, world_size, args):
             )
         else:
             asr_training_cuts = asr_training_cuts[0]
-            asr_training_cuts_duration = [0]
     else:
         asr_training_cuts = CutSet()
+    train_cuts["cuts_asr"] = asr_training_cuts
+    train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # general audio data
     if params.do_audio_tagging:

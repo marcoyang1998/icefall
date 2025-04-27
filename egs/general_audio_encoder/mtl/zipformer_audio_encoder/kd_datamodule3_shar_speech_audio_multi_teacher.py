@@ -113,10 +113,16 @@ class MultiTaskDataModule:
             default=False,
         )
         group.add_argument(
-            "--shar-dir",
+            "--speech-shar-dir",
             type=Path,
             default=Path("data-shar"),
-            help="Path to directory with train/valid/test cuts.",
+            help="Path to directory with speech data train/valid/test cuts.",
+        )
+        group.add_argument(
+            "--audio-shar-dir",
+            type=Path,
+            default=Path("data-shar"),
+            help="Path to directory with audio data train/valid/test cuts.",
         )
         group.add_argument(
             "--max-duration",
@@ -228,6 +234,20 @@ class MultiTaskDataModule:
             "Larger values mean more warping. "
             "A value less than 1 means to disable time warp.",
         )
+        
+        group.add_argument(
+            "--features-mask-size",
+            type=int,
+            default=27,
+            help="The maximum mask bins along the frequency axis in specaug"
+        )
+        
+        group.add_argument(
+            "--frames-mask-size",
+            type=int,
+            default=100,
+            help="The maximum mask length along the time axis in specaug"
+        )
 
         group.add_argument(
             "--enable-musan",
@@ -263,6 +283,20 @@ class MultiTaskDataModule:
             type=str2bool,
             default=False,
             help="If load speaker embedding instead of speaker identity"
+        )
+        
+        group.add_argument(
+            "--speech-target-frame-rate",
+            type=int,
+            default=50,
+            help="The speech target's frame rate in Hz"
+        )
+        
+        group.add_argument(
+            "--audio-target-frame-rate",
+            type=int,
+            default=25,
+            help="The audio target's frame rate in Hz"
         )
         
         # multi task dataset related
@@ -410,7 +444,7 @@ class MultiTaskDataModule:
         if self.args.enable_musan:
             logging.info("Enable MUSAN")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/musan/musan_cuts.jsonl.gz")
             transforms.append(
                 CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
@@ -446,18 +480,21 @@ class MultiTaskDataModule:
                 num_frame_masks = 2
             num_frame_masks = int(10 * self.args.time_mask_ratio)
             max_frames_mask_fraction = 0.15 * self.args.time_mask_ratio
-            logging.info(
-                f"num_frame_masks: {num_frame_masks}, "
-                f"max_frames_mask_fraction: {max_frames_mask_fraction}"
-            )
             input_transforms.append(
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
+                    features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
-                    frames_mask_size=100,
+                    frames_mask_size=self.args.frames_mask_size,
+                    max_frames_mask_fraction=max_frames_mask_fraction,
                 )
+            )
+            logging.info(
+                f"num_frame_masks: {num_frame_masks}, "
+                f"max_frames_mask_fraction: {max_frames_mask_fraction}, "
+                f"frames_mask_size: {self.args.frames_mask_size}, "
+                f"features_mask_size: {self.args.features_mask_size}"
             )
         else:
             logging.info("Disable SpecAugment")
@@ -470,6 +507,8 @@ class MultiTaskDataModule:
             return_cuts=self.args.return_cuts,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD,
+            speech_target_frame_rate=self.args.speech_target_frame_rate,
+            audio_target_frame_rate=self.args.audio_target_frame_rate,
         )
 
         if self.args.on_the_fly_feats:
@@ -490,6 +529,8 @@ class MultiTaskDataModule:
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
             )
 
         if self.args.bucketing_sampler:
@@ -638,14 +679,18 @@ class MultiTaskDataModule:
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
             )
         else:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -659,7 +704,7 @@ class MultiTaskDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=2,
+            num_workers=self.args.num_workers,
             persistent_workers=False,
         )
 
@@ -678,7 +723,9 @@ class MultiTaskDataModule:
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
             at_KD=self.args.at_KD,
-            sv_KD=self.args.sv_KD
+            sv_KD=self.args.sv_KD,
+            speech_target_frame_rate=self.args.speech_target_frame_rate,
+            audio_target_frame_rate=self.args.audio_target_frame_rate,
         )
         sampler = DynamicBucketingSampler(
             cuts,
@@ -732,7 +779,7 @@ class MultiTaskDataModule:
         )
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/train-all-shuf",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/train-all-shuf",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -755,7 +802,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use share for librispeech dev-clean cuts")
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-clean",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/dev-clean",
                 shuffle_shards=False,
             )
         else:
@@ -768,7 +815,7 @@ class MultiTaskDataModule:
         logging.info("About to get dev-other cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-other",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/dev-other",
                 shuffle_shards=False,
             )
         else:
@@ -810,7 +857,7 @@ class MultiTaskDataModule:
             weights.append(durations[i])
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/gigaspeech/{subset}",
+                    in_dir=f"{str(self.args.speech_shar_dir)}/gigaspeech/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -841,34 +888,34 @@ class MultiTaskDataModule:
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
-        if self.args.use_shar:
-            medium_cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            if self.args.libriheavy_subset == "medium":
-                return medium_cuts
-            else:
-                assert self.args.libriheavy_subset == "large"
-                large_cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+        libriheavy_list = ["small", "medium", "large"]
+        durations = [466, 4148, 42074]
+        
+        all_cuts = CutSet()
+        all_cuts = []
+        weights = []
+        for i, subset in enumerate(libriheavy_list):
+            logging.info(f"Getting libriheavy subset {subset}")
+            weights.append(durations[i])
+            if self.args.use_shar:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.speech_shar_dir)}/libriheavy/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
                 ).repeat()
-                cuts = [medium_cuts, large_cuts]
-                return CutSet.mux(
-                    *cuts,
-                    weights=[1, 9],
-                    stop_early=False,
-                )
-                
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / f"libriheavy_cuts_{self.args.libriheavy_subset}.jsonl.gz"
-            )
+            else:
+                cuts = load_manifest_lazy(f"data/vq_whisper_turbo_zh_en_16_v2_numpy/libriheavy_cuts_{subset}.jsonl.gz")
+            
+            all_cuts.append(cuts)
+            if self.args.libriheavy_subset == subset:
+                break
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=weights,
+            stop_early=False,
+        ).drop_features()
+        return all_cuts
     
     @lru_cache()
     def wenetspeech_train_cuts(self) -> CutSet:
@@ -877,7 +924,7 @@ class MultiTaskDataModule:
             num_splits = 10
             all_cuts = []
             for i in range(num_splits):
-                split_dir = f"{str(self.args.shar_dir)}/wenetspeech/L/split_{i}"
+                split_dir = f"{str(self.args.speech_shar_dir)}/wenetspeech/L/split_{i}"
                 logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
                     in_dir=split_dir,
@@ -904,7 +951,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info("Get wenetspeech dev cuts from shar")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/wenetspeech/DEV",
+                in_dir=f"{str(self.args.speech_shar_dir)}/wenetspeech/DEV",
                 shuffle_shards=False,
             )
             return cuts
@@ -930,7 +977,7 @@ class MultiTaskDataModule:
             num_splits = 8
             all_cuts = []
             for i in range(num_splits):
-                split_dir = f"{str(self.args.shar_dir)}/MLS/split_{i}"
+                split_dir = f"{str(self.args.speech_shar_dir)}/MLS/split_{i}"
                 logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
                     in_dir=split_dir,
@@ -962,7 +1009,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"{self.args.speech_shar_dir}/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -995,7 +1042,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"{self.args.speech_shar_dir}/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1018,7 +1065,7 @@ class MultiTaskDataModule:
     
     @cached_property
     def dataset_duration_stats(self):
-        stats_file = f"{self.args.shar_dir}/stats_duration.txt"
+        stats_file = f"{self.args.audio_shar_dir}/stats_duration.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:
@@ -1028,7 +1075,7 @@ class MultiTaskDataModule:
     
     @cached_property
     def dataset_len_stats(self):
-        stats_file = f"{self.args.shar_dir}/stats_len.txt"
+        stats_file = f"{self.args.audio_shar_dir}/stats_len.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:
@@ -1043,7 +1090,7 @@ class MultiTaskDataModule:
             if not self.args.at_weighted_sampler:
                 if self.args.use_shar:
                     cuts = CutSet.from_shar(
-                        in_dir=f"{str(self.args.shar_dir)}/audioset/full",
+                        in_dir=f"{str(self.args.audio_shar_dir)}/audioset/full",
                         shuffle_shards=True,
                         stateful_shuffle=True,
                         seed="randomized",
@@ -1060,7 +1107,7 @@ class MultiTaskDataModule:
         else:
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/audioset/{self.args.audioset_subset}",
+                    in_dir=f"{str(self.args.audio_shar_dir)}/audioset/{self.args.audioset_subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1077,7 +1124,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use share for audioset eval cuts")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/audioset/eval",
+                in_dir=f"{self.args.audio_shar_dir}/audioset/eval",
                 shuffle_shards=False,
             )
             return cuts

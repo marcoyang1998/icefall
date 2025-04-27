@@ -231,6 +231,20 @@ class MultiTaskDataModule:
         )
 
         group.add_argument(
+            "--features-mask-size",
+            type=int,
+            default=27,
+            help="The maximum mask bins along the frequency axis in specaug"
+        )
+        
+        group.add_argument(
+            "--frames-mask-size",
+            type=int,
+            default=100,
+            help="The maximum mask length along the time axis in specaug"
+        )
+        
+        group.add_argument(
             "--enable-musan",
             type=str2bool,
             default=True,
@@ -483,9 +497,9 @@ class MultiTaskDataModule:
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
                     num_frame_masks=num_frame_masks,
-                    features_mask_size=27,
+                    features_mask_size=self.args.features_mask_size,
                     num_feature_masks=2,
-                    frames_mask_size=100,
+                    frames_mask_size=self.args.frames_mask_size,
                     max_frames_mask_fraction=max_frames_mask_fraction
                 )
             )
@@ -515,7 +529,7 @@ class MultiTaskDataModule:
             # transforms = [PerturbSpeed(factors=[0.9, 1.1], p=2/3)] + transforms   # noqa
             # Drop feats to be on the safe side.
             if self.args.enable_mixup:
-                mixup_cuts = load_manifest("data/fbank_as_ced_mAP50/audioset_cuts_balanced.jsonl.gz").drop_features()
+                mixup_cuts = load_manifest(f"{self.args.manifest_dir}/audioset_cuts_balanced.jsonl.gz").drop_features()
             else:
                 mixup_cuts = None
                 
@@ -699,7 +713,7 @@ class MultiTaskDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=2,
+            num_workers=self.args.num_workers,
             persistent_workers=False,
         )
 
