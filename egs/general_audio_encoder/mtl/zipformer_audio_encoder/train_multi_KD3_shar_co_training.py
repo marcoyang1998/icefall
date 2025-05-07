@@ -63,12 +63,12 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule4_shar import MultiTaskDataModule
+from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd2 import MultiKDModel
+from model_multi_kd import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -79,7 +79,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils import _add_task_id, MetricsTracker, setup_distributed
 
-from zipformer import Zipformer2
+from zipformer2 import Zipformer2
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -175,6 +175,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str,
         default="2,2,3,4,3,2",
         help="Number of zipformer encoder layers per stack, comma separated.",
+    )
+
+    parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=2,
+        help="The outout downsampling factor. Default is 2. If 1, no downsample is performed.",
     )
 
     parser.add_argument(
@@ -274,17 +281,9 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--do-speech-mvq",
+        "--do-mvq",
         type=str2bool,
         default=True,
-        help="If compute mvq loss on speech cb indexes"
-    )
-    
-    parser.add_argument(
-        "--do-audio-mvq",
-        type=str2bool,
-        default=False,
-        help="if computing mvq loss on audio cb indexes"
     )
     
     parser.add_argument(
@@ -321,9 +320,25 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--interpolate-teacher",
+        type=str2bool,
+        default=False,
+        help="""This should only be used when the teacher has a lower frame rate
+        than the student model. We use interpolation to find the nearest neighbour"""
+    )
+    
+    parser.add_argument(
         "--num-codebooks",
         type=int,
         default=8,
+    )
+    
+    parser.add_argument(
+        "--mvq-loss-by-task",
+        type=str2bool,
+        default=True,
+        help="If True, only compute MVQ loss on the task from which the sample is drawn."
+        "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
     )
     
 
@@ -483,13 +498,6 @@ def get_parser():
         type=float,
         default=0.2,
         help="Scale for CTC loss.",
-    )
-    
-    parser.add_argument(
-        "--audio-mvq-loss-scale",
-        type=float,
-        default=1.0,
-        help="Scale for audio mvq loss.",
     )
 
     parser.add_argument(
@@ -680,7 +688,7 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
 
 def get_encoder_model(params: AttributeDict) -> nn.Module:
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
@@ -705,6 +713,18 @@ def get_model(params: AttributeDict) -> nn.Module:
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
+    
+    if params.interpolate_teacher:
+        logging.warning(f"Interpolate the teacher indexes to match the length of the student")
+        assert params.teacher_frame_ratio == 1
+        
+    if params.output_downsampling_factor == 1:
+        logging.info(f"Setting the output downsample factor to 1.")
+        if params.teacher_frame_ratio > 1:
+            logging.warning(
+                f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
+                "However, the output downsampling factor is 1. This could be wrong!"
+            )
 
     model = MultiKDModel(
         encoder_embed=encoder_embed,
@@ -713,6 +733,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         num_codebooks=params.num_codebooks,
         distillation_layer=params.distillation_layer,
         distillation_delta=params.distillation_delta,
+        interpolate_teacher=params.interpolate_teacher,
         teacher_frame_ratio=params.teacher_frame_ratio,
     )
     return model
@@ -921,15 +942,7 @@ def compute_loss(
             logging.info(f"Total duration of task {t}: {duration}")
 
     # mvq tokens
-    if params.do_speech_mvq:
-        mvq_tokens = batch["cb_indexes"].to(device)
-    else:
-        mvq_tokens = None
-    
-    if params.do_audio_mvq:
-        audio_mvq_tokens = batch["audio_cb_indexes"].to(device)
-    else:
-        audio_mvq_tokens = None
+    mvq_tokens = batch["cb_indexes"].to(device)
     
     # audio tagging label
     if params.do_audio_tagging:
@@ -938,11 +951,10 @@ def compute_loss(
         at_targets = None
     
     with torch.set_grad_enabled(is_training):
-        mvq_loss, audio_mvq_loss, audio_tagging_loss = model(
+        mvq_loss, audio_tagging_loss = model(
             x=feature,
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
-            audio_codebook_indexes=audio_mvq_tokens,
             at_targets=at_targets,
         )
 
@@ -951,16 +963,14 @@ def compute_loss(
         # task_id=1: ASR data
         # task_id=2: AT data
 
-        # MVQ loss on speech data
-        if params.do_speech_mvq:
-            mask = task_ids == 1 # ASR=1
-            mvq_loss = (mvq_loss * mask).sum()
+        # MVQ loss 
+        if params.do_mvq:
+            if params.mvq_loss_by_task:
+                mask = task_ids == 1 # ASR=1
+                mvq_loss = (mvq_loss * mask).sum()
+            else:
+                mvq_loss = mvq_loss.sum()
             loss += mvq_loss
-            
-        if params.do_audio_mvq:
-            mask = task_ids == 2
-            audio_mvq_loss = (audio_mvq_loss * mask).sum()
-            loss += params.audio_mvq_loss_scale * audio_mvq_loss
             
         # AT loss
         if params.do_audio_tagging:
@@ -978,10 +988,8 @@ def compute_loss(
 
     # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
-    if params.do_speech_mvq:
+    if params.do_mvq:
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
-    if params.do_audio_mvq:
-        info["audio_mvq_loss"] = audio_mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
@@ -1098,22 +1106,24 @@ def train_one_epoch(
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
         
-        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
-        unique_origin = set(shard_origin)
-        count = {orig: 0 for orig in unique_origin}
-        for sh in shard_origin:
-            count[sh] += 1
-            if sh in shard_count:
-                shard_count[sh] += 1
-            else:
-                shard_count[sh] = 1
-            
-        if batch_idx % 200 == 1:
-            shard_epoch = [int(c.shar_epoch) for c in cuts]
-            max_epoch = max(shard_epoch)
-            logging.info(f"Estimated epoch is {max_epoch}")
-            logging.info(count)
-            logging.info(f"Batch {batch_idx}: Cuts stats: {shard_count}")
+        if params.use_shar:
+            shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
+            unique_origin = set(shard_origin)
+            for ori in shard_origin:
+                if ori in shard_count:
+                    shard_count[ori] += 1
+                else:
+                    shard_count[ori] = 1
+            count = {orig: 0 for orig in unique_origin}
+            for sh in shard_origin:
+                count[sh] += 1
+                
+            if batch_idx % 200 == 1:
+                shard_epoch = [int(c.shar_epoch) for c in cuts]
+                max_epoch = max(shard_epoch)
+                logging.info(f"Estimated epoch is {max_epoch}")
+                logging.info(count)
+                logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1369,7 +1379,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
         
-    
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
@@ -1390,7 +1399,39 @@ def run(rank, world_size, args):
         asr_training_cuts.append(gigaspeech_cuts)
         asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
         asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
-        
+    
+    if params.use_libriheavy:
+        libriheavy_cuts = librispeech.libriheavy_train_cuts()
+        libriheavy_cuts_len = {
+            "small": 122512 * 0.9, # 122512
+            "medium": 996017, # 1093040, fewer after filtering
+            "large": 10093746,
+        }
+        libriheavy_cuts_duration = {
+            "small": 466,
+            "medium": 4148,
+            "large": 42074,
+        }
+        libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(libriheavy_cuts)
+        asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
+        asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
+    
+    if params.use_mls:
+        mls_cuts = librispeech.mls_cuts()
+        mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
+        # mls cuts: 10801 hrs, 2619190 cuts
+        asr_training_cuts.append(mls_cuts)
+        asr_training_cuts_lens.append(2619190)
+        asr_training_cuts_duration.append(10801)
+    
+    if params.use_extra_english_dataset:
+        englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
+        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(englishs_cuts)
+        asr_training_cuts_lens.append(english_cuts_len)
+        asr_training_cuts_duration.append(english_cut_durations)
+    
     if params.use_wenetspeech:
         wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
         wenetspeech_cuts_len = {
@@ -1408,22 +1449,12 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
         asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
     
-    if params.use_libriheavy:
-        libriheavy_cuts = librispeech.libriheavy_train_cuts()
-        libriheavy_cuts_len = {
-            "small": 122512 * 0.9, # 122512
-            "medium": 996017, # 1093040, fewer after filtering
-            "large": 10093746,
-        }
-        libriheavy_cuts_duration = {
-            "small": 500 * 0.9,
-            "medium": 3687,
-            "large": 37218,
-        }
-        libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(libriheavy_cuts)
-        asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
-        asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
+    if params.use_extra_chinese_dataset:
+        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(chineses_cuts)
+        asr_training_cuts_lens.append(chinese_cuts_len)
+        asr_training_cuts_duration.append(chinese_cut_durations)
     
     # combine the asr data into a BIG cut
     assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
@@ -1469,10 +1500,7 @@ def run(rank, world_size, args):
     logging.info(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 0.98 or c.duration > 29.0:
-            # logging.warning(
-            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
-            # )
+        if c.duration < 0.98 or c.duration > 29.9:
             return False
 
         return True
@@ -1521,7 +1549,7 @@ def run(rank, world_size, args):
     valid_dls = []
     
     # valid dataloaders
-    if params.use_librispeech:
+    if params.use_librispeech or params.use_libriheavy:
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_task_id, 1))
@@ -1543,7 +1571,7 @@ def run(rank, world_size, args):
         valid_sets.append("ASR_wenet")
         valid_dls.append(asr_wenet_valid_dl)
      
-    if params.use_audioset and params.do_audio_tagging:
+    if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
