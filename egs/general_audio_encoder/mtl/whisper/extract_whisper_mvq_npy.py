@@ -5,7 +5,7 @@ import io
 import logging
 from pathlib import Path
 
-from icefall.utils import AttributeDict, setup_logger
+from icefall.utils import AttributeDict, setup_logger, str2bool
 from teachers import WhisperTeacher
 
 import torch
@@ -102,6 +102,13 @@ def get_parser():
         help="Where to store the manifest augmented with whisper features"
     )
     
+    parser.add_argument(
+        "--normalize",
+        type=str2bool,
+        default=False,
+        help="If True, compute the channel-wise mean and std on the training se for nomalization."
+    )
+    
     # whisper related args
     parser.add_argument(
         "--whisper-version",
@@ -147,7 +154,16 @@ def extract_embeddings(
         num_codebooks=params.num_codebooks,
         codebook_size=256,
     )
-    quantizer.load_state_dict(torch.load(params.quantizer_path))
+    state_dict = torch.load(params.quantizer_path)
+    if "quantizer" not in state_dict:
+        # with out normalization stats
+        assert not params.normalize, "No normalization stats is found!"
+        state_dict = {"quantizer": state_dict}
+    
+    if params.normalize:
+        mu = state_dict["mean"].to(device)
+        std = state_dict["std"].to(device)    
+    quantizer.load_state_dict(state_dict["quantizer"])
     quantizer.to(device)
     
     dataset = UnsupervisedWaveformDataset(
@@ -183,6 +199,8 @@ def extract_embeddings(
             audio_lens,
             layer_idx=params.embedding_layer # which layer's embedding to be stored
         )
+        if params.normalize:
+            embeddings = normalize_data(embeddings, mu, std)
         
         # codebook_indexes = quantizer.encode(embeddings) # [N, T, C]
         N,T,C = embeddings.shape
@@ -201,7 +219,15 @@ def extract_embeddings(
         for idx, cut in enumerate(cuts):
             cb_index = codebook_indexes[idx][: embedding_lens[idx]]
             
-            output_path = f"{params.s3_prefix}/{cut.id}.npy"
+            if "/" in cut.id:
+                # we are dealing with libriheavy cuts
+                filename = cut.id
+            else:
+                filename = "/".join(cut.id.split("-")[:2]) + "/" + cut.id
+            output_path = f"{params.s3_prefix}/{filename}.npy"
+            if os.path.exists(output_path):
+                logging.info(f"This codebook file has already been generated. Please check if you are doing correctly!")
+                
             base_dir, filename = output_path.rsplit("/", 1)
             os.makedirs(base_dir, exist_ok=True)
             np.save(output_path, cb_index)

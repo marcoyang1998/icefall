@@ -210,7 +210,11 @@ def extract_embeddings(
         for idx, cut in enumerate(cuts):
             cb_index = codebook_indexes[idx][: embedding_lens[idx]]
             
-            filename = "/".join(cut.id.split("-")[:2]) + "/" + cut.id
+            if "/" in cut.id:
+                # we are dealing with libriheavy cuts
+                filename = cut.id
+            else:
+                filename = "/".join(cut.id.split("-")[:2]) + "/" + cut.id
             output_path = f"{params.s3_prefix}/{filename}.npy"
             base_dir, filename = output_path.rsplit("/", 1)
             os.makedirs(base_dir, exist_ok=True)

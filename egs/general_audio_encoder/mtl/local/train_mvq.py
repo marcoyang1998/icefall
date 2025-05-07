@@ -201,6 +201,7 @@ def main(args):
         valid_data = prepare_data([valid_manifest], split=False)
         if args.normalize:
             valid_data = normalize_data(valid_data, mu, std)
+        logging.info(f"Evaluating quantizer on {valid_manifest}")
         evaluate_quantizer(quantizer, valid_data)
     
 if __name__=="__main__":

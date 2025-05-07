@@ -92,8 +92,8 @@ def train_quantizer(args):
         dim=args.embedding_dim,
         bytes_per_frame=args.num_codebooks,
         device=device,
-        phase_one_iters=50000,
-        phase_two_iters=50000,
+        phase_one_iters=35000,
+        phase_two_iters=35000,
     )
     
     train, valid = prepare_data(training_manifest, split=True)
@@ -169,10 +169,13 @@ def main(args):
         # "manifests/wenetspeech-dev-whisper-turbo-layer--1.jsonl.gz",
         # "manifests/aishell-test-whisper-turbo-layer--1.jsonl.gz",
         # "manifests/baoxiang-20210816-whisper-turbo-layer--1.jsonl.gz"
-        "data/manifests/librispeech_cuts_dev-other.jsonl.gz"
+        "data/manifests/whisper/whisper-turbo-layer--1-ls-dev-clean.jsonl.gz",
+        "data/manifests/whisper/whisper-turbo-layer--1-ls-dev-other.jsonl.gz",
+        "data/manifests/whisper/whisper-turbo-layer--1-as-eval.jsonl.gz",
     ]
     for valid_manifest in valid_manifests:
         valid_data = prepare_data([valid_manifest], split=False)
+        logging.info(f"Evaluating quantizer on {valid_manifest}")
         evaluate_quantizer(quantizer, valid_data)
     
 if __name__=="__main__":
