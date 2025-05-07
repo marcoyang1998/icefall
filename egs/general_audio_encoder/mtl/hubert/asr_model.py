@@ -39,6 +39,7 @@ class AsrModel(nn.Module):
         use_transducer: bool = True,
         use_ctc: bool = False,
         use_attention_decoder: bool = False,
+        post_norm: bool = False,
         layer_idx: int = -1,
     ):
         """A joint CTC & Transducer ASR model.
@@ -77,6 +78,10 @@ class AsrModel(nn.Module):
         ), f"At least one of them should be True, but got use_transducer={use_transducer}, use_ctc={use_ctc}"
 
         self.encoder = encoder
+        if post_norm:
+            self.norm = nn.LayerNorm(encoder_dim)
+        else:
+            self.norm = None
         self.layer_idx = layer_idx
 
         self.use_transducer = use_transducer
@@ -402,6 +407,9 @@ class AsrModel(nn.Module):
         with torch.set_grad_enabled(not freeze_encoder):
             encoder_out, encoder_out_lens = self.forward_encoder(batch)
 
+        if self.norm is not None:
+            encoder_out = self.norm(encoder_out)
+        
         row_splits = y.shape.row_splits(1)
         y_lens = row_splits[1:] - row_splits[:-1]
 

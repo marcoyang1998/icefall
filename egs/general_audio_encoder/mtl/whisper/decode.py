@@ -108,6 +108,7 @@ import whisper
 import sentencepiece as spm
 import torch
 import torch.nn as nn
+from finetune import add_model_arguments, get_model, get_params
 from asr_datamodule import LibriSpeechAsrDataModule
 from beam_search import (
     beam_search,
@@ -140,8 +141,6 @@ from icefall.utils import (
     str2bool,
     write_error_stats,
 )
-
-from utils import _add_task_id
 
 LOG_EPS = math.log(1e-10)
 
@@ -381,19 +380,9 @@ def get_parser():
         help="""Skip scoring, but still save the ASR output (for eval sets).""",
     )
 
+    add_model_arguments(parser)
+    
     return parser
-
-class WhisperEncoder(torch.nn.Module):
-    def __init__(self, model_version: str):
-        super().__init__()
-        whisper_model = whisper.load_model(model_version, device="cpu")
-        self.n_mels = whisper_model.dims.n_mels
-        self.model = whisper_model.encoder
-        
-    def forward(self, x: torch.Tensor):
-        return self.model(x)
-    
-    
 
 
 def decode_one_batch(
@@ -446,26 +435,11 @@ def decode_one_batch(
       the returned dict.
     """
     device = next(model.parameters()).device
-    feature = batch["inputs"]
-    assert feature.ndim == 3
 
-    feature = feature.to(device)
     # at entry, feature is (N, T, C)
 
     supervisions = batch["supervisions"]
-    feature_lens = supervisions["num_frames"].to(device)
-
-    if params.causal:
-        # this seems to cause insertions at the end of the utterance if used with zipformer.
-        pad_len = 30
-        feature_lens += pad_len
-        feature = torch.nn.functional.pad(
-            feature,
-            pad=(0, 0, 0, pad_len),
-            value=LOG_EPS,
-        )
-
-    encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens)
+    encoder_out, encoder_out_lens = model.forward_encoder(batch)
 
     hyps = []
 
@@ -827,16 +801,6 @@ def main():
     else:
         params.suffix = f"epoch-{params.epoch}_avg-{params.avg}"
 
-    if params.causal:
-        assert (
-            "," not in params.chunk_size
-        ), "chunk_size should be one value in decoding."
-        assert (
-            "," not in params.left_context_frames
-        ), "left_context_frames should be one value in decoding."
-        params.suffix += f"_chunk-{params.chunk_size}"
-        params.suffix += f"_left-context-{params.left_context_frames}"
-
     if "fast_beam_search" in params.decoding_method:
         params.suffix += f"_beam-{params.beam}"
         params.suffix += f"_max-contexts-{params.max_contexts}"
@@ -1056,9 +1020,26 @@ def main():
     args.return_cuts = True
     librispeech = LibriSpeechAsrDataModule(args)
 
-    test_clean_cuts = librispeech.test_clean_cuts()
+    def remove_short_and_long_utt(c):
+        # Keep only utterances with duration between 1 second and 20 seconds
+        #
+        # Caution: There is a reason to select 20.0 here. Please see
+        # ../local/display_manifest_statistics.py
+        #
+        # You should use ../local/display_manifest_statistics.py to get
+        # an utterance duration distribution for your dataset to select
+        # the threshold
+        if c.duration < 1.0 or c.duration > 29.9:
+            # logging.warning(
+            #     f"Exclude cut with ID {c.id} from training. Duration: {c.duration}"
+            # )
+            return False
+
+        return True
+
+    test_clean_cuts = librispeech.test_clean_cuts().filter(remove_short_and_long_utt)
     # test_clean_cuts = test_clean_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
-    test_other_cuts = librispeech.test_other_cuts()
+    test_other_cuts = librispeech.test_other_cuts().filter(remove_short_and_long_utt)
     # test_other_cuts = test_other_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
 
     test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)

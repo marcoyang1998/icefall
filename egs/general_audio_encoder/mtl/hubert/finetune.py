@@ -178,6 +178,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--post-norm",
+        type=str2bool,
+        default=False,
+        help="If add a layernorm after the hubert encoder,"
+    )
+    
+    parser.add_argument(
         "--encoder-dim",
         type=int,
         default=1024,
@@ -564,6 +571,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         vocab_size=params.vocab_size,
         use_transducer=params.use_transducer,
         use_ctc=params.use_ctc,
+        post_norm=params.post_norm,
         layer_idx=params.layer_idx,
     )
     return model
