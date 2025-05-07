@@ -44,7 +44,14 @@ def get_parser():
     )
     
     parser.add_argument(
-        "quantizer_training_manifests",
+        "--quantizer-training-manifests",
+        type=str,
+        nargs="+",
+        help="The manifests used for quantizer training."
+    )
+    
+    parser.add_argument(
+        "--quantizer-evaluation-manifests",
         type=str,
         nargs="+",
         help="The manifests used for quantizer training."
@@ -182,13 +189,10 @@ def main(args):
         assert mu is not None and std is not None
     
     # evaluate quantizer
-    valid_manifests = [
-        "data/manifests/dasheng/dasheng-layer-25-audioset-eval.jsonl.gz",
-        # "data/embeddings/dasheng/dasheng-large-layer--1-ls-dev-clean.jsonl.gz",
-        # "data/embeddings/dasheng/dasheng-large-layer--1-ls-dev-other.jsonl.gz",
-        # "data/manifests/dasheng/dasheng-layer--1-audioset-eval.jsonl.gz",
-    ]
+    # evaluate quantizer
+    valid_manifests = args.quantizer_evaluation_manifests
     for valid_manifest in valid_manifests:
+
         valid_data = prepare_data([valid_manifest], split=False)
         if args.normalize:
             valid_data = normalize_data(valid_data, mu, std)
