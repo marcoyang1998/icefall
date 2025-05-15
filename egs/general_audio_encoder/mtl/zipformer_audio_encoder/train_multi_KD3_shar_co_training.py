@@ -67,9 +67,10 @@ import torch.distributed as dist
 from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
+from lhotse.dataset import SpecAugment
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd import MultiKDModel
+from model_multi_kd_co_training import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -132,49 +133,6 @@ def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
         if hasattr(module, "name"):
             module.name = name
 
-
-def add_finetune_arguments(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--do-finetune",
-        type=str2bool,
-        default=False,
-        help="Whether to fine-tune.",
-    )
-
-    parser.add_argument(
-        "--init-modules",
-        type=str,
-        default=None,
-        help="""
-        Modules to be initialized. It matches all parameters starting with
-        a specific key. The keys are given with Comma seperated. If None,
-        all modules will be initialised. For example, if you only want to
-        initialise all parameters staring with "encoder", use "encoder";
-        if you want to initialise parameters starting with encoder or decoder,
-        use "encoder,joiner".
-        """,
-    )
-
-    parser.add_argument(
-        "--freeze-modules",
-        type=str,
-        default=None,
-        help="""
-        Modules to be frozen. It matches all parameters starting with
-        a specific key. The keys are given with Comma seperated. If None,
-        all modules will be initialised. For example, if you only want to
-        initialise all parameters staring with "encoder", use "encoder";
-        if you want to initialise parameters starting with encoder or decoder,
-        use "encoder,joiner".
-        """,
-    )
-
-    parser.add_argument(
-        "--finetune-ckpt",
-        type=str,
-        default=None,
-        help="Fine-tuning from which checkpoint (a path to a .pt file)",
-    )
 
 def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
@@ -306,6 +264,19 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If do speaker verification"
     )
+    
+    parser.add_argument(
+        "--use-co-training",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--co-training-loss-scale",
+        type=float,
+        default=0.2,
+    )
+    
     
     parser.add_argument(
         "--distillation-layer",
@@ -598,7 +569,6 @@ def get_parser():
         help="If stop early if using mux"
     )
 
-    add_finetune_arguments(parser)
     add_model_arguments(parser)
 
     return parser
@@ -744,6 +714,25 @@ def get_model(params: AttributeDict) -> nn.Module:
     )
     return model
 
+def get_spec_augment(params: AttributeDict) -> SpecAugment:
+    num_frame_masks = int(10 * params.time_mask_ratio)
+    max_frames_mask_fraction = 0.15 * params.time_mask_ratio
+    logging.info(
+        f"num_frame_masks: {num_frame_masks}, "
+        f"max_frames_mask_fraction: {max_frames_mask_fraction}, "
+        f"features_mask_size: {params.features_mask_size}, "
+        f"frames_mask_size: {params.frames_mask_size}"
+    )
+    spec_augment = SpecAugment(
+        time_warp_factor=0,  # We don't do time warp for MVQ pre-training
+        num_frame_masks=num_frame_masks,  # default: 10
+        features_mask_size=params.features_mask_size,
+        num_feature_masks=2,
+        frames_mask_size=params.frames_mask_size,
+        max_frames_mask_fraction=max_frames_mask_fraction,  # default: 0.15
+    )
+    return spec_augment
+
 
 def load_checkpoint_if_available(
     params: AttributeDict,
@@ -808,50 +797,6 @@ def load_checkpoint_if_available(
             params["start_epoch"] = saved_params["cur_epoch"]
 
     return saved_params
-
-def load_model_params(
-    ckpt: str, model: nn.Module, init_modules: List[str] = None, strict: bool = True
-):
-    """Load model params from checkpoint
-
-    Args:
-        ckpt (str): Path to the checkpoint
-        model (nn.Module): model to be loaded
-
-    """
-    logging.info(f"Loading checkpoint from {ckpt}")
-    checkpoint = torch.load(ckpt, map_location="cpu")
-
-    # if module list is empty, load the whole model from ckpt
-    if not init_modules:
-        if next(iter(checkpoint["model"])).startswith("module."):
-            logging.info("Loading checkpoint saved by DDP")
-
-            dst_state_dict = model.state_dict()
-            src_state_dict = checkpoint["model"]
-            for key in dst_state_dict.keys():
-                src_key = "{}.{}".format("module", key)
-                dst_state_dict[key] = src_state_dict.pop(src_key)
-            assert len(src_state_dict) == 0
-            model.load_state_dict(dst_state_dict, strict=strict)
-        else:
-            model.load_state_dict(checkpoint["model"], strict=strict)
-    else:
-        src_state_dict = checkpoint["model"]
-        dst_state_dict = model.state_dict()
-        for module in init_modules:
-            logging.info(f"Loading parameters starting with prefix {module}")
-            src_keys = [k for k in src_state_dict.keys() if k.startswith(module.strip() + ".")]
-            dst_keys = [k for k in dst_state_dict.keys() if k.startswith(module.strip() + ".")]
-            assert set(src_keys) == set(dst_keys)  # two sets should match exactly
-            for key in src_keys:
-                logging.info(f"Loading {key} from init ckpt")
-                dst_state_dict[key] = src_state_dict.pop(key)
-
-        model.load_state_dict(dst_state_dict, strict=strict)
-
-    return None
-
 
 
 def save_checkpoint(
@@ -925,6 +870,7 @@ def compute_loss(
     sp: spm.SentencePieceProcessor,
     batch: dict,
     is_training: bool,
+    specaug: Optional[SpecAugment] = None,
 ) -> Tuple[Tensor, MetricsTracker]:
     """
     Compute loss given the model and its inputs.
@@ -965,6 +911,25 @@ def compute_loss(
     # mvq tokens
     mvq_tokens = batch["cb_indexes"].to(device)
     
+    # potentially perform specaug for co-training
+    use_co_training = params.use_co_training and is_training
+    use_spec_aug = use_co_training and is_training
+    if use_spec_aug:
+        supervision_intervals = batch["supervisions"]
+        supervision_segments = torch.stack(
+            [
+                supervision_intervals["sequence_idx"],
+                supervision_intervals["start_frame"],
+                supervision_intervals["num_frames"],
+            ],
+            dim=1,
+        )  # shape: (S, 3)
+    else:
+        supervision_segments = None
+        
+    if use_co_training:
+        task_ids = task_ids.repeat(2)
+    
     # audio tagging label
     if params.do_audio_tagging:
         at_targets = batch["at_targets"].to(device) # the label indices are in CED format
@@ -972,11 +937,15 @@ def compute_loss(
         at_targets = None
     
     with torch.set_grad_enabled(is_training):
-        mvq_loss, audio_tagging_loss = model(
+        mvq_loss, audio_tagging_loss, co_training_loss = model(
             x=feature,
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
+            use_co_training=use_co_training,
+            use_spec_aug=use_spec_aug,
+            spec_augment=specaug,
+            supervision_segments=supervision_segments,
         )
 
         loss = 0.0
@@ -989,6 +958,11 @@ def compute_loss(
             mask = task_ids == 1 # ASR=1
             mvq_loss = (mvq_loss * mask).sum()
             loss += mvq_loss
+            
+            # co-training loss is computed on all data
+            if use_co_training:
+                co_training_loss = co_training_loss.sum()
+                loss += co_training_loss * params.co_training_loss_scale
             
         # AT loss
         if params.do_audio_tagging:
@@ -1010,7 +984,8 @@ def compute_loss(
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
-
+    if use_co_training:
+        info["co_training_loss"] = co_training_loss.detach().cpu().item()
     return loss, info
 
 
@@ -1058,6 +1033,7 @@ def train_one_epoch(
     valid_sets: List[str],
     valid_dls: List[torch.utils.data.DataLoader],
     scaler: GradScaler,
+    specaug: Optional[SpecAugment] = None,
     model_avg: Optional[nn.Module] = None,
     tb_writer: Optional[SummaryWriter] = None,
     world_size: int = 1,
@@ -1148,6 +1124,7 @@ def train_one_epoch(
                     params=params,
                     model=model,
                     sp=sp,
+                    specaug=specaug,
                     batch=batch,
                     is_training=True,
                 )
@@ -1332,6 +1309,15 @@ def run(rank, world_size, args):
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
+    
+    # Create a standalone specaugment module, we won't do
+    # specaug in the dataloading process
+    if params.use_co_training:
+        assert params.enable_spec_aug == False, "When performing co-training, we apply specaugment inside the forward function of the model"
+        specaug = get_spec_augment(params)
+        logging.info("We will perform spec augment for co-training")
+    else:
+        specaug = None
 
     assert params.save_every_n >= params.average_period
     model_avg: Optional[nn.Module] = None
@@ -1645,6 +1631,7 @@ def run(rank, world_size, args):
             optimizer=optimizer,
             scheduler=scheduler,
             sp=sp,
+            specaug=specaug,
             train_dl=train_dl,
             valid_sets=valid_sets,
             valid_dls=valid_dls,
