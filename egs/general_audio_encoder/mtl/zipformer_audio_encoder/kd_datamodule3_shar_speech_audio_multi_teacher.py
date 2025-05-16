@@ -132,6 +132,13 @@ class MultiTaskDataModule:
             "single batch. You can reduce it if it causes CUDA OOM.",
         )
         group.add_argument(
+            "--max-cuts",
+            type=int,
+            default=2000,
+            help="Maximum number of cuts per batch; Useful to adjust this when"
+            "seeing CUDA OOM in zipsampler",
+        )
+        group.add_argument(
             "--num-mel-bins",
             type=int,
             default=128,
@@ -285,6 +292,20 @@ class MultiTaskDataModule:
             help="If load speaker embedding instead of speaker identity"
         )
         
+        group.add_argument(
+            "--speech-target-frame-rate",
+            type=int,
+            default=50,
+            help="The speech target's frame rate in Hz"
+        )
+        
+        group.add_argument(
+            "--audio-target-frame-rate",
+            type=int,
+            default=25,
+            help="The audio target's frame rate in Hz"
+        )
+        
         # multi task dataset related
         group.add_argument(
             "--use-librispeech",
@@ -309,6 +330,12 @@ class MultiTaskDataModule:
             type=str,
             default="m",
             choices=["xs", "s", "m", "l", "xl"]
+        )
+        
+        group.add_argument(
+            "--repeat-gigaspeech",
+            type=int,
+            default=1,
         )
         
         group.add_argument(
@@ -493,6 +520,8 @@ class MultiTaskDataModule:
             return_cuts=self.args.return_cuts,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD,
+            speech_target_frame_rate=self.args.speech_target_frame_rate,
+            audio_target_frame_rate=self.args.audio_target_frame_rate
         )
 
         if self.args.on_the_fly_feats:
@@ -513,6 +542,8 @@ class MultiTaskDataModule:
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
             )
 
         if self.args.bucketing_sampler:
@@ -552,6 +583,7 @@ class MultiTaskDataModule:
                     sampler = DynamicBucketingSampler(
                         cuts,
                         max_duration=md,
+                        max_cuts=self.args.max_cuts,
                         shuffle=self.args.shuffle,
                         num_buckets=self.args.num_buckets,
                         buffer_size=self.args.num_buckets * 1500,
@@ -661,14 +693,18 @@ class MultiTaskDataModule:
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
             )
         else:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -854,7 +890,13 @@ class MultiTaskDataModule:
     @lru_cache()
     def gigaspeech_dev_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.speech_shar_dir)}/gigaspeech/dev",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
 
     @lru_cache()
     def gigaspeech_test_cuts(self) -> CutSet:

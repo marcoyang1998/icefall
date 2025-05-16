@@ -81,7 +81,9 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
         at_KD: bool = False,
-        sv_KD: bool = False
+        sv_KD: bool = False,
+        speech_target_frame_rate: int = 50,
+        audio_target_frame_rate: int = 25,
     ):
         """
         IterableDataset constructor.
@@ -96,6 +98,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             Examples: normalization, SpecAugment, etc.
         :param input_strategy: Converts cuts into a collated batch of audio/features.
             By default, reads pre-computed features from disk.
+        :param speech_target_frame_rate: The label frame rate for speech data.
+        :param audio_target_frame_rate: The label frame rate for audio data
         """
         super().__init__()
         # Initialize the fields
@@ -107,6 +111,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.at_KD = at_KD
         self.sv_KD = sv_KD
         
+        self.speech_target_frame_rate = speech_target_frame_rate
+        self.audio_target_frame_rate = audio_target_frame_rate
         self.dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
         self.dummy_audio_logits = torch.ones(527) * 0.5
 
@@ -167,7 +173,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             dummy=self.dummy_codebook_indexes,
             temporal_array=True,
             pad_value=-100,
-            frame_rate=50,
+            frame_rate=self.speech_target_frame_rate,
         )
         
         audio_mvq_tokens, audio_mvq_token_lens = _collate_custom_field(
@@ -176,7 +182,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             dummy=self.dummy_codebook_indexes,
             temporal_array=True,
             pad_value=-100,
-            frame_rate=25,
+            frame_rate=self.audio_target_frame_rate,
         )
         
         if self.at_KD:
@@ -323,7 +329,6 @@ if __name__=="__main__":
         temporal_array=True,
         pad_value=-100
     )
-    import pdb; pdb.set_trace()
     print(gt_mvq_tokens)
     
     gt_beats_embed = collate_custom_field(augmented_cuts, "beats_embedding")
