@@ -436,7 +436,6 @@ def decode_one_batch(
 
     supervisions = batch["supervisions"]
 
-    # import pdb; pdb.set_trace()
     encoder_out, encoder_out_lens = model.forward_encoder(batch)
     if params.post_norm:
         encoder_out = model.norm(encoder_out)

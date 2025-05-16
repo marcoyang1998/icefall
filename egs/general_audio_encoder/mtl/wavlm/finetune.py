@@ -168,6 +168,13 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
     )
+    
+    parser.add_argument(
+        "--set-eval",
+        type=str2bool,
+        default=False,
+        help="If setting the modules to evaluation mode",
+    )
 
 
 def add_model_arguments(parser: argparse.ArgumentParser):
@@ -726,7 +733,7 @@ def save_checkpoint(
     if isinstance(model, DDP):
         model = model.module
 
-    if params.freeze_encoder:
+    if not params.freeze_encoder:
         checkpoint = {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict() if optimizer is not None else None,
@@ -756,12 +763,15 @@ def save_checkpoint(
         
         if model_avg is not None:
             avg_state_dict = model_avg.to(torch.float32).state_dict()
-            model_avg_state_dict = {k: state_dict[k] for k in avg_state_dict if "encoder." not in k } # remove the encoder parameters
+            model_avg_state_dict = {k: avg_state_dict[k] for k in avg_state_dict if "encoder." not in k } # remove the encoder parameters
             checkpoint["model_avg"] = model_avg_state_dict
             
-
+    if params:
+        for k, v in params.items():
+            assert k not in checkpoint
+            checkpoint[k] = v
+            
     torch.save(checkpoint, filename)
-
 
     if params.best_train_epoch == params.cur_epoch:
         best_train_filename = params.exp_dir / "best-train-loss.pt"
@@ -798,6 +808,11 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
+    if params.freeze_encoder and params.set_eval:
+        if isinstance(model, DDP):
+            model.module.encoder.eval()
+        else:
+            model.encoder.eval()
     
     feature_lens = batch["audio_lens"] # WavLM is 50 Hz
 
@@ -1035,7 +1050,7 @@ def train_one_epoch(
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
                 if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
+                    # save_bad_model(suffix="-first-warning")
                     saved_bad_model = True
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
@@ -1142,6 +1157,8 @@ def run(rank, world_size, args):
 
     logging.info("About to create model")
     model = get_model(params)
+    if params.freeze_encoder and params.set_eval:
+        model.encoder.eval()
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
@@ -1151,8 +1168,6 @@ def run(rank, world_size, args):
     if rank == 0:
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
-
-    
     
     checkpoints = load_checkpoint_if_available(
         params=params, model=model, model_avg=model_avg
@@ -1163,8 +1178,13 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
+    if params.freeze_encoder:
+        freeze_modules = ["encoder"]
+    else:
+        freeze_modules = []
+    
     optimizer = ScaledAdam(
-        get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
+        get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True, freeze_modules=freeze_modules),
         lr=params.base_lr,  # should have no effect
         clipping_scale=2.0,
     )
@@ -1263,7 +1283,7 @@ def run(rank, world_size, args):
             tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
 
         params.cur_epoch = epoch
-
+        
         train_one_epoch(
             params=params,
             model=model,

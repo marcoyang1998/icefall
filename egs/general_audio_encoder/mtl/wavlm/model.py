@@ -43,7 +43,7 @@ class WavlmModel(torch.nn.Module):
             ret_layer_results=True
         )
         
-        layer_results = [res.permute(1,0,2).cpu().numpy() for res, _ in layer_results] # list of (B,T,C)
+        layer_results = [res.permute(1,0,2) for res, _ in layer_results] # list of (B,T,C)
         layer_results = layer_results[layer_idx] # (B,T,C)
         embedding_lens = (~padding_mask).sum(dim=-1)
         
