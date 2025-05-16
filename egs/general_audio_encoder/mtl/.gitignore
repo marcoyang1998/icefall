@@ -7,3 +7,5 @@ ASR_data
 icefall-*
 data_new
 data_s3
+figures
+*.png
