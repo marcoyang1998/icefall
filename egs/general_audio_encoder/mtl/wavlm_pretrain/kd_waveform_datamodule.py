@@ -31,7 +31,6 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     CutConcatenate,
     CutMix,
     DynamicBucketingSampler,
-    K2SpeechRecognitionDataset,
     ReverbWithImpulseResponse,
     SimpleCutSampler,
     ZipSampler,
@@ -41,12 +40,11 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
 )
 from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
     AudioSamples,
-    OnTheFlyFeatures,
 )
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
-from dataset2_npy import MultiTaskKDDataset
+from dataset_waveform import MultiTaskKDDataset
 from icefall.utils import str2bool
 
 
@@ -216,8 +214,8 @@ class MultiTaskDataModule:
         group.add_argument(
             "--enable-spec-aug",
             type=str2bool,
-            default=True,
-            help="When enabled, use SpecAugment for training dataset.",
+            default=False,
+            help="We don't apply specaug to raw waveform",
         )
 
         group.add_argument(
@@ -473,6 +471,7 @@ class MultiTaskDataModule:
             ] + transforms
 
         input_transforms = []
+        assert not self.args.enable_spec_aug
         if self.args.enable_spec_aug:
             logging.info("Enable SpecAugment")
             logging.info(f"Time warp factor: {self.args.spec_aug_time_warp_factor}")
@@ -506,7 +505,7 @@ class MultiTaskDataModule:
 
         logging.info("About to create train dataset")
         train = MultiTaskKDDataset(
-            input_strategy=eval(self.args.input_strategy)(),
+            input_strategy=AudioSamples(),
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
@@ -527,7 +526,7 @@ class MultiTaskDataModule:
             # Drop feats to be on the safe side.
             train = MultiTaskKDDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=self.args.num_mel_bins))),
+                input_strategy=AudioSamples(),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
@@ -677,7 +676,7 @@ class MultiTaskDataModule:
         if self.args.on_the_fly_feats:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
-                input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
+                input_strategy=AudioSamples(),
                 return_cuts=self.args.return_cuts,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
@@ -715,9 +714,7 @@ class MultiTaskDataModule:
     ) -> DataLoader:
         logging.debug("About to create test dataset")
         test = MultiTaskKDDataset(
-            input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128)))
-            if self.args.on_the_fly_feats
-            else eval(self.args.input_strategy)(),
+            input_strategy=AudioSamples(),
             return_cuts=self.args.return_cuts,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD

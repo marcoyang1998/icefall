@@ -139,15 +139,14 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         # Get a tensor with batched feature matrices, shape (B, T, F)
         # Collation performs auto-padding, if necessary.
-        import pdb; pdb.set_trace()
         input_tpl = self.input_strategy(cuts)
         if len(input_tpl) == 3:
             # An input strategy with fault tolerant audio reading mode.
             # "cuts" may be a subset of the original "cuts" variable,
             # that only has cuts for which we succesfully read the audio.
-            inputs, _, cuts = input_tpl
+            audio, audio_lens, cuts = input_tpl
         else:
-            inputs, _ = input_tpl
+            audio, audio_lens = input_tpl
         
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
@@ -181,7 +180,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         dummy_text = "This is dummy text."
         
         batch = {
-            "inputs": inputs,
+            "audio": audio,
+            "audio_lens": audio_lens,
             "cb_indexes": mvq_tokens,
             "cb_indexes_len": mvq_token_lens,
             "supervisions": default_collate(
@@ -197,8 +197,6 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             "at_targets": at_targets,
             "sv_targets": sv_targets,
         }
-        # Update the 'supervisions' field with sequence_idx and start/num frames/samples
-        batch["supervisions"].update(supervision_intervals)
         if self.return_cuts:
             batch["supervisions"]["cut"] = [
                 cut for cut in cuts for sup in cut.supervisions

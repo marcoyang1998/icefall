@@ -63,15 +63,13 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar import MultiTaskDataModule
+from kd_waveform_datamodule import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_multi_kd import MultiKDModel
 from optim import Eden, ScaledAdam
-from scaling import ScheduledFloat
-from subsampling import Conv2dSubsampling
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -79,7 +77,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils import _add_task_id, MetricsTracker, setup_distributed
 
-from zipformer2 import Zipformer2
+from wavlm_encoder import WavlmModel
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -171,113 +169,50 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
 
 def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--num-encoder-layers",
-        type=str,
-        default="2,2,3,4,3,2",
-        help="Number of zipformer encoder layers per stack, comma separated.",
-    )
-
-    parser.add_argument(
-        "--output-downsampling-factor",
-        type=int,
-        default=2,
-        help="The outout downsampling factor. Default is 2. If 1, no downsample is performed.",
-    )
-
-    parser.add_argument(
-        "--downsampling-factor",
-        type=str,
-        default="1,2,4,8,4,2",
-        help="Downsampling factor for each stack of encoder layers.",
-    )
-
-    parser.add_argument(
-        "--feedforward-dim",
-        type=str,
-        default="512,768,1024,1536,1024,768",
-        help="Feedforward dimension of the zipformer encoder layers, per stack, comma separated.",
-    )
-
-    parser.add_argument(
-        "--num-heads",
-        type=str,
-        default="4,4,4,8,4,4",
-        help="Number of attention heads in the zipformer encoder layers: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
         "--encoder-dim",
-        type=str,
-        default="192,256,384,512,384,256",
+        type=int,
+        default=768,
         help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
     )
 
     parser.add_argument(
-        "--query-head-dim",
+        "--wavlm-version",
         type=str,
-        default="32",
-        help="Query/key dimension per head in encoder stacks: a single int or comma-separated list.",
+        default="base",
+        choices=["base", "large"],
+        help="Which version of WavLM config"
     )
+    
+    parser.add_argument("--mask-length", type=int, default=10, help="mask_length")
 
     parser.add_argument(
-        "--value-head-dim",
-        type=str,
-        default="12",
-        help="Value dimension per head in encoder stacks: a single int or comma-separated list.",
+        "--mask-prob",
+        type=float,
+        default=0.65,
+        help="probability of replacing a token with mask",
     )
-
+    
     parser.add_argument(
-        "--pos-head-dim",
-        type=str,
-        default="4",
-        help="Positional-encoding dimension per head in encoder stacks: a single int or comma-separated list.",
-    )
-
-    parser.add_argument(
-        "--pos-dim",
+        "--mask-channel-length",
         type=int,
-        default="48",
-        help="Positional-encoding embedding dimension",
+        default=10,
+        help="length of the mask for features (channels)",
     )
 
     parser.add_argument(
-        "--encoder-unmasked-dim",
-        type=str,
-        default="192,192,256,256,256,192",
-        help="Unmasked dimensions in the encoders, relates to augmentation during training.  "
-        "A single int or comma-separated list.  Must be <= each corresponding encoder_dim.",
+        "--mask-channel-prob",
+        type=float,
+        default=0.0,
+        help="probability of replacing a feature with 0",
     )
-
-    parser.add_argument(
-        "--cnn-module-kernel",
-        type=str,
-        default="31,31,15,15,15,31",
-        help="Sizes of convolutional kernels in convolution modules in each encoder stack: "
-        "a single int or comma-separated list.",
-    )
+    
+    parser.add_argument
 
     parser.add_argument(
         "--causal",
         type=str2bool,
         default=False,
         help="If True, use causal version of model.",
-    )
-
-    parser.add_argument(
-        "--chunk-size",
-        type=str,
-        default="16,32,64,-1",
-        help="Chunk sizes (at 50Hz frame rate) will be chosen randomly from this list during training. "
-        " Must be just -1 if --causal=False",
-    )
-
-    parser.add_argument(
-        "--left-context-frames",
-        type=str,
-        default="64,128,256,-1",
-        help="Maximum left-contexts for causal training, measured in frames which will "
-        "be converted to a number of chunks.  If splitting into chunks, "
-        "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
     parser.add_argument(
@@ -654,8 +589,7 @@ def get_params() -> AttributeDict:
             "reset_interval": 200,
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
-            "feature_dim": 128, # for better audio capability 
-            "subsampling_factor": 4,  # not passed in, this is fixed.
+            "subsampling_factor": 320,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for multitask
@@ -666,70 +600,28 @@ def get_params() -> AttributeDict:
     return params
 
 
-def _to_int_tuple(s: str):
-    return tuple(map(int, s.split(",")))
-
-def get_encoder_embed(params: AttributeDict) -> nn.Module:
-    # encoder_embed converts the input of shape (N, T, num_features)
-    # to the shape (N, (T - 7) // 2, encoder_dims).
-    # That is, it does two things simultaneously:
-    #   (1) subsampling: T -> (T - 7) // 2
-    #   (2) embedding: num_features -> encoder_dims
-    # In the normal configuration, we will downsample once more at the end
-    # by a factor of 2, and most of the encoder stacks will run at a lower
-    # sampling rate.
-    encoder_embed = Conv2dSubsampling(
-        in_channels=params.feature_dim,
-        out_channels=_to_int_tuple(params.encoder_dim)[0],
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
-    )
-    return encoder_embed
-
-
 def get_encoder_model(params: AttributeDict) -> nn.Module:
-    encoder = Zipformer2(
-        output_downsampling_factor=params.output_downsampling_factor,
-        downsampling_factor=_to_int_tuple(params.downsampling_factor),
-        num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
-        encoder_dim=_to_int_tuple(params.encoder_dim),
-        encoder_unmasked_dim=_to_int_tuple(params.encoder_unmasked_dim),
-        query_head_dim=_to_int_tuple(params.query_head_dim),
-        pos_head_dim=_to_int_tuple(params.pos_head_dim),
-        value_head_dim=_to_int_tuple(params.value_head_dim),
-        pos_dim=params.pos_dim,
-        num_heads=_to_int_tuple(params.num_heads),
-        feedforward_dim=_to_int_tuple(params.feedforward_dim),
-        cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
-        dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
-        warmup_batches=4000.0,
-        causal=params.causal,
-        chunk_size=_to_int_tuple(params.chunk_size),
-        left_context_frames=_to_int_tuple(params.left_context_frames),
+    encoder = WavlmModel(
+        model_version=params.wavlm_version,
+        mask_prob=params.mask_prob,
+        mask_length=params.mask_length,
+        mask_channel_prob=params.mask_channel_prob,
+        mask_channel_length=params.mask_channel_length,
     )
     return encoder
 
 
 def get_model(params: AttributeDict) -> nn.Module:
 
-    encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
     
     if params.interpolate_teacher:
         logging.warning(f"Interpolate the teacher indexes to match the length of the student")
         assert params.teacher_frame_ratio == 1
-        
-    if params.output_downsampling_factor == 1:
-        logging.info(f"Setting the output downsample factor to 1.")
-        if params.teacher_frame_ratio > 1:
-            logging.warning(
-                f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
-                "However, the output downsampling factor is 1. This could be wrong!"
-            )
 
     model = MultiKDModel(
-        encoder_embed=encoder_embed,
         encoder=encoder,
-        encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        encoder_dim=params.encoder_dim,
         num_codebooks=params.num_codebooks,
         distillation_layer=params.distillation_layer,
         distillation_delta=params.distillation_delta,
@@ -924,15 +816,16 @@ def compute_loss(
         values >= 1.0 are fully warmed up and have all modules present.
     """
     device = model.device if isinstance(model, DDP) else next(model.parameters()).device
-    feature = batch["inputs"]
-    # at entry, feature is (N, T, C)
-    assert feature.ndim == 3
-    feature = feature.to(device)
+    
+    # audio waveform
+    audio_waveform = batch["audio"]
+    assert audio_waveform.ndim == 2
+    audio_waveform = audio_waveform.to(device)
+    audio_lens = batch["audio_lens"].to(device)
 
     supervisions = batch["supervisions"]
     cuts = supervisions["cut"]
         
-    feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
     
     if random.random() < 0.01 and is_training:
@@ -952,8 +845,8 @@ def compute_loss(
     
     with torch.set_grad_enabled(is_training):
         mvq_loss, audio_tagging_loss = model(
-            x=feature,
-            x_lens=feature_lens,
+            x=audio_waveform,
+            x_lens=audio_lens,
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
         )
@@ -983,7 +876,7 @@ def compute_loss(
     info = MetricsTracker()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
+        info["frames"] = (audio_lens // params.subsampling_factor).sum().item()
         info["utterances"] = task_ids.size(0)
 
     # Note: We use reduction=sum while computing the loss.

@@ -31,7 +31,6 @@ from icefall.utils import make_pad_mask
 class MultiKDModel(nn.Module):
     def __init__(
         self,
-        encoder_embed: nn.Module,
         encoder: nn.Module,
         encoder_dim: int,
         num_codebooks: int=8,
@@ -41,17 +40,9 @@ class MultiKDModel(nn.Module):
         interpolate_teacher: bool = False,
         num_events: int = 527
     ):
-        """A joint CTC & Transducer ASR model.
-
-        - Connectionist temporal classification: labelling unsegmented sequence data with recurrent neural networks (http://imagine.enpc.fr/~obozinsg/teaching/mva_gm/papers/ctc.pdf)
-        - Sequence Transduction with Recurrent Neural Networks (https://arxiv.org/pdf/1211.3711.pdf)
-        - Pruned RNN-T for fast, memory-efficient ASR training (https://arxiv.org/pdf/2206.13236.pdf)
+        """A MVQ pretrained encoder
 
         Args:
-          encoder_embed:
-            It is a Convolutional 2D subsampling module. It converts
-            an input of shape (N, T, idim) to an output of of shape
-            (N, T', odim), where T' = (T-3)//2-2 = (T-7)//2.
           encoder:
             It is the transcription network in the paper. Its accepts
             two inputs: `x` of (N, T, encoder_dim) and `x_lens` of shape (N,).
@@ -75,7 +66,6 @@ class MultiKDModel(nn.Module):
         super().__init__()
 
         
-        self.encoder_embed = encoder_embed
         self.encoder = encoder
         self.encoder_dim = encoder_dim
             
@@ -120,16 +110,9 @@ class MultiKDModel(nn.Module):
           encoder_out_lens:
             Encoder output lengths, of shape (N,).
         """
-        # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
-        x, x_lens = self.encoder_embed(x, x_lens)
-        # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
-
         src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
+        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask) # (N,T,C)
 
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
-
-        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
         return encoder_out, encoder_out_lens
@@ -209,7 +192,7 @@ class MultiKDModel(nn.Module):
         N,T,_ = encoder_out.shape
         codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
-        num_cb = codebook_loss.size(-1) * (2 / self.teacher_frame_ratio) # TODO: ugly way to keep the value comparable, need to change
+        num_cb = codebook_loss.size(-1) # TODO: ugly way to keep the value comparable, need to change
         # normalize the loss by the number of codebooks
         codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb
         
