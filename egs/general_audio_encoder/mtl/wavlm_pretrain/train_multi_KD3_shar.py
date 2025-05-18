@@ -353,15 +353,27 @@ def get_parser():
         default="data/lang_bpe_500/bpe.model",
         help="Path to the BPE model",
     )
+    parser.add_argument(
+        "--opt",
+        type=str,
+        default="scaledadam",
+        choices=["adam", "scaledadam"],
+    )
 
     parser.add_argument(
-        "--base-lr", type=float, default=0.045, help="The base learning rate."
+        "--base-lr", type=float, default=0.015, help="The base learning rate."
     )
 
     parser.add_argument(
         "--warmup-batches",
         type=float,
         default=500.0
+    )
+    
+    parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.5
     )
     
     parser.add_argument(
@@ -1211,17 +1223,33 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    parameters = get_parameter_groups_with_lrs(
-        model, lr=params.base_lr, include_names=True
-    )
+    if params.opt == "scaledadam":
+        logging.info(f"Using ScaledAdam as the optimizer, base_lr={params.base_lr}")
+        parameters = get_parameter_groups_with_lrs(
+            model, lr=params.base_lr, include_names=True
+        )
+        optimizer = ScaledAdam(
+            parameters,
+            lr=params.base_lr,  # should have no effect
+            clipping_scale=2.0,
+        )
+    elif params.opt == "adam":
+        logging.info(f"Using Adam as the optimizer, lr={params.base_lr}")
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=params.base_lr,
+            betas=(0.9, 0.98),
+        )
+    else:
+        raise ValueError()
 
-    optimizer = ScaledAdam(
-        parameters,
-        lr=params.base_lr,  # should have no effect
-        clipping_scale=2.0,
+    scheduler = Eden(
+        optimizer,
+        params.lr_batches,
+        params.lr_epochs,
+        warmup_batches=params.warmup_batches,
+        warmup_start=params.warmup_start,
     )
-
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs, warmup_batches=params.warmup_batches)
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")

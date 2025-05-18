@@ -50,6 +50,8 @@ class LlamaAudioEncoder(nn.Module):
         )
         self.config = config
         self.is_causal = is_causal
+        if is_causal:
+            logging.info("Using causal mask in transformer layers")
         
         self.layers = nn.ModuleList(
             [LlamaEncoderLayer(config, layer_idx, is_causal) for layer_idx in range(config.num_hidden_layers)]
