@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-icefall_root=$(realpath ../../..)
-export PYTHONPATH=${icefall_root}:$PYTHONPATH
+export PYTHONPATH=./../../../:$PYTHONPATH
 # export PYTHONPATH=/mnt/petrelfs/share_data/housiyuan/lhotse:$PYTHONPATH
 
 set -eou pipefail
-
-num_codebooks=16
 
 stage=-1
 stop_stage=-1
@@ -18,20 +15,27 @@ log() {
   echo -e "$(date '+%Y-%m-%d %H:%M:%S') (${fname}:${BASH_LINENO[0]}:${FUNCNAME[1]}) $*"
 }
 
-vq_dir=data/vq_whisper_turbo_zh_en_${num_codebooks}_v2_numpy
+num_codebooks=16
+embedding_layer=-1
+vq_dir=data/vq_whisper_turbo_giga_cb_${num_codebooks}
+prefix_folder=/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/whisper_turbo_layer_${embedding_layer}_giga_cb_${num_codebooks}
 mkdir -p $vq_dir
 
-quantizer_path=data/quantizer/whisper-turbo-zh-en-cb-${num_codebooks}-v2.pt
+quantizer_path=data/quantizer/whisper-turbo-giga-cb-${num_codebooks}.pt
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     log "Stage 1: Train the quantizer"
-    python whisper/train_mvq.py \
+    python local/train_mvq.py \
         --embedding-dim 1280 \
         --num-codebooks $num_codebooks \
-        --feature-type h5 \
         --quantizer-path $quantizer_path \
-        data/manifests/aishell_subset-whisper-turbo-layer--1.jsonl.gz \
-        data/manifests/libri_giga_wenet_mix-whisper-turbo-layer--1.jsonl.gz
+        --quantizer-training-manifests \
+            data/manifests/whisper/whisper-turbo-layer--1-giga-sampled.jsonl.gz \
+        --quantizer-evaluation-manifests \
+            data/manifests/whisper/whisper-turbo-layer--1-giga-dev.jsonl.gz \
+            data/manifests/whisper/whisper-turbo-layer--1-giga-xs.jsonl.gz \
+            data/manifests/whisper/whisper-turbo-layer--1-ls-dev-clean.jsonl.gz \
+            data/manifests/whisper/whisper-turbo-layer--1-ls-dev-other.jsonl.gz
 fi
         
 
@@ -40,18 +44,73 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
 
     for subset in dev-clean dev-other; do
         python whisper/extract_whisper_mvq_npy.py \
-            --num-jobs 1 \
+            --num-jobs 2 \
             --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \
             --n-mels 128 \
             --embedding-dim 1280 \
             --num-codebooks $num_codebooks \
             --manifest-name codebook-indexes-libri-${subset} \
-            --s3-prefix "/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/librispeech" \
+            --s3-prefix ${prefix_folder}/LibriSpeech/${subset} \
             --embedding-dir $vq_dir \
             --embedding-layer -1 \
             --quantizer-path $quantizer_path \
-            --max-duration 250
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
+    log "Stage 3: Collect MVQ tokens on LibriSpeech training sets"
+    for subset in train-all-shuf; do
+        python whisper/extract_whisper_mvq_npy.py \
+            --num-jobs 4 \
+            --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \
+            --n-mels 128 \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-libri-${subset} \
+            --s3-prefix ${prefix_folder}/LibriSpeech/${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 30 ] && [ $stop_stage -ge 30 ]; then
+    log "Stage 30: Collect MVQ tokens on AudioSet"
+
+    for subset in balanced eval; do
+        python whisper/extract_whisper_mvq_npy.py \
+            --num-jobs 2 \
+            --input-manifest data/fbank_as_ced_mAP50/audioset_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/audioset_cuts_${subset}.jsonl.gz \
+            --n-mels 128 \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-audioset-${subset} \
+            --s3-prefix ${prefix_folder}/audioset/${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+
+    for subset in full; do
+        python whisper/extract_whisper_mvq_npy.py \
+            --num-jobs 4 \
+            --input-manifest data/fbank_as_ced_mAP50/audioset_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/audioset_cuts_${subset}.jsonl.gz \
+            --n-mels 128 \
+            --embedding-dim 1280 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-audioset-${subset} \
+            --s3-prefix ${prefix_folder}/audioset/${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer -1 \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
     done
 fi
 
@@ -75,36 +134,19 @@ if [ $stage -le 20 ] && [ $stop_stage -ge 20 ]; then
     done
 fi
 
-if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
-    log "Stage 3: Collect MVQ tokens on LibriSpeech training sets"
-    for subset in train-all-shuf; do
-        python whisper/extract_whisper_mvq_client.py \
-            --num-jobs 8 \
-            --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
-            --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \
-            --n-mels 128 \
-            --embedding-dim 1280 \
-            --num-codebooks $num_codebooks \
-            --manifest-name codebook-indexes-libri-${subset} \
-            --embedding-dir $vq_dir \
-            --embedding-layer -1 \
-            --quantizer-path $quantizer_path \
-            --max-duration 200
-    done
-fi
 
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
     log "Stage 4: Collect MVQ tokens on GigaSpeech"
-    for subset in s; do
-        log "Processing $subset"
-        python whisper/extract_whisper_mvq_client.py \
-            --num-jobs 2 \
-            --input-manifest data/fbank_gigaspeech/gigaspeech_cuts_${subset}_raw.jsonl.gz \
+    for subset in m; do
+        python whisper/extract_whisper_mvq_npy.py \
+            --num-jobs 6 \
+            --input-manifest data/fbank_gigaspeech/gigaspeech_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/gigaspeech_cuts_${subset}.jsonl.gz \
             --n-mels 128 \
             --embedding-dim 1280 \
             --num-codebooks $num_codebooks \
             --manifest-name codebook-indexes-giga-${subset} \
+            --s3-prefix ${prefix_folder}/gigaspeech/${subset} \
             --embedding-dir $vq_dir \
             --embedding-layer -1 \
             --quantizer-path $quantizer_path \

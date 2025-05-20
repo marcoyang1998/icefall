@@ -16,10 +16,10 @@ log() {
   echo -e "$(date '+%Y-%m-%d %H:%M:%S') (${fname}:${BASH_LINENO[0]}:${FUNCNAME[1]}) $*"
 }
 
-vq_dir=data/vq_whisper_turbo_zh_en_${num_codebooks}_v2_lh
+vq_dir=data/vq_whisper_turbo_libri_cb_${num_codebooks}
 mkdir -p $vq_dir
 
-quantizer_path=data/quantizer/whisper-turbo-zh-en-cb-${num_codebooks}-v2.pt
+quantizer_path=data/quantizer/whisper-turbo-libri-cb-${num_codebooks}.pt
 # quantizer_path=data/quantizer/whisper-turbo-libri-giga-cb-16.pt
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
@@ -29,8 +29,7 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
         --num-codebooks $num_codebooks \
         --feature-type h5 \
         --quantizer-path $quantizer_path \
-        data/manifests/aishell_subset-whisper-turbo-layer--1.jsonl.gz \
-        data/manifests/libri_giga_wenet_mix-whisper-turbo-layer--1.jsonl.gz
+        data/manifests/whisper/whisper-turbo-layer--1-ls-sampled.jsonl.gz
 fi
         
 
@@ -522,5 +521,21 @@ if [ $stage -le 18 ] && [ $stop_stage -ge 18 ]; then
     done
 fi
 
+if [ $stage -le 20 ] && [ $stop_stage -ge 20 ]; then
+    log "Stage 20: Collect MVQ tokens on Voxceleb1 sets"
+    
+    python whisper/extract_whisper_mvq.py \
+        --num-jobs 1 \
+        --input-manifest data/fbank_voxceleb/vox1_cuts_test.jsonl.gz \
+        --target-manifest-file $vq_dir/vox1_test_cuts.jsonl.gz \
+        --n-mels 128 \
+        --embedding-dim 1280 \
+        --num-codebooks $num_codebooks \
+        --manifest-name codebook-indexes-vox1-test \
+        --embedding-dir $vq_dir \
+        --embedding-layer -1 \
+        --quantizer-path $quantizer_path \
+        --max-duration 200
+fi
 
 log "Done"
