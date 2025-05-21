@@ -277,7 +277,8 @@ class MultiKDModel(nn.Module):
                 [
                     codebook_indexes,
                     torch.full((N,diff,C), -100).to(codebook_indexes.device).to(codebook_indexes.dtype)
-                ]
+                ],
+                dim=1,
             )
         assert codebook_indexes.size(1) == middle_layer_output.size(1) * ratio
         
