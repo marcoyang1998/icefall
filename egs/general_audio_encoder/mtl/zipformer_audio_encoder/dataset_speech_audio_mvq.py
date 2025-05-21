@@ -83,7 +83,9 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         at_KD: bool = False,
         sv_KD: bool = False,
         speech_target_frame_rate: int = 50,
+        num_cb_speech: int = 16,
         audio_target_frame_rate: int = 25,
+        num_cb_audio: int = 16,
     ):
         """
         IterableDataset constructor.
@@ -113,7 +115,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         self.speech_target_frame_rate = speech_target_frame_rate
         self.audio_target_frame_rate = audio_target_frame_rate
-        self.dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
+        self.dummy_codebook_indexes = torch.ones(1510, num_cb_speech) * (-100)
+        self.dummy_audio_codebook_indexes = torch.ones(1510, num_cb_audio) * (-100)
         self.dummy_audio_logits = torch.ones(527) * 0.5
 
         # This attribute is a workaround to constantly growing HDF5 memory
@@ -166,7 +169,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
         # cuts_pre_mixed = fix_start(cuts_pre_mixed)
-        #mvq_tokens, mvq_token_lens = collate_custom_field(cuts_pre_mixed, "codebook_indexes", pad_value=-100)
+        
+        # load speech indexes
         mvq_tokens, mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
             "codebook_indexes",
@@ -176,10 +180,11 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             frame_rate=self.speech_target_frame_rate,
         )
         
+        # load audio cb indexes
         audio_mvq_tokens, audio_mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
             "audio_codebook_indexes",
-            dummy=self.dummy_codebook_indexes,
+            dummy=self.dummy_audio_codebook_indexes,
             temporal_array=True,
             pad_value=-100,
             frame_rate=self.audio_target_frame_rate,
