@@ -13,7 +13,7 @@ model_ckpt=zipformer_audio_encoder/exp-300M-zipformer-non-streaming-lh-large-out
 model_version=300m-lh-large-pretrained
 embedding_layer=5
 
-for subset in dev-clean dev-other sampled; do
+for subset in test-clean dev-clean dev-other sampled; do
     python zipformer_audio_encoder/collect_zipformer_embeddings.py \
         --num-jobs 1 \
         --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \

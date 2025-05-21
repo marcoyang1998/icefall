@@ -24,7 +24,7 @@ normalize=1
 vq_dir=data/vq_zipformer_${model_version}_layer_${embedding_layer}_normalize_${normalize}_cb_${num_codebooks}
 mkdir -p $vq_dir
 
-model_ckpt=zipformer_audio_encoder/exp-300M-zipformer-non-streaming-lh-large-out-ds-2-mask-ratio-1.0-musan-1-rir-0-hubert-large-layer-21-normalized-mvq-cb16-shar/iter-400000-avg-4.pt
+model_ckpt=/cpfs02/user/housiyuan/xiaoyu/workspace/icefall_general_audio_encoder/egs/general_audio_encoder/mtl/zipformer_audio_encoder/exp-300M-zipformer-non-streaming-lh-large-out-ds-2-mask-ratio-1.0-musan-1-rir-0-hubert-large-layer-21-normalized-mvq-cb16-shar/iter-400000-avg-4.pt
 quantizer_path=data/quantizer/zipformer-${model_version}-layer-${embedding_layer}-normalize-${normalize}-cb-${num_codebooks}.pt
 prefix_folder=/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/zipformer_${model_version}_layer_${embedding_layer}_normalized_cb_${num_codebooks}
 
@@ -48,15 +48,19 @@ fi
 
 if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
     log "Stage 2: Collect MVQ tokens on LibriSpeech training sets"
-    for subset in train-all-shuf; do
-        python zipformer/extract_mvq.py \
-            --num-jobs 8 \
-            --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
+    for subset in dev-clean dev-other; do
+        python zipformer_audio_encoder/extract_mvq.py \
+            --num-jobs 1 \
+            --input-manifest  data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \
-            --model-version $model_version \
+            --zipformer-version $model_version \
             --model-ckpt $model_ckpt \
             --embedding-dim $model_dim \
-            --num-codebooks $num_codebooks \
+            --num-cb $num_codebooks \
+            --num-encoder-layers 2,2,4,5,4,2 \
+            --feedforward-dim 512,1024,2048,3072,2048,1024 \
+            --encoder-dim 192,384,768,1024,768,384 \
+            --encoder-unmasked-dim 192,256,320,512,320,256 \
             --manifest-name codebook-indexes-libri-${subset} \
             --s3-prefix $prefix_folder/LibriSpeech/${subset} \
             --embedding-dir $vq_dir \
@@ -66,15 +70,19 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
             --max-duration 400
     done
 
-    for subset in dev-clean dev-other; do
-        python zipformer/extract_mvq.py \
-            --num-jobs 2 \
+    for subset in train-all-shuf; do
+        python zipformer_audio_encoder/extract_mvq.py \
+            --num-jobs 4 \
             --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \
-            --model-version $model_version \
+            --zipformer-version $model_version \
             --model-ckpt $model_ckpt \
             --embedding-dim $model_dim \
-            --num-codebooks $num_codebooks \
+            --num-cb $num_codebooks \
+            --num-encoder-layers 2,2,4,5,4,2 \
+            --feedforward-dim 512,1024,2048,3072,2048,1024 \
+            --encoder-dim 192,384,768,1024,768,384 \
+            --encoder-unmasked-dim 192,256,320,512,320,256 \
             --manifest-name codebook-indexes-libri-${subset} \
             --s3-prefix $prefix_folder/LibriSpeech/${subset} \
             --embedding-dir $vq_dir \

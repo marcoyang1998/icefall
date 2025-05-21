@@ -212,7 +212,7 @@ def extract_embeddings(
     
     device = torch.device("cuda", rank)
     
-    # currently only use the encoder of whisper
+    # currently only use the encoder of zipformer
     logging.info(params)
     model = ZipformerModel(
         encoder_embed=get_encoder_embed(params),
@@ -258,7 +258,7 @@ def extract_embeddings(
         for i, batch in enumerate(dl):
             cuts = batch["cuts"]
             
-            
+            import pdb; pdb.set_trace()
             with torch.cuda.amp.autocast(enabled=True):
                 embeddings, embedding_lens = model.get_embeddings(
                     batch=batch,
