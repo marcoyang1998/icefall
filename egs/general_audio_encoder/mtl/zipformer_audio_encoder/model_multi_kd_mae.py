@@ -28,6 +28,32 @@ from multi_quantization.prediction import JointCodebookLoss
 from icefall.utils import make_pad_mask
 
 
+class MAELoss(torch.nn.Module):
+    def __init__(self, normalize_mode: str):
+        super().__init__()
+        # If True, normalise the target by frame
+        assert normalize_mode in ["frame", "sample", "batch"]
+        self.normalize_mode = normalize_mode
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor,) -> torch.Tensor:
+        if self.normalize_mode == "frame":
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1.e-6)**.5
+        elif self.normalize_mode == "sample":
+            mean = target.mean(dim=(1, 2), keepdim=True) # per sample
+            std = target.std(dim=(1, 2), keepdim=True) + 1e-6
+            target = (target - mean) / std
+        elif self.norm_by_frame == 'batch':
+            mean = target.mean()
+            var = target.var()
+            target = (target - mean) / (var + 1.e-6)**.5
+        
+        # compute the MSE loss
+        loss = (pred - target)**2
+        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+        return loss
+
 class MultiKDModel(nn.Module):
     def __init__(
         self,
@@ -42,7 +68,8 @@ class MultiKDModel(nn.Module):
         teacher_frame_ratio: int = 2,
         interpolate_teacher: bool = False,
         n_mels: int = 128,
-        num_events: int = 527
+        num_events: int = 527,
+        mae_loss_norm: str = "sample",
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -107,6 +134,9 @@ class MultiKDModel(nn.Module):
         else:
             self.codebook_loss_net = None
         
+        self.mae_loss_norm = mae_loss_norm
+        self.mae_loss = MAELoss(mae_loss_norm)
+        
         self.audio_tagging_proj = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(encoder_dim, num_events),
@@ -143,10 +173,68 @@ class MultiKDModel(nn.Module):
 
         return encoder_out, encoder_out_lens
 
+    def forward_decoder(
+        self, x: torch.Tensor, x_lens: torch.Tensor
+    ):
+        """Compute the output of decoder
+
+        Args:
+            x (torch.Tensor): (N,T,C)
+            x_lens (torch.Tensor): (N,)
+        """
+        x = self.decoder_embed(x) # N,T,C
+        
+        src_key_padding_mask = make_pad_mask(x_lens)
+        x = x.permute(1,0,2) # T,N,C
+        
+        decoder_out, decoder_out_lens = self.decoder(x, x_lens, src_key_padding_mask)
+        decoder_out = decoder_out.permute(1,0,2) # N,T,C
+        
+        return decoder_out, decoder_out_lens
+        
+    def forward_mae_loss(
+        self, encoder_out: torch.Tensor, encoder_out_lens: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        # compute the MAE loss
+        decoder_out, decoder_out_lens = self.forward_decoder(
+            encoder_out, encoder_out_lens,
+        )
+        pred = self.decoder_pred(decoder_out) # map to 4 * fbank dim
+        
+        assert pred.shape[2] == target.shape[2]
+        target = self.truncate_target(pred, target)
+        loss = self.mae_loss(pred, target) # (N,T)
+        
+        padding_mask = make_pad_mask(decoder_out_lens)
+        loss = loss * padding_mask
+        return loss
+        
+    @staticmethod
+    def truncate_target(pred: torch.Tensor, target: torch.Tensor):
+        # truncate the target on both sides for better alignment
+        # Only consider the cases where the target is longer
+        # pred: (N,T,C)
+        # target: (N,T,C)
+        assert target.shape[1] >= pred.shape[1]
+        if target.shape[1] == pred.shape[1]:
+            return target
+        diff = target.shape[1] - pred.shape[1]
+        if diff == 1:
+            target = target[:, :-1, :] # throw the last frame
+        else:
+            left = diff // 2
+            right = diff - left
+            target = target[:, left:-right, :] # trim on both sides
+        assert target.shape[1] == pred.shape[1]
+        
+        return target
+        
+    
     def forward(
         self,
         x: torch.Tensor,
         x_lens: torch.Tensor,
+        fbank_target: torch.Tensor,
         codebook_indexes: torch.Tensor = None,
         at_targets: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -157,6 +245,8 @@ class MultiKDModel(nn.Module):
           x_lens:
             A 1-D tensor of shape (N,). It contains the number of frames in `x`
             before padding.
+          fbank_target:
+            The original fbank features
           codebook_indexes:
             Codebook indexes of teacher embeddings
             
@@ -177,17 +267,21 @@ class MultiKDModel(nn.Module):
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
+        # Compute codebook loss
         if codebook_indexes is not None and self.codebook_loss_net is not None:
             codebook_loss = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes)
         else:
             codebook_loss = None
-        
+            
+        # Compute audio tagging loss (if needed)
         if at_targets is not None:
             at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
             at_loss = None
         
-        return codebook_loss, at_loss
+        mae_loss = self.forward_mae_loss(encoder_out, encoder_out_lens, fbank_target)
+        
+        return codebook_loss, at_loss, mae_loss
 
     def forward_codebook_loss(
         self,
@@ -294,129 +388,3 @@ class MultiKDModel(nn.Module):
         codebook_indexes = codebook_indexes.reshape(N, t_expected, C * ratio)
         assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
         return codebook_indexes
-    
-class AudioTaggingModel(nn.Module):
-    def __init__(
-        self,
-        encoder_embed: nn.Module,
-        encoder: nn.Module,
-        encoder_dim: int = 384,
-        num_events: int = 527,
-    ):
-        """An audio tagging model
-
-        Args:
-          encoder_embed:
-            It is a Convolutional 2D subsampling module. It converts
-            an input of shape (N, T, idim) to an output of of shape
-            (N, T', odim), where T' = (T-3)//2-2 = (T-7)//2.
-          encoder:
-            It is the transcription network in the paper. Its accepts
-            two inputs: `x` of (N, T, encoder_dim) and `x_lens` of shape (N,).
-            It returns two tensors: `logits` of shape (N, T, encoder_dim) and
-            `logit_lens` of shape (N,).
-          encoder_dim:
-            Dimension of the encoder.
-          num_event:
-            The number of classes.
-        """
-        super().__init__()
-
-        self.encoder_embed = encoder_embed
-        self.encoder = encoder
-        self.encoder_dim = encoder_dim
-
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(encoder_dim, num_events),
-        )
-
-        # for multi-class classification
-        self.criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
-
-    def forward_encoder(
-        self, x: torch.Tensor, x_lens: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute encoder outputs.
-        Args:
-          x:
-            A 3-D tensor of shape (N, T, C).
-          x_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-
-        Returns:
-          encoder_out:
-            Encoder output, of shape (N, T, C).
-          encoder_out_lens:
-            Encoder output lengths, of shape (N,).
-        """
-        # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
-        x, x_lens = self.encoder_embed(x, x_lens)
-        # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
-
-        src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
-
-        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
-        assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
-
-        return encoder_out, encoder_out_lens
-
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        x_lens: torch.Tensor,
-        target: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Args:
-          x:
-            A 3-D tensor of shape (N, T, C).
-          x_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-          target:
-            The ground truth label of audio events, could be many hot
-        Returns:
-          Return the binary crossentropy loss
-        """
-        assert x.ndim == 3, x.shape
-        assert x_lens.ndim == 1, x_lens.shape
-
-        # Compute encoder outputs
-        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
-
-        # Forward the speaker module
-        logits = self.forward_audio_tagging(
-            encoder_out=encoder_out, encoder_out_lens=encoder_out_lens
-        )  # (N, num_classes)
-
-        loss = self.criterion(logits, target)
-
-        return loss
-
-    def forward_audio_tagging(self, encoder_out, encoder_out_lens):
-        """
-        Args:
-          encoder_out:
-            A 3-D tensor of shape (N, T, C).
-          encoder_out_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-
-        Returns:
-          A 3-D tensor of shape (N, num_classes).
-        """
-        logits = self.classifier(encoder_out)  # (N, T, num_classes)
-        padding_mask = make_pad_mask(encoder_out_lens)
-        logits[padding_mask] = 0
-        logits = logits.sum(dim=1)  # mask the padding frames
-        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(
-            logits
-        )  # normalize the logits
-
-        return logits
