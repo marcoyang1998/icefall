@@ -333,6 +333,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=8,
     )
     
+    parser.add_argument(
+        "--mvq-loss-by-task",
+        type=str2bool,
+        default=True,
+        help="If True, only compute MVQ loss on the task from which the sample is drawn."
+        "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
+    )
+    
 
 
 def get_parser():
@@ -957,8 +965,11 @@ def compute_loss(
 
         # MVQ loss 
         if params.do_mvq:
-            mask = task_ids == 1 # ASR=1
-            mvq_loss = (mvq_loss * mask).sum()
+            if params.mvq_loss_by_task:
+                mask = task_ids == 1 # ASR=1
+                mvq_loss = (mvq_loss * mask).sum()
+            else:
+                mvq_loss = mvq_loss.sum()
             loss += mvq_loss
             
         # AT loss
@@ -1266,7 +1277,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1278,7 +1291,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1305,7 +1318,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True

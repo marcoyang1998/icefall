@@ -501,9 +501,17 @@ def get_parser():
     
     # TODO: make this applicable to more than two losses
     parser.add_argument(
+        "--disjoint",
+        type=str2bool,
+        default=False,
+        help="""Default False, which means compute multi-mvq losses on all data. 
+        Otherwise only compute loss on ASR data"""
+    )
+    
+    parser.add_argument(
         "--mvq-loss-scales",
         type=str,
-        default="0.5,0.5",
+        default="1.0,1.0",
         help="The scale of two mvq losses"
     )
     
@@ -970,7 +978,12 @@ def compute_loss(
         mvq_loss_scales = tuple(map(float, params.mvq_loss_scales.split(",")))
         mvq_loss_values = []
         if params.do_mvq:
-            mask = task_ids == 1 # ASR=1
+            # mask = task_ids == 1 # ASR=1
+            import pdb; pdb.set_trace()
+            if not params.disjoint:
+                mask = task_ids != 0 # compute loss for all data
+            else:
+                mask = task_ids == 1 # ASR=1
             for mvq_loss, scale in zip(mvq_losses, mvq_loss_scales):
                 mvq_loss = (mvq_loss * mask).sum()
                 mvq_loss_values.append(mvq_loss)
@@ -993,7 +1006,7 @@ def compute_loss(
     # Note: We use reduction=sum while computing the loss
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
-        teachers = ["whisper", "firered"]
+        teachers = ["whisper", "dasheng"]
         for i, mvq_loss in enumerate(mvq_loss_values):
             info[f"{teachers[i]}_mvq_loss"] = mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
@@ -1276,7 +1289,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1288,7 +1303,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1315,7 +1330,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1378,7 +1393,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
         
-    
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
@@ -1457,21 +1471,32 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(english_cut_durations)
     
     # combine the asr data into a BIG cut
-    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
-    if len(asr_training_cuts) > 1:
-        asr_training_cuts = CutSet.mux(
-            *asr_training_cuts,
-            weights=asr_training_cuts_lens,
-            stop_early=False,
-        )
+    if len(asr_training_cuts) >= 1:
+        assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+        if len(asr_training_cuts) > 1:
+            asr_training_cuts = CutSet.mux(
+                *asr_training_cuts,
+                weights=asr_training_cuts_lens,
+                stop_early=False,
+            )
+        else:
+            asr_training_cuts = asr_training_cuts[0]
     else:
-        asr_training_cuts = asr_training_cuts[0]
-    
+        asr_training_cuts = CutSet()
     train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
+    train_cuts_duration.append(sum(asr_training_cuts_duration)) # sum of [] is 0
+    
+    # general audio data
+    if params.do_audio_tagging:
+        assert params.use_audioset, "If we do audio tagging, we must use audioset"
+    
+    def change_codebook_indexes(c):
+        c.codebook_indexes2 = c.codebook_indexes
+        del c.codebook_indexes
+        return c
     
     # audio data
-    if params.use_audioset and params.do_audio_tagging:
+    if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
             audioset_cuts = librispeech.audioset_cuts().repeat(
@@ -1490,6 +1515,7 @@ def run(rank, world_size, args):
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+        audioset_cuts = audioset_cuts.map(change_codebook_indexes)
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
@@ -1571,7 +1597,7 @@ def run(rank, world_size, args):
         valid_sets.append("ASR_wenet")
         valid_dls.append(asr_wenet_valid_dl)
      
-    if params.use_audioset and params.do_audio_tagging:
+    if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)

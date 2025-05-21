@@ -501,17 +501,17 @@ def get_parser():
     
     # TODO: make this applicable to more than two losses
     parser.add_argument(
-        "--whisper-mvq-loss-scale",
+        "--speech-mvq-loss-scale",
         type=float,
         default=1.0,
-        help="The scale of whisper mvq losses"
+        help="The scale of speech mvq losses"
     )
 
     parser.add_argument(
-        "--dasheng-mvq-loss-scale",
+        "--audio-mvq-loss-scale",
         type=float,
         default=1.0,
-        help="The scale of dasheng mvq losses"
+        help="The scale of audio mvq losses"
     )
     
     parser.add_argument(
@@ -947,7 +947,6 @@ def compute_loss(
             duration = sum([c.duration for c in cuts if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
             logging.info(f"Total duration of task {t}: {duration}")
-
     # mvq tokens
     mvq_tokens = batch["cb_indexes"]
     mvq_tokens = [tokens.to(device) for tokens in mvq_tokens]
@@ -966,7 +965,7 @@ def compute_loss(
             at_targets=at_targets,
         )
 
-        whisper_mvq_loss, dasheng_mvq_loss = losses[:-1]
+        speech_mvq_loss, audio_mvq_loss = losses[:-1]
         audio_tagging_loss = losses[-1]
         loss = 0.0
 
@@ -976,17 +975,15 @@ def compute_loss(
         # MVQ loss, first is whisper MVQ, second is Dasheng MVQ
         mvq_loss_values = []
         if params.do_mvq:
-            whisper_mask = task_ids == 1 # ASR data task_id=1
-            
-            whisper_mvq_loss = (whisper_mvq_loss * whisper_mask).sum()
-            mvq_loss_values.append(whisper_mvq_loss)
-            loss += whisper_mvq_loss * params.whisper_mvq_loss_scale # TODO: make this an option
+            speech_mask = task_ids == 1 # ASR data task_id=1
+            speech_mvq_loss = (speech_mvq_loss * speech_mask).sum()
+            mvq_loss_values.append(speech_mvq_loss)
+            loss += speech_mvq_loss * params.speech_mvq_loss_scale # TODO: make this an option
 
-            dasheng_mask = task_ids == 2
-            
-            dasheng_mvq_loss = (dasheng_mvq_loss * dasheng_mask).sum()
-            mvq_loss_values.append(dasheng_mvq_loss)
-            loss += dasheng_mvq_loss * params.dasheng_mvq_loss_scale # TODO: make this an option
+            audio_mask = task_ids == 2
+            audio_mvq_loss = (audio_mvq_loss * audio_mask).sum()
+            mvq_loss_values.append(audio_mvq_loss)
+            loss += audio_mvq_loss * params.audio_mvq_loss_scale # TODO: make this an option
             
         # AT loss
         if params.do_audio_tagging:
@@ -996,7 +993,7 @@ def compute_loss(
 
     assert loss.requires_grad == is_training
 
-    info = MetricsTracker()
+    info = MetricsTracker(normalize=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
@@ -1005,7 +1002,7 @@ def compute_loss(
     # Note: We use reduction=sum while computing the loss
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
-        teachers = ["whisper", "dasheng"]
+        teachers = ["speech", "audio"]
         for i, mvq_loss in enumerate(mvq_loss_values):
             info[f"{teachers[i]}_mvq_loss"] = mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
@@ -1024,7 +1021,7 @@ def compute_validation_loss(
     """Run the validation process."""
     model.eval()
 
-    tot_loss = MetricsTracker()
+    tot_loss = MetricsTracker(normalize=True)
 
     for batch_idx, batch in enumerate(valid_dl):
         loss, loss_info = compute_loss(
@@ -1288,7 +1285,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1300,7 +1299,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1327,7 +1326,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1409,8 +1408,8 @@ def run(rank, world_size, args):
         }
         gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(gigaspeech_cuts)
-        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
-        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
+        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset] * params.repeat_gigaspeech)
+        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset] * params.repeat_gigaspeech)
         
     if params.use_wenetspeech:
         wenetspeech_cuts = librispeech.wenetspeech_train_cuts()

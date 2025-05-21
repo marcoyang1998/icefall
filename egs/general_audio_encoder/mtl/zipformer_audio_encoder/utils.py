@@ -141,12 +141,13 @@ def compare_model(state_dict1, state_dict2):
             logging.info(f"Param: {key} is updated from new state dict")
 
 class MetricsTracker(collections.defaultdict):
-    def __init__(self):
+    def __init__(self, normalize: bool = True):
         # Passing the type 'int' to the base-class constructor
         # makes undefined items default to int() which is zero.
         # This class will play a role as metrics tracker.
         # It can record many metrics, including but not limited to loss.
         super(MetricsTracker, self).__init__(int)
+        self.normalize = normalize
 
     def __add__(self, other: "MetricsTracker") -> "MetricsTracker":
         ans = MetricsTracker()
@@ -196,6 +197,9 @@ class MetricsTracker(collections.defaultdict):
         ans = []
         for k, v in self.items():
             if k == "frames" or k == "utterances":
+                continue
+            if not self.normalize:
+                ans.append((k, float(v)))
                 continue
             if ("audio_tagging" in k) or ("speaker_verification" in k):
                 norm_value = (
