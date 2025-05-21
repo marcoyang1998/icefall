@@ -306,6 +306,20 @@ class MultiTaskDataModule:
             help="The audio target's frame rate in Hz"
         )
         
+        group.add_argument(
+            "--num-cb-speech",
+            type=int,
+            default=16,
+            help="Number of codebooks for speech MVQ"
+        )
+        
+        group.add_argument(
+            "--num-cb-audio",
+            type=int,
+            default=25,
+            help="Number of codebooks for audio MVQ"
+        )
+        
         # multi task dataset related
         group.add_argument(
             "--use-librispeech",
@@ -521,9 +535,12 @@ class MultiTaskDataModule:
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD,
             speech_target_frame_rate=self.args.speech_target_frame_rate,
-            audio_target_frame_rate=self.args.audio_target_frame_rate
+            num_cb_speech=self.args.num_cb_speech,
+            audio_target_frame_rate=self.args.audio_target_frame_rate,
+            num_cb_audio=self.args.num_cb_audio,
         )
 
+        assert self.args.on_the_fly_feats
         if self.args.on_the_fly_feats:
             # NOTE: the PerturbSpeed transform should be added only if we
             # remove it from data prep stage.
@@ -543,7 +560,9 @@ class MultiTaskDataModule:
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
                 speech_target_frame_rate=self.args.speech_target_frame_rate,
+                num_cb_speech=self.args.num_cb_speech,
                 audio_target_frame_rate=self.args.audio_target_frame_rate,
+                num_cb_audio=self.args.num_cb_audio,
             )
 
         if self.args.bucketing_sampler:
@@ -695,7 +714,9 @@ class MultiTaskDataModule:
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
                 speech_target_frame_rate=self.args.speech_target_frame_rate,
+                num_cb_speech=self.args.num_cb_speech,
                 audio_target_frame_rate=self.args.audio_target_frame_rate,
+                num_cb_audio=self.args.num_cb_audio,
             )
         else:
             validate = MultiTaskKDDataset(
@@ -704,7 +725,9 @@ class MultiTaskDataModule:
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
                 speech_target_frame_rate=self.args.speech_target_frame_rate,
+                num_cb_speech=self.args.num_cb_speech,
                 audio_target_frame_rate=self.args.audio_target_frame_rate,
+                num_cb_audio=self.args.num_cb_audio,
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
@@ -737,7 +760,11 @@ class MultiTaskDataModule:
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
             at_KD=self.args.at_KD,
-            sv_KD=self.args.sv_KD
+            sv_KD=self.args.sv_KD,
+            speech_target_frame_rate=self.args.speech_target_frame_rate,
+            num_cb_speech=self.args.num_cb_speech,
+            audio_target_frame_rate=self.args.audio_target_frame_rate,
+            num_cb_audio=self.args.num_cb_audio,
         )
         sampler = DynamicBucketingSampler(
             cuts,

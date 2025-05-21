@@ -113,7 +113,13 @@ class MultiTaskDataModule:
             default=False,
         )
         group.add_argument(
-            "--shar-dir",
+            "--speech-shar-dir",
+            type=Path,
+            default=Path("data-shar"),
+            help="Path to directory with train/valid/test cuts.",
+        )
+        group.add_argument(
+            "--audio-shar-dir",
             type=Path,
             default=Path("data-shar"),
             help="Path to directory with train/valid/test cuts.",
@@ -747,7 +753,7 @@ class MultiTaskDataModule:
         )
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/train-all-shuf",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/train-all-shuf",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -770,7 +776,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use share for librispeech dev-clean cuts")
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-clean",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/dev-clean",
                 shuffle_shards=False,
             )
         else:
@@ -783,7 +789,7 @@ class MultiTaskDataModule:
         logging.info("About to get dev-other cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-other",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/dev-other",
                 shuffle_shards=False,
             )
         else:
@@ -825,7 +831,7 @@ class MultiTaskDataModule:
             weights.append(durations[i])
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/gigaspeech/{subset}",
+                    in_dir=f"{str(self.args.speech_shar_dir)}/gigaspeech/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -846,7 +852,13 @@ class MultiTaskDataModule:
     @lru_cache()
     def gigaspeech_dev_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech dev cuts")
-        return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.speech_shar_dir)}/gigaspeech/dev",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
 
     @lru_cache()
     def gigaspeech_test_cuts(self) -> CutSet:
@@ -858,7 +870,7 @@ class MultiTaskDataModule:
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         if self.args.use_shar:
             medium_cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/libriheavy/medium",
+                in_dir=f"{str(self.args.speech_shar_dir)}/libriheavy/medium",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -868,7 +880,7 @@ class MultiTaskDataModule:
             else:
                 assert self.args.libriheavy_subset == "large"
                 large_cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/large",
+                    in_dir=f"{str(self.args.speech_shar_dir)}/libriheavy/large",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -892,7 +904,7 @@ class MultiTaskDataModule:
             num_splits = 10
             all_cuts = []
             for i in range(num_splits):
-                split_dir = f"{str(self.args.shar_dir)}/wenetspeech/L/split_{i}"
+                split_dir = f"{str(self.args.speech_shar_dir)}/wenetspeech/L/split_{i}"
                 logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
                     in_dir=split_dir,
@@ -919,7 +931,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info("Get wenetspeech dev cuts from shar")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/wenetspeech/DEV",
+                in_dir=f"{str(self.args.speech_shar_dir)}/wenetspeech/DEV",
                 shuffle_shards=False,
             )
             return cuts
@@ -945,7 +957,7 @@ class MultiTaskDataModule:
             num_splits = 8
             all_cuts = []
             for i in range(num_splits):
-                split_dir = f"{str(self.args.shar_dir)}/MLS/split_{i}"
+                split_dir = f"{str(self.args.speech_shar_dir)}/MLS/split_{i}"
                 logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
                     in_dir=split_dir,
@@ -977,7 +989,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"{self.args.speech_shar_dir}/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1010,7 +1022,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"{self.args.speech_shar_dir}/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1058,7 +1070,7 @@ class MultiTaskDataModule:
             if not self.args.at_weighted_sampler:
                 if self.args.use_shar:
                     cuts = CutSet.from_shar(
-                        in_dir=f"{str(self.args.shar_dir)}/audioset/full",
+                        in_dir=f"{str(self.args.audio_shar_dir)}/audioset/full",
                         shuffle_shards=True,
                         stateful_shuffle=True,
                         seed="randomized",
@@ -1075,7 +1087,7 @@ class MultiTaskDataModule:
         else:
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/audioset/{self.args.audioset_subset}",
+                    in_dir=f"{str(self.args.audio_shar_dir)}/audioset/{self.args.audioset_subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1092,7 +1104,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use share for audioset eval cuts")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/audioset/eval",
+                in_dir=f"{str(self.args.audio_shar_dir)}/audioset/eval",
                 shuffle_shards=False,
             )
             return cuts
