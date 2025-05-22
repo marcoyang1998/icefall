@@ -74,7 +74,7 @@ class ZipformerModel(torch.nn.Module):
         self.encoder_dim = encoder.encoder_dim
     
     def _get_full_dim_output_impl(self, outputs: List[torch.Tensor], max_depth):
-        output_dim = max(self.encoder_dim)
+        output_dim = max(self.encoder_dim[:max_depth])
         output_pieces = [outputs[-1]]
         cur_dim = self.encoder_dim[max_depth - 1]
         
@@ -258,7 +258,6 @@ def extract_embeddings(
         for i, batch in enumerate(dl):
             cuts = batch["cuts"]
             
-            import pdb; pdb.set_trace()
             with torch.cuda.amp.autocast(enabled=True):
                 embeddings, embedding_lens = model.get_embeddings(
                     batch=batch,

@@ -36,14 +36,14 @@ class MAELoss(torch.nn.Module):
         self.normalize_mode = normalize_mode
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,) -> torch.Tensor:
-        if self.normalize_mode == "frame":
+        if self.normalize_mode == "frame": # adopted by Dasheng
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
         elif self.normalize_mode == "sample":
             mean = target.mean(dim=(1, 2), keepdim=True) # per sample
-            std = target.std(dim=(1, 2), keepdim=True) + 1e-6
-            target = (target - mean) / std
+            var = target.var(dim=(1, 2), keepdim=True)
+            target = (target - mean) / (var + 1e-6)**.5
         elif self.norm_by_frame == 'batch':
             mean = target.mean()
             var = target.var()
@@ -70,6 +70,7 @@ class MultiKDModel(nn.Module):
         n_mels: int = 128,
         num_events: int = 527,
         mae_loss_norm: str = "sample",
+        mae_downsample_factor: int = 4,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -111,8 +112,10 @@ class MultiKDModel(nn.Module):
         self.decoder = decoder
         self.decoder_dim = decoder_dim
         
-        self.decoder_embed = nn.Linear(encoder_dim, decoder_dim)
-        self.decoder_pred = nn.Linear(decoder_dim, n_mels * 4) # we are predicting 4 fbank frames per decoder frame
+        self.fbank_dim = n_mels
+        self.mae_downsample_factor = mae_downsample_factor
+        self.decoder_embed = nn.Linear(encoder_dim, decoder_dim) # projecting encoder_out to decoder dim
+        self.decoder_pred = nn.Linear(decoder_dim, n_mels * mae_downsample_factor) # we are predicting 4 fbank frames per decoder frame
             
         # mvq distillation
         self.distillation_layer = distillation_layer
@@ -200,13 +203,16 @@ class MultiKDModel(nn.Module):
             encoder_out, encoder_out_lens,
         )
         pred = self.decoder_pred(decoder_out) # map to 4 * fbank dim
+        N,T,_ = pred.shape
+        pred = pred.reshape(N, -1, self.fbank_dim)
         
         assert pred.shape[2] == target.shape[2]
         target = self.truncate_target(pred, target)
         loss = self.mae_loss(pred, target) # (N,T)
         
-        padding_mask = make_pad_mask(decoder_out_lens)
+        padding_mask = ~ make_pad_mask(decoder_out_lens * self.mae_downsample_factor)
         loss = loss * padding_mask
+        loss = loss.sum(dim=1) # (N,)
         return loss
         
     @staticmethod
@@ -312,7 +318,7 @@ class MultiKDModel(nn.Module):
         N,T,_ = encoder_out.shape
         codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
-        num_cb = codebook_loss.size(-1) * (2 / self.teacher_frame_ratio) # TODO: ugly way to keep the value comparable, need to change
+        num_cb = codebook_loss.size(-1)
         # normalize the loss by the number of codebooks
         codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb
         

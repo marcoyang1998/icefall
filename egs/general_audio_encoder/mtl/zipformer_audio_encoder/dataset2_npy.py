@@ -243,7 +243,8 @@ def load_codebook_indexes(c):
     info = c.codebook_indexes
     if isinstance(info, dict):
         filename = info["path"]
-        return np.load(filename)
+        with open(filename, "rb") as f:
+            return np.load(f)
     else:
         return c.load_custom("codebook_indexes")
        
