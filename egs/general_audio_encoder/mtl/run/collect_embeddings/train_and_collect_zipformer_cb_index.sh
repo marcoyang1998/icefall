@@ -17,9 +17,9 @@ log() {
 model_name=zipformer
 model_version=300m-lh-large-pretrained
 model_dim=1024
-embedding_layer=5
+embedding_layer=4
 num_codebooks=16
-normalize=1
+normalize=0
 
 vq_dir=data/vq_zipformer_${model_version}_layer_${embedding_layer}_normalize_${normalize}_cb_${num_codebooks}
 mkdir -p $vq_dir
@@ -40,10 +40,10 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
         --quantizer-path $quantizer_path \
         --normalize $normalize \
         --quantizer-training-manifests \
-            data/manifests/zipformer/zipformer-300m-lh-large-pretrained-layer-5-sampled.jsonl.gz \
+            data/manifests/zipformer/zipformer-300m-lh-large-pretrained-layer-4-sampled.jsonl.gz \
         --quantizer-evaluation-manifests \
-            data/manifests/zipformer/zipformer-300m-lh-large-pretrained-layer-5-dev-clean.jsonl.gz \
-            data/manifests/zipformer/zipformer-300m-lh-large-pretrained-layer-5-dev-other.jsonl.gz
+            data/manifests/zipformer/zipformer-300m-lh-large-pretrained-layer-4-dev-clean.jsonl.gz \
+            data/manifests/zipformer/zipformer-300m-lh-large-pretrained-layer-4-dev-other.jsonl.gz
 fi
 
 if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then

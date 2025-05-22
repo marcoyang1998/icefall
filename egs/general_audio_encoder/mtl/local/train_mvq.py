@@ -65,7 +65,7 @@ def get_parser():
     return parser.parse_args()
 
 def normalize_data(data, mean, std):
-    return (data-mean) / std
+    return (data-mean) / (std + 1e-5)
 
 def prepare_data(manifest_list, split=True):
     # split needs to be True to enable shuffling! 
@@ -172,7 +172,6 @@ def main(args):
     device = torch.device("cuda")
     
     if os.path.exists(args.quantizer_path):
-        import pdb; pdb.set_trace()
         logging.info(f"Loading from pre-trained quantizer: {args.quantizer_path}")
         
         quantizer = quantization.Quantizer(
