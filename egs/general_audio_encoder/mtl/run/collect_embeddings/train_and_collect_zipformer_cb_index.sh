@@ -26,7 +26,7 @@ mkdir -p $vq_dir
 
 model_ckpt=/cpfs02/user/housiyuan/xiaoyu/workspace/icefall_general_audio_encoder/egs/general_audio_encoder/mtl/zipformer_audio_encoder/exp-300M-zipformer-non-streaming-lh-large-out-ds-2-mask-ratio-1.0-musan-1-rir-0-hubert-large-layer-21-normalized-mvq-cb16-shar/iter-400000-avg-4.pt
 quantizer_path=data/quantizer/zipformer-${model_version}-layer-${embedding_layer}-normalize-${normalize}-cb-${num_codebooks}.pt
-prefix_folder=/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/zipformer_${model_version}_layer_${embedding_layer}_normalized_cb_${num_codebooks}
+prefix_folder=/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/zipformer_${model_version}_layer_${embedding_layer}_normalize_${normalize}_cb_${num_codebooks}
 
 log "VQ dir: $vq_dir"
 log "Quantizer: $quantizer_path"
