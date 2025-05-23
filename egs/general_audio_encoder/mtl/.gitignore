@@ -9,3 +9,11 @@ data_new
 data_s3
 figures
 *.png
+run/train*.sh
+run/decode*.sh
+run/finetune*.sh
+hubert/*.sh
+dasheng/*.sh
+wavlm/*.sh
+whisper/*.sh
+models
