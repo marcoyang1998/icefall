@@ -15,7 +15,7 @@ do_audio_tagging=0
 at_KD=0 # need to set this to 0 for efficiency
 mvq_KD=0
 
-finetune_ckpt=zipformer_audio_encoder/exp-xlarge-lr-0.04-full-en-zh-baoxiang-data-audio-multi-kd-time-mask-ratio-1.0-shar/iter-350000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-96M-zipformer-non-streaming-lh-largeout-ds-2-mask-ratio-1.0-musan-1-rir-0-whisper-mvq-v2-cb16-shar/iter-100000-avg-2.pt
 
 freeze_encoder=0
 freeze_encoder_steps=2000

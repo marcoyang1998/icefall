@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
+export PYTHONPATH=./../../..:$PYTHONPATH
 
 # data related
 use_librispeech=1
@@ -8,41 +8,45 @@ full_libri=1
 use_gigaspeech=0
 gigaspeech_subset=s
 
-causal=1
+causal=0
 lr=0.02
 
 do_audio_tagging=0
 at_KD=0 # need to set this to 0 for efficiency
 mvq_KD=0
 
-finetune_ckpt=zipformer_audio_encoder/exp-large-full-en-lh-large-audio-multi-kd-audio-mvq-scale-0.2-time-mask-ratio-2.0-shar/iter-248000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-96M-zipformer-non-streaming-lh-large-out-ds-2-mask-ratio-1.0-musan-1-rir-0-hubert-large-layer-21-normalized-mvq-cb16-shar/iter-300000-avg-4.pt
+
+enable_musan=1
+enable_spec_aug=1
+time_warp=80
 
 freeze_encoder=0
 freeze_encoder_steps=-1
-# freeze_encoder=1
-# freeze_encoder_steps=-1
 encoder_lr_scale=0.1
 warmup_batches=0.0
 large_batch_count=0
 
-md=600
+md=750
 
 exp_dir=zipformer_audio_encoder_finetune/exp-finetune-ls-960h-\
 lr-${lr}-causal-${causal}-freeze-encoder-${freeze_encoder}\
--freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-large-en-mvq-audio-mvq-0.2-lr-0.04-shar-250k
+-freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}-time-warp-${time_warp}\
+-from-hubert-large-layer-21-normalized-mvq-lh-large-shar-300k
 
+# exp_dir=zipformer_audio_encoder_finetune/exp-debug
 
 torchrun --nproc_per_node=8 --master_port=19132 \
   zipformer_audio_encoder/finetune_mtl.py \
-    --num-epochs 100 \
+    --num-epochs 60 \
     --use-fp16 1 \
     --start-epoch 1 \
-    --max-iters 100000 \
     --use-librispeech $use_librispeech --full-libri $full_libri \
     --use-gigaspeech $use_gigaspeech --gigaspeech-subset $gigaspeech_subset \
     --exp-dir $exp_dir \
-    --manifest-dir data/fbank_mtl \
+    --manifest-dir data/fbank_librispeech \
+    --enable-musan $enable_musan --enable-spec-aug $enable_spec_aug \
+    --spec-aug-time-warp-factor $time_warp \
     --base-lr $lr \
     --do-audio-tagging $do_audio_tagging \
     --mvq-KD $mvq_KD --at-KD $at_KD \
@@ -52,13 +56,12 @@ torchrun --nproc_per_node=8 --master_port=19132 \
     --warmup-batches $warmup_batches \
     --large-batch-count $large_batch_count \
     --causal $causal \
-    --chunk-size 8,32,64 \
-    --left-context-frames 128,256 \
-    --num-encoder-layers 2,2,4,5,4,2 \
-    --feedforward-dim 512,768,1536,2048,1536,768 \
-    --encoder-dim 192,256,512,768,512,256 \
-    --encoder-unmasked-dim 192,192,256,320,256,192 \
-    --use-shar 1 --shar-dir data-shar-no-feat \
+    --num-encoder-layers 2,2,3,4,3,2 \
+    --feedforward-dim 512,768,1024,1536,1024,768 \
+    --encoder-dim 192,256,448,768,448,192 \
+    --encoder-unmasked-dim 192,192,256,256,256,192 \
+    --joiner-dim 768 --decoder-dim 768 \
+    --use-shar 0 --shar-dir data-shar-no-feat \
     --on-the-fly-feats 1 \
     --max-duration $md
 

@@ -8,9 +8,9 @@ output_ds=2
 teacher_frame_ratio=2
 
 python zipformer_audio_encoder/export.py \
-    --iter 100000 \
-    --avg 2 \
-    --exp-dir zipformer_audio_encoder/exp-96M-zipformer-non-streaming-as-full-dasheng-mvq-cb16-do-at-0-mask-ratio-1.0-musan-1 \
+    --iter 224000 \
+    --avg 4 \
+    --exp-dir zipformer_audio_encoder/exp-96M-zipformer-non-streaming-giga-m-out-ds-2-mask-ratio-1.0-musan-1-rir-0-whisper-turbo-giga-mvq-cb16-shar \
     --output-downsampling-factor $output_ds \
     --use-averaged-model 1 \
     --causal 0 \

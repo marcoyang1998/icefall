@@ -3,8 +3,8 @@
 export PYTHONPATH=/fs-computility/INTERN6/housiyuan/xiaoyu/workspace/icefall_general_encoder:$PYTHONPATH
 export CUDA_VISIBLE_DEVICES="2"
 
-for epoch in 30; do
-    for avg in $(seq 15 -1 10); do
+for epoch in 25; do
+    for avg in 5; do
         for chunk in 8 32 64; do
             for left in 256; do
                 python zipformer_audio_encoder/decode.py \

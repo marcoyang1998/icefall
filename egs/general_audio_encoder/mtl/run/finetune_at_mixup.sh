@@ -24,10 +24,12 @@ mixup_prob=0.5
 enable_spec_aug=1
 time_warp=80
 time_mask_ratio=1.0
+frames_mask_size=100
+features_mask_size=27
 
 # finetune args
 do_finetune=1
-finetune_ckpt=zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-whisper-dasheng-multi-mvq-cb16-do-at-0-mask-ratio-1.0-musan-1/iter-224000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-as-full-96M-zipformer-non-streaming-whisper-libri-as-mvq-cb16-dasheng-large-cb16-scale-0.2,1.0-out-ds-2-mask-ratio-1.0-musan-1-frames-mask-192-features-mask-40/iter-300000-avg-4.pt
 
 freeze_encoder=0
 freeze_encoder_steps=2000
@@ -38,16 +40,16 @@ encoder_lr_scale=0.05
 md=1000
 
 exp_dir=zipformer_audio_encoder_finetune/exp-finetune-as-${audioset_subset}\
--lr-${lr}-causal-${causal}-musan-${enable_musan}-mixup-${mixup_prob}-freeze-encoder-${freeze_encoder}\
--freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-multi-mvq-224k
+-lr-${lr}-causal-${causal}-musan-${enable_musan}-mixup-${mixup_prob}-frames-mask-${frames_mask_size}-features-mask-${features_mask_size}\
+-freeze-encoder-${freeze_encoder}-freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
+-from-AS-full-multi-mvq-whisper-0.2-dasheng-1.0-with-muasn-larger-mask-300k
 
 # exp_dir=zipformer_audio_encoder_finetune/exp-debug
 
-export CUDA_VISIBLE_DEVICES="0,1"
+# export CUDA_VISIBLE_DEVICES="2,3"
 torchrun --nproc_per_node=2 --master_port=19130 \
   zipformer_audio_encoder/finetune_at.py \
-    --num-epochs 50 \
+    --num-epochs 30 \
     --start-epoch 1 \
     --use-fp16 1 \
     --use-librispeech $use_librispeech --full-libri $full_libri \
@@ -57,6 +59,7 @@ torchrun --nproc_per_node=2 --master_port=19130 \
     --base-lr $lr \
     --enable-musan $enable_musan \
     --enable-spec-aug $enable_spec_aug --spec-aug-time-warp-factor $time_warp --time-mask-ratio $time_mask_ratio\
+    --features-mask-size $features_mask_size --frames-mask-size $frames_mask_size \
     --enable-mixup $enable_mixup --mixup-prob $mixup_prob \
     --do-asr $do_asr \
     --do-audio-tagging $do_audio_tagging \
