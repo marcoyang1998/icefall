@@ -56,30 +56,120 @@ def convert():
     #     print(f"Saving to {target_manifest}")
     #     cuts.to_jsonl(target_manifest)
 
+def convert_audioset():
+    old_folder = f"data/vq_dasheng_large_layer_-1_normalize_0_cb_4/"
+    new_folder = f"data_s3/vq_dasheng_large_layer_-1_normalize_0_cb_4/"
+    
+    os.makedirs(new_folder, exist_ok=True)
+    
+    def change_eval_source(c):
+        source = c.recording.sources[0].source
+        source = source.replace(
+            "/mnt/workspace/xiaoyu/workspace/icefall_prompt_multi_task/egs/librispeech/ASR/download/audioset/eval/", 
+            "brainllm:s3://yangxiaoyu/audioset/eval/wav_all/"
+        )
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
+    
+    def change_source(c):
+        source = c.recording.sources[0].source
+        source = source.replace(
+            "/mnt/workspace/xiaoyu/workspace/icefall_prompt_multi_task/egs/librispeech/ASR/download/audioset/", 
+            "brainllm:s3://yangxiaoyu/audioset/"
+        )
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
+    
+    subsets = ["balanced", "full", "eval"]
+    for subset in subsets:
+        manifest_name = f"audioset_cuts_{subset}.jsonl.gz"
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+        cuts = load_manifest_lazy(old_folder + manifest_name)
+        if subset == "eval":
+            cuts = cuts.map(change_eval_source)
+        else:
+            cuts = cuts.map(change_source)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+        
+    print(f"Finished")
+
+def convert_audioset2():
+    old_folder = f"data/fbank_as_ced_mAP50/"
+    new_folder = f"data_s3/fbank_as_ced_mAP50/"
+    
+    os.makedirs(new_folder, exist_ok=True)
+    
+    def change_eval_source(c):
+        source = c.recording.sources[0].source
+        source = source.replace(
+            "download/audioset/eval/wav_all/", 
+            "brainllm:s3://yangxiaoyu/audioset/eval/wav_all/"
+        )
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
+    
+    def change_source(c):
+        source = c.recording.sources[0].source
+        source = source.replace(
+            "download/audioset/", 
+            "brainllm:s3://yangxiaoyu/audioset/"
+        )
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        return c
+    
+    subsets = ["balanced", "full", "eval"]
+    for subset in subsets:
+        manifest_name = f"audioset_cuts_{subset}.jsonl.gz"
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+        cuts = load_manifest_lazy(old_folder + manifest_name)
+        if subset == "eval":
+            cuts = cuts.map(change_eval_source)
+        else:
+            cuts = cuts.map(change_source)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+        
+    print(f"Finished")
+
+
 def convert_libriheavy():
-    subset = "large"
-    old_folder = f"data/vq_whisper_turbo_zh_en_16_v2/libriheavy_{subset}_split/"
-    new_folder = f"data_s3/vq_whisper_turbo_zh_en_16_v2/libriheavy_{subset}_split/"
+    old_folder = f"data/vq_whisper_turbo_zh_en_16_v2_numpy/"
+    new_folder = f"data_s3/vq_whisper_turbo_zh_en_16_v2_numpy/"
     
     os.makedirs(new_folder, exist_ok=True)
     
     def change_source(c):
         source = c.recording.sources[0].source
-        # source = source.replace("/fs-computility/INTERN6/shared/yangxiaoyu/", "s3://yangxiaoyu/")
-        # source = source.replace("/fs-computility/INTERN6/shared/yangxiaoyu/ASR_data/", "ASR:s3://ASR_20T/ASR_full_data/")
         source = source.replace("download/", "langchao2:s3://libriheavy/download/")
         c.recording.sources[0].source = source
         c.recording.sources[0].type = "url"
+        
+        cb_source = c.codebook_indexes["path"]
+        cb_source = cb_source.replace(
+            "/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/",
+            "/mnt/petrelfs/zhangchen/xiaoyu/codebook_indexes/",
+        )
+        c.codebook_indexes["path"] = cb_source
         return c
     
-    # datasets = ["peoplespeech", "common_voice_20200622"]
-    # datasets += ["en_us_english", "en8848", "ljspeech", "tatoeba", "ted", "vctk", "voase", "voaSplider"]
+    subsets = ["small", "medium", "large"]
     
-    datasets = [str(i) for i in range(25)]
-    
-    for dataset in datasets:
-        manifest_name = f"libriheavy_cuts_{subset}.{dataset}.processed.jsonl.gz"
-        print(f"Start converting split {dataset}.")
+    for subset in subsets:
+        manifest_name = f"libriheavy_cuts_{subset}.jsonl.gz"
+        print(f"Start converting {subset}.")
         target_manifest = new_folder + manifest_name
         if os.path.exists(target_manifest):
             print(f"Manifest already generated, skipping it")
@@ -87,8 +177,129 @@ def convert_libriheavy():
         cuts = load_manifest_lazy(old_folder + manifest_name)
         
         cuts = cuts.map(change_source)
-        audio = cuts[0].load_audio()
-        print(audio.shape)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+        
+def convert_libriheavy_split():
+    old_folder = f"data/vq_hubert_large_layer_21_normalize_1_cb_16/"
+    new_folder = f"data_s3/vq_hubert_large_layer_21_normalize_1_cb_16/"
+    
+    os.makedirs(new_folder, exist_ok=True)
+    
+    def change_source(c):
+        source = c.recording.sources[0].source
+        new_source = "brainllm:s3://yangxiaoyu/librilight_split/" + c.id + ".flac"
+        c.recording.sources[0].source = new_source
+        c.recording.sources[0].type = "url"
+        
+        cb_source = c.codebook_indexes["path"]
+        cb_source = cb_source.replace(
+            "/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/",
+            "brainllm:s3://yangxiaoyu/codebook_indexes/",
+        )
+        c.codebook_indexes["path"] = cb_source
+        c.start = 0.0 # because we use short audio
+        return c
+    
+    subsets = ["small", "medium", "large"]
+    
+    for subset in subsets:
+        manifest_name = f"libriheavy_cuts_{subset}.jsonl.gz"
+        print(f"Start converting {subset}.")
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+        cuts = load_manifest_lazy(old_folder + manifest_name)
+        
+        cuts = cuts.map(change_source)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+        
+def convert_gigaspeech():
+    old_folder = f"data/vq_hubert_large_layer_21_normalize_1_cb_16/"
+    new_folder = f"data_s3/vq_hubert_large_layer_21_normalize_1_cb_16/"
+    
+    os.makedirs(new_folder, exist_ok=True)
+    
+    def change_source(c):
+        source = c.recording.sources[0].source
+        new_source = source.replace(
+            "/mnt/workspace/xiaoyu/workspace/icefall_multi_kd/egs/librispeech/ASR/",
+            ""
+        )
+        new_source = new_source.replace(
+            "download/gigaspeech/",
+            "brainllm:s3://yangxiaoyu/gigaspeech/"
+        )
+        c.recording.sources[0].source = new_source
+        c.recording.sources[0].type = "url"
+        
+        cb_source = c.codebook_indexes["path"]
+        cb_source = cb_source.replace(
+            "/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/",
+            "brainllm:s3://yangxiaoyu/codebook_indexes/",
+        )
+        c.codebook_indexes["path"] = cb_source
+        c.start = 0.0 # because we use short audio
+        return c
+    
+    subsets = ["dev", "xs", "s", "m", "l", "xl"]
+    
+    for subset in subsets:
+        manifest_name = f"gigaspeech_cuts_{subset}.jsonl.gz"
+        print(f"Start converting {subset}.")
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+
+        cuts = load_manifest_lazy(old_folder + manifest_name).drop_features()
+        
+        cuts = cuts.map(change_source)
+        
+        print(f"Saving to {target_manifest}")
+        cuts.to_jsonl(target_manifest)
+        
+def convert_librispeech():
+    subset = "large"
+    old_folder = f"data/vq_wavlm_large_layer_21_normalize_1_libri_cb_16/"
+    new_folder = f"data_s3/vq_wavlm_large_layer_21_normalize_1_libri_cb_16/"
+    
+    os.makedirs(new_folder, exist_ok=True)
+    
+    def change_source(c):
+        source = c.recording.sources[0].source
+        source = source.replace(
+            "/mnt/workspace/xiaoyu/workspace/icefall_prompt_multi_task/egs/librispeech/ASR/download/", 
+            "brainllm:s3://yangxiaoyu/"
+        )
+        c.recording.sources[0].source = source
+        c.recording.sources[0].type = "url"
+        
+        if isinstance(c.codebook_indexes, dict):
+            cb_source = c.codebook_indexes["path"]
+            cb_source = cb_source.replace(
+                "/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/",
+                "/mnt/petrelfs/zhangchen/xiaoyu/codebook_indexes/",
+            )
+            c.codebook_indexes["path"] = cb_source
+        return c
+    
+    subsets = ["dev-clean", "dev-other", "train-all-shuf"]
+    
+    for subset in subsets:
+        manifest_name = f"librispeech_cuts_{subset}.jsonl.gz"
+        print(f"Start converting {subset}.")
+        target_manifest = new_folder + manifest_name
+        if os.path.exists(target_manifest):
+            print(f"Manifest already generated, skipping it")
+            continue
+        cuts = load_manifest_lazy(old_folder + manifest_name)
+        
+        cuts = cuts.map(change_source)
         
         print(f"Saving to {target_manifest}")
         cuts.to_jsonl(target_manifest)
@@ -127,6 +338,11 @@ def convert_mls():
         cuts.to_jsonl(target_manifest)
 
 if __name__=="__main__":
-    convert()
+    # convert_audioset()
+    # convert_audioset2()
+    # convert_libriheavy()
+    # convert_libriheavy_split()
+    # convert_librispeech()
+    convert_gigaspeech()
         
         
