@@ -216,6 +216,9 @@ def extract_embeddings(
             else:
                 filename = "/".join(cut.id.split("-")[:2]) + "/" + cut.id
             output_path = f"{params.s3_prefix}/{filename}.npy"
+            if os.path.exists(output_path):
+                logging.info(f"This codebook file has already been generated. Please check if you are doing correctly!")
+                
             base_dir, filename = output_path.rsplit("/", 1)
             os.makedirs(base_dir, exist_ok=True)
             np.save(output_path, cb_index)
