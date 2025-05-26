@@ -385,6 +385,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--mvq-loss-by-task",
+        type=str2bool,
+        default=False,
+        help="If True, only compute MVQ loss on the task from which the sample is drawn."
+        "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
+    )
+    
+    parser.add_argument(
         "--mae-downsample-factor",
         type=int,
         default=4,
@@ -1098,11 +1106,15 @@ def compute_loss(
         
         # MVQ loss, first is whisper MVQ, second is Dasheng MVQ
         if params.do_mvq:
-            mask = task_ids == 1 # ASR=1
-            mvq_loss = (mvq_loss * mask).sum()
-            loss += mvq_loss
+            if params.mvq_loss_by_task:
+                mask = task_ids == 1 # ASR=1
+                mvq_loss = (mvq_loss * mask).sum()
+                mae_loss = (mae_loss * mask).sum()
+            else:
+                mvq_loss = mvq_loss.sum()
+                mae_loss = mae_loss.sum()
             
-            mae_loss = (mae_loss * mask).sum()
+            loss += mvq_loss
             loss += mae_loss * params.mae_loss_scale
             
         # AT loss
@@ -1419,7 +1431,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1431,7 +1445,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1468,7 +1482,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1609,9 +1623,9 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(english_cuts_len)
         asr_training_cuts_duration.append(english_cut_durations)
     
-    # combine the asr data into a BIG cut
-    if len(asr_training_cuts) >= 1:
-        assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+    # If asr cuts are ever used
+    if len(asr_training_cuts) >= 1:    
+        # combine the asr data into a BIG cut
         if len(asr_training_cuts) > 1:
             asr_training_cuts = CutSet.mux(
                 *asr_training_cuts,
@@ -1620,19 +1634,13 @@ def run(rank, world_size, args):
             )
         else:
             asr_training_cuts = asr_training_cuts[0]
-    else:
-        asr_training_cuts = CutSet()
-    train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
+    
+        train_cuts["cuts_asr"] = asr_training_cuts
+        train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # general audio data
     if params.do_audio_tagging:
         assert params.use_audioset, "If we do audio tagging, we must use audioset"
-        
-    def change_codebook_indexes(c):
-        c.audio_codebook_indexes = c.codebook_indexes
-        del c.codebook_indexes
-        return c
         
     if params.use_audioset:
         logging.info(f"Getting audioset cuts")
@@ -1653,7 +1661,6 @@ def run(rank, world_size, args):
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
-        audioset_cuts = audioset_cuts.map(change_codebook_indexes)
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
@@ -1738,7 +1745,6 @@ def run(rank, world_size, args):
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
-        as_eval_cuts = as_eval_cuts.map(change_codebook_indexes)
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
