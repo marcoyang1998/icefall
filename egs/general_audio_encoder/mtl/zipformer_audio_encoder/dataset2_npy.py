@@ -1,4 +1,5 @@
 import math
+import io
 from typing import Callable, Dict, List, Union
 
 import torch
@@ -11,6 +12,10 @@ from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
 from lhotse.dataset.collation import collate_custom_field
 from lhotse.utils import compute_num_frames, ifnone
 from lhotse.workarounds import Hdf5MemoryIssueFix
+
+from petrel_client.client import Client
+S3_CONFIG = "/mnt/petrelfs/zhangchen/petreloss.conf"
+GLOBAL_S3_CLIENT = Client(S3_CONFIG)
 
 def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     # generate multi-hot class labels
@@ -243,9 +248,14 @@ def load_codebook_indexes(c):
     info = c.codebook_indexes
     if isinstance(info, dict):
         filename = info["path"]
-        return np.load(filename)
+        if "s3://" in filename:
+            data = GLOBAL_S3_CLIENT.get(filename)
+            cb_index = np.load(io.BytesIO(data))
+        else:
+            cb_index = np.load(filename)
     else:
-        return c.load_custom("codebook_indexes")
+        cb_index = c.load_custom("codebook_indexes")
+    return cb_index
        
 def _collate_custom_field(
     cuts: CutSet, 

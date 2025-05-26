@@ -530,6 +530,7 @@ class MultiTaskDataModule:
             # Drop feats to be on the safe side.
             if self.args.enable_mixup:
                 mixup_cuts = load_manifest(f"{self.args.manifest_dir}/audioset_cuts_balanced.jsonl.gz").drop_features()
+                logging.info("Using the audioset balanced cuts as mixup cuts")
             else:
                 mixup_cuts = None
                 
@@ -616,12 +617,25 @@ class MultiTaskDataModule:
                 merge_batches=True,
             )
         else:
-            logging.info("Using SimpleCutSampler.")
-            train_sampler = SimpleCutSampler(
-                cuts_train,
-                max_duration=self.args.max_duration,
-                shuffle=self.args.shuffle,
-            )
+            assert len(cuts_train) == 1, f"The training cuts contain {len(cuts_train)} cutsets"
+            cuts_train = list(cuts_train.values())[0]
+            if self.args.at_weighted_sampler:
+                weights = self.audioset_sampling_weights()
+                train_sampler = WeightedSimpleCutSampler(
+                    cuts_train,
+                    weights,
+                    num_samples=self.args.at_num_samples,
+                    max_duration=self.args.max_duration,
+                    shuffle=False,  # do not support shuffle
+                    drop_last=self.args.drop_last,
+                )
+            else:
+                logging.info("Using SimpleCutSampler.")
+                train_sampler = SimpleCutSampler(
+                    cuts_train,
+                    max_duration=self.args.max_duration,
+                    shuffle=self.args.shuffle,
+                )
         logging.info("About to create train dataloader")
 
         if sampler_state_dict is not None:
