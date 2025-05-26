@@ -71,7 +71,7 @@ from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_multi_kd import MultiKDModel
 from optim import Eden, ScaledAdam
-from subsampling import Conv2dSubsampling
+from subsampling import Conv2dSubsampling, Conv2dSubsampling4
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -276,6 +276,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If True, only compute MVQ loss on the task from which the sample is drawn."
         "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
+    )
+    
+    parser.add_argument(
+        "--subsampling-factor",
+        type=int,
+        default=2,
+        help="Controls the selection subsampling frontend."
     )
     
 
@@ -635,7 +642,6 @@ def get_params() -> AttributeDict:
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 128, # for better audio capability 
-            "subsampling_factor": 2,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for multitask
@@ -655,10 +661,16 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # In the normal configuration, we will downsample once more at the end
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
-    encoder_embed = Conv2dSubsampling(
-        idim=params.feature_dim,
-        odim=params.encoder_dim,
-    )
+    if params.subsampling_factor == 2:
+        encoder_embed = Conv2dSubsampling(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
+    else:
+        encoder_embed = Conv2dSubsampling4(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
     return encoder_embed
 
 
