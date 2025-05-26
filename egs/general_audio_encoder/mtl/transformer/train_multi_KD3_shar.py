@@ -203,6 +203,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=True,
         help="If True, enable flash attention.",
     )
+    
+    parser.add_argument(
+        "--attention-dropout",
+        type=float,
+        default=0.0,
+    )
 
     parser.add_argument(
         "--causal",
@@ -267,7 +273,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--mvq-loss-by-task",
         type=str2bool,
-        default=True,
+        default=False,
         help="If True, only compute MVQ loss on the task from which the sample is drawn."
         "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
     )
@@ -358,14 +364,42 @@ def get_parser():
         "--opt",
         type=str,
         default="scaledadam",
-        choices=["scaledadam", "adam"],
+        choices=["scaledadam", "adam", "adamw"],
         help="Which optimizer to use",
+    )
+    
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="Weight decay factor, used in AdamW"
+    )
+    
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="eden",
+        choices=["eden", "cosine"],
+        help="Which lr scheduler to use",
+    )
+    
+    parser.add_argument(
+        "--num-training-steps",
+        type=int,
+        default=300000,
+        help="How many training steps. only used when using cosine scheduler"
     )
 
     parser.add_argument(
         "--warmup-batches",
         type=float,
         default=500.0
+    )
+    
+    parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.0,
     )
     
     parser.add_argument(
@@ -635,6 +669,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         num_attention_heads=params.num_heads,
         hidden_act="gelu",
         use_flash_attention=params.use_flash_attention,
+        attention_dropout=params.attention_dropout,
         is_causal=params.causal,
     )
     return encoder
@@ -902,7 +937,6 @@ def compute_loss(
         # task_id=2: AT data
 
         # MVQ loss 
-        import pdb; pdb.set_trace()
         if params.do_mvq:
             if params.mvq_loss_by_task:
                 mask = task_ids == 2 # AT=2
@@ -948,7 +982,7 @@ def compute_validation_loss(
     tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
-        with torch.cuda.amp.autocast(enabled=params.use_fp16):
+        with torch.amp.autocast("cuda", enabled=params.use_fp16):
             loss, loss_info = compute_loss(
                 params=params,
                 model=model,
@@ -1065,7 +1099,7 @@ def train_one_epoch(
                 logging.info(count)
                 logging.info(f"All shards source by far: {shard_count}")
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.amp.autocast("cuda", enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1231,7 +1265,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1243,7 +1279,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1280,7 +1316,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1293,16 +1329,43 @@ def run(rank, world_size, args):
             clipping_scale=2.0,
         )
     elif params.opt == "adam":
+        logging.info("Using Adam optimizer")
         parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
         optimizer = torch.optim.Adam(
             parameters,
             lr=params.base_lr,
             betas=(0.9, 0.98),
         )
+    elif params.opt == "adamw":
+        logging.info(f"Using AdamW optimizer. Weight decay: {params.weight_decay}")
+        parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=params.base_lr,
+            betas=(0.9, 0.98),
+            weight_decay=params.weight_decay,
+        )
     else:
         raise ValueError()
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs, warmup_batches=params.warmup_batches)
+    if params.lr_scheduler == "eden":
+        scheduler = Eden(
+            optimizer,
+            params.lr_batches,
+            params.lr_epochs,
+            warmup_batches=params.warmup_batches,
+            warmup_start=params.warmup_start
+        )
+    elif params.lr_scheduler == "cosine":
+        from cosine_lr import CosineLRScheduler
+        scheduler = CosineLRScheduler(
+            optimizer,
+            warmup_batches=params.warmup_batches,
+            max_training_steps=params.num_training_steps,
+        )
+        assert params.num_training_steps >= params.max_iters
+    else:
+        raise ValueError()
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
@@ -1408,7 +1471,6 @@ def run(rank, world_size, args):
         train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # audio data
-    import pdb; pdb.set_trace()
     if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
@@ -1624,7 +1686,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.amp.autocast("cuda", enabled=params.use_fp16):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
