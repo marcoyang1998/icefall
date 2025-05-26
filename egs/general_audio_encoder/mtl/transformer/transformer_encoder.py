@@ -20,6 +20,7 @@ class LlamaAudioEncoder(nn.Module):
         encoder_dim: int = 768,
         num_layers: int = 10,
         num_attention_heads: int = 8,
+        attention_dropout: float = 0.0,
         hidden_act: str = "gelu",
         use_flash_attention: bool = True,
         is_causal: bool = False,
@@ -46,6 +47,7 @@ class LlamaAudioEncoder(nn.Module):
             hidden_act=hidden_act,            # LLaMA 默认是 SiLU
             rms_norm_eps=1e-6,
             tie_word_embeddings=True,
+            attention_dropout=attention_dropout, # default 0.0
             attn_implementation=attn_implementation,
         )
         self.config = config

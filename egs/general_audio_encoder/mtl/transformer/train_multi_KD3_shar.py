@@ -63,6 +63,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
+import torch.distributed as dist
 from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
@@ -70,14 +71,21 @@ from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_multi_kd import MultiKDModel
 from optim import Eden, ScaledAdam
-from subsampling import Conv2dSubsampling
+from subsampling import Conv2dSubsampling, Conv2dSubsampling4
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from transformer_encoder import LlamaAudioEncoder
-from utils import _add_task_id, MetricsTracker, setup_distributed
+from utils import (
+    _add_task_id,
+    MetricsTracker,
+    setup_distributed,
+    _save_checkpoint,
+    _save_checkpoint_with_global_batch_idx,
+)
+
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -195,6 +203,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=True,
         help="If True, enable flash attention.",
     )
+    
+    parser.add_argument(
+        "--attention-dropout",
+        type=float,
+        default=0.0,
+    )
 
     parser.add_argument(
         "--causal",
@@ -212,7 +226,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--do-audio-tagging",
         type=str2bool,
-        default=True,
+        default=False,
         help="If do audio tagging multi task training"
     )
     
@@ -259,9 +273,16 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--mvq-loss-by-task",
         type=str2bool,
-        default=True,
+        default=False,
         help="If True, only compute MVQ loss on the task from which the sample is drawn."
         "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
+    )
+    
+    parser.add_argument(
+        "--subsampling-factor",
+        type=int,
+        default=2,
+        help="Controls the selection subsampling frontend."
     )
     
 
@@ -350,14 +371,42 @@ def get_parser():
         "--opt",
         type=str,
         default="scaledadam",
-        choices=["scaledadam", "adam"],
+        choices=["scaledadam", "adam", "adamw"],
         help="Which optimizer to use",
+    )
+    
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="Weight decay factor, used in AdamW"
+    )
+    
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="eden",
+        choices=["eden", "cosine"],
+        help="Which lr scheduler to use",
+    )
+    
+    parser.add_argument(
+        "--num-training-steps",
+        type=int,
+        default=300000,
+        help="How many training steps. only used when using cosine scheduler"
     )
 
     parser.add_argument(
         "--warmup-batches",
         type=float,
         default=500.0
+    )
+    
+    parser.add_argument(
+        "--warmup-start",
+        type=float,
+        default=0.0,
     )
     
     parser.add_argument(
@@ -478,6 +527,13 @@ def get_parser():
         end of each epoch where `xxx` is the epoch number counting from 1.
         """,
     )
+    
+    parser.add_argument(
+        "--save-with-client",
+        type=str2bool,
+        default=True,
+        help="If True, save the model to s3 client"
+    )
 
     parser.add_argument(
         "--keep-last-k",
@@ -586,7 +642,6 @@ def get_params() -> AttributeDict:
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 128, # for better audio capability 
-            "subsampling_factor": 2,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for multitask
@@ -606,10 +661,16 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # In the normal configuration, we will downsample once more at the end
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
-    encoder_embed = Conv2dSubsampling(
-        idim=params.feature_dim,
-        odim=params.encoder_dim,
-    )
+    if params.subsampling_factor == 2:
+        encoder_embed = Conv2dSubsampling(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
+    else:
+        encoder_embed = Conv2dSubsampling4(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
     return encoder_embed
 
 
@@ -620,6 +681,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         num_attention_heads=params.num_heads,
         hidden_act="gelu",
         use_flash_attention=params.use_flash_attention,
+        attention_dropout=params.attention_dropout,
         is_causal=params.causal,
     )
     return encoder
@@ -784,26 +846,41 @@ def save_checkpoint(
     """
     if rank != 0:
         return
-    filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
-    save_checkpoint_impl(
-        filename=filename,
-        model=model,
-        model_avg=model_avg,
-        params=params,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        sampler=sampler,
-        scaler=scaler,
-        rank=rank,
-    )
+    if params.save_with_client:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        filename = "brainllm:s3://yangxiaoyu/" + str(filename) 
+        _save_checkpoint(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
+    else:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        save_checkpoint_impl(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
 
-    if params.best_train_epoch == params.cur_epoch:
-        best_train_filename = params.exp_dir / "best-train-loss.pt"
-        copyfile(src=filename, dst=best_train_filename)
+        if params.best_train_epoch == params.cur_epoch:
+            best_train_filename = params.exp_dir / "best-train-loss.pt"
+            copyfile(src=filename, dst=best_train_filename)
 
-    if params.best_valid_epoch == params.cur_epoch:
-        best_valid_filename = params.exp_dir / "best-valid-loss.pt"
-        copyfile(src=filename, dst=best_valid_filename)
+        if params.best_valid_epoch == params.cur_epoch:
+            best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+            copyfile(src=filename, dst=best_valid_filename)
 
 
 def compute_loss(
@@ -874,7 +951,7 @@ def compute_loss(
         # MVQ loss 
         if params.do_mvq:
             if params.mvq_loss_by_task:
-                mask = task_ids == 1 # ASR=1
+                mask = task_ids == 2 # AT=2
                 mvq_loss = (mvq_loss * mask).sum()
             else:
                 mvq_loss = mvq_loss.sum()
@@ -917,7 +994,7 @@ def compute_validation_loss(
     tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
-        with torch.cuda.amp.autocast(enabled=params.use_fp16):
+        with torch.amp.autocast("cuda", enabled=params.use_fp16):
             loss, loss_info = compute_loss(
                 params=params,
                 model=model,
@@ -1034,7 +1111,7 @@ def train_one_epoch(
                 logging.info(count)
                 logging.info(f"All shards source by far: {shard_count}")
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.amp.autocast("cuda", enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1076,23 +1153,37 @@ def train_one_epoch(
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            save_checkpoint_with_global_batch_idx(
-                out_dir=params.exp_dir,
-                global_batch_idx=params.batch_idx_train,
-                model=model,
-                model_avg=model_avg,
-                params=params,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                sampler=train_dl.sampler if not params.use_shar else None,
-                scaler=scaler,
-                rank=rank,
-            )
-            remove_checkpoints(
-                out_dir=params.exp_dir,
-                topk=params.keep_last_k,
-                rank=rank,
-            )
+            if params.save_with_client:
+                _save_checkpoint_with_global_batch_idx(
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                if world_size > 1:
+                    dist.barrier()
+            else:                
+                save_checkpoint_with_global_batch_idx(
+                    out_dir=params.exp_dir,
+                    global_batch_idx=params.batch_idx_train,
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                remove_checkpoints(
+                    out_dir=params.exp_dir,
+                    topk=params.keep_last_k,
+                    rank=rank,
+                )
 
         if batch_idx % 100 == 0 and params.use_fp16:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
@@ -1186,7 +1277,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1198,7 +1291,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1215,6 +1308,16 @@ def run(rank, world_size, args):
     if rank == 0:
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
+        
+    # save the model to client
+    if rank == 0 and params.save_with_client:
+        logging.info(f"Saving the checkpoints with s3 client.")
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/zhangchen/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
 
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
@@ -1225,29 +1328,56 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+
+    parameters = get_parameter_groups_with_lrs(
+        model, lr=params.base_lr, include_names=True
+    )
 
     if params.opt == "scaledadam":
-        parameters = get_parameter_groups_with_lrs(
-            model, lr=params.base_lr, include_names=True
-        )
-
         optimizer = ScaledAdam(
-            parameters,
+            get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
             lr=params.base_lr,  # should have no effect
             clipping_scale=2.0,
         )
     elif params.opt == "adam":
+        logging.info("Using Adam optimizer")
+        parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
         optimizer = torch.optim.Adam(
-            model.parameters(),
+            parameters,
             lr=params.base_lr,
             betas=(0.9, 0.98),
         )
+    elif params.opt == "adamw":
+        logging.info(f"Using AdamW optimizer. Weight decay: {params.weight_decay}")
+        parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=params.base_lr,
+            betas=(0.9, 0.98),
+            weight_decay=params.weight_decay,
+        )
     else:
         raise ValueError()
-        
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs, warmup_batches=params.warmup_batches)
+    if params.lr_scheduler == "eden":
+        scheduler = Eden(
+            optimizer,
+            params.lr_batches,
+            params.lr_epochs,
+            warmup_batches=params.warmup_batches,
+            warmup_start=params.warmup_start
+        )
+    elif params.lr_scheduler == "cosine":
+        from cosine_lr import CosineLRScheduler
+        scheduler = CosineLRScheduler(
+            optimizer,
+            warmup_batches=params.warmup_batches,
+            max_training_steps=params.num_training_steps,
+        )
+        assert params.num_training_steps >= params.max_iters
+    else:
+        raise ValueError()
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
@@ -1336,61 +1466,24 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
     
-    if params.use_mls:
-        mls_cuts = librispeech.mls_cuts()
-        mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
-        # mls cuts: 10801 hrs, 2619190 cuts
-        asr_training_cuts.append(mls_cuts)
-        asr_training_cuts_lens.append(2619190)
-        asr_training_cuts_duration.append(10801)
     
-    if params.use_extra_english_dataset:
-        englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
-        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(englishs_cuts)
-        asr_training_cuts_lens.append(english_cuts_len)
-        asr_training_cuts_duration.append(english_cut_durations)
+    # If asr cuts are ever used
+    if len(asr_training_cuts) >= 1:    
+        # combine the asr data into a BIG cut
+        if len(asr_training_cuts) > 1:
+            asr_training_cuts = CutSet.mux(
+                *asr_training_cuts,
+                weights=asr_training_cuts_lens,
+                stop_early=False,
+            )
+        else:
+            asr_training_cuts = asr_training_cuts[0]
     
-    if params.use_wenetspeech:
-        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
-        wenetspeech_cuts_len = {
-            "S": 151600,
-            "M": 1514500,
-            "L": 13306651, # TODO: update this number
-        }
-        wenetspeech_cuts_duration = {
-            "S": 100,
-            "M": 1000,
-            "L": 9700,
-        }
-        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
-    
-    if params.use_extra_chinese_dataset:
-        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(chineses_cuts)
-        asr_training_cuts_lens.append(chinese_cuts_len)
-        asr_training_cuts_duration.append(chinese_cut_durations)
-    
-    # combine the asr data into a BIG cut
-    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
-    if len(asr_training_cuts) > 1:
-        asr_training_cuts = CutSet.mux(
-            *asr_training_cuts,
-            weights=asr_training_cuts_lens,
-            stop_early=False,
-        )
-    else:
-        asr_training_cuts = asr_training_cuts[0]
-    
-    train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
+        train_cuts["cuts_asr"] = asr_training_cuts
+        train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # audio data
-    if params.use_audioset and params.do_audio_tagging:
+    if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
             audioset_cuts = librispeech.audioset_cuts().repeat(
@@ -1413,7 +1506,7 @@ def run(rank, world_size, args):
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
         
-    assert len(train_cuts) >= 1, "At least one task should be done!"
+    assert len(train_cuts) >= 1, "At least one task should have data!"
     
     logging.info(train_cuts)
     logging.info(train_cuts_duration)
@@ -1421,7 +1514,6 @@ def run(rank, world_size, args):
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 0.98 or c.duration > 29.9:
             return False
-
         return True
     
     # If we filter the data and use weighted_sampler, the number of cuts
@@ -1497,6 +1589,7 @@ def run(rank, world_size, args):
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
 
+    assert len(valid_sets) > 0, "At least one valid set should be used"
     logging.info(f"Validation sets: {valid_sets}")
 
     scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
@@ -1605,7 +1698,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.amp.autocast("cuda", enabled=params.use_fp16):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
