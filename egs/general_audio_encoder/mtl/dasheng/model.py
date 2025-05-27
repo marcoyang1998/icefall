@@ -14,13 +14,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
+from typing import Dict
 
 from dasheng import dasheng_base, dasheng_06B, dasheng_12B
+from dasheng.pretrained.pretrained import Dasheng
 import torch
 import torch.nn as nn
 
-from icefall.utils import make_pad_mask
+PRETRAINED_CHECKPOINTS = {
+    'dasheng_base':
+    'https://zenodo.org/records/11511780/files/dasheng_base.pt?download=1',
+    'dasheng_06B':
+    'download/models/dasheng_06b.pt',
+    'dasheng_12B':
+    'download/models/dasheng_12b.pt',
+}
+
+
+def dasheng_base(**model_kwargs):
+    model_kwargs["embed_dim"] = 768
+    model_kwargs["depth"] = 12
+    model_kwargs["num_heads"] = 12
+    return Dasheng.from_pretrained(PRETRAINED_CHECKPOINTS['dasheng_base'],
+                                   **model_kwargs)
+
+
+def dasheng_06B(**model_kwargs):
+    model_kwargs["embed_dim"] = 1280
+    model_kwargs["depth"] = 32
+    model_kwargs["num_heads"] = 16
+    return Dasheng.from_pretrained(PRETRAINED_CHECKPOINTS['dasheng_06B'],
+                                   **model_kwargs)
+
+
+def dasheng_12B(**model_kwargs):
+    model_kwargs["embed_dim"] = 1536
+    model_kwargs["depth"] = 40
+    model_kwargs["num_heads"] = 24
+    return Dasheng.from_pretrained(PRETRAINED_CHECKPOINTS['dasheng_12B'],
+                                   **model_kwargs)
+
 
 def get_encoder_model(model_version) -> nn.Module:
     MODEL_DICT = {
@@ -41,6 +74,16 @@ class DashengEncoder(nn.Module):
         x_lens = (audio_lens / 16000 * 25).int() # the frame rate is 25 Hz
         
         return x, x_lens
+    
+    def extract_features(self, batch: Dict, layer_idx: int = -1):
+        device = next(self.model.parameters()).device
+        
+        audio = batch["audio"].to(device)
+        audio_lens = batch["audio_lens"].to(device)
+        
+        return self.get_embeddings(audio, audio_lens, layer_idx)
+        
+        
 
 class AudioTaggingModel(nn.Module):
     def __init__(

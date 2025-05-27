@@ -764,10 +764,10 @@ def save_checkpoint(
             model_avg_state_dict = {k: avg_state_dict[k] for k in avg_state_dict if "encoder." not in k } # remove the encoder parameters
             checkpoint["model_avg"] = model_avg_state_dict
             
-    if params:
-        for k, v in params.items():
-            assert k not in checkpoint
-            checkpoint[k] = v
+        if params:
+            for k, v in params.items():
+                assert k not in checkpoint, k
+                checkpoint[k] = v
             
     torch.save(checkpoint, filename)
 
