@@ -59,9 +59,10 @@ def _test_inference():
     print(encoder_out_lens.shape)
 
 def inference():
+    # An example inference script
     model = get_420m_causal_audio_encoder()
     
-    checkpoint_path = "transformer_finetune/exp-finetune-420m-causal-1-sub-4-ls-960--lr-3e-5-cosine-scheduler-warmup-12000-causal-1-freeze-encoder-0-freeze--1-step-encoder-lr-scale-1.0-from-hubert-large-mvq-cb16-delta-6-lh-large-giga-xl-pt-attn-drop-0.1-cosine-sched-with-musan-no-rir-400k/epoch-60.pt"
+    checkpoint_path = "transformer-420m-causal-mvq-pretrained-giga-xl-lh-large-cb16/iter-400000-avg-4.pt"
     state_dict = torch.load(checkpoint_path)["model"]
     info = model.load_state_dict(state_dict, strict=False)
     print(info)
@@ -73,7 +74,7 @@ def inference():
     num_param = sum([p.numel() for p in model.parameters()])
     print(f"Number of model parameters: {num_param}")
     
-    # we only support 16k hz
+    # we only support 16k hz input audio
     audio = [
         torchaudio.load("transformer_inference/audio/84-121123-0024.flac")[0].to(device),
         torchaudio.load("transformer_inference/audio/84-121123-0028.flac")[0].to(device),
@@ -81,6 +82,7 @@ def inference():
     with torch.amp.autocast("cuda", enabled=True):
         encoder_out, encoder_out_lens = model(audio)
     
+    import pdb; pdb.set_trace()
     print(encoder_out.shape)
     print(encoder_out_lens)
     
