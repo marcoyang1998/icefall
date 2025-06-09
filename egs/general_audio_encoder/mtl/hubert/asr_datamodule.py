@@ -237,6 +237,12 @@ class LibriSpeechAsrDataModule:
             default=False,
             help="If use librispeech as the training set.",
         )
+        
+        group.add_argument(
+            "--use-shar",
+            type=str2bool,
+            default=False,
+        )
 
     def train_dataloaders(
         self,

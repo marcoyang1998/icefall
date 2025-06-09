@@ -209,6 +209,18 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.0,
     )
+    
+    parser.add_argument(
+        "--dropout-prob",
+        type=float,
+        default=0.0,
+    )
+    
+    parser.add_argument(
+        "--gated-mlp",
+        type=str2bool,
+        default=True,
+    )
 
     parser.add_argument(
         "--causal",
@@ -531,7 +543,7 @@ def get_parser():
     parser.add_argument(
         "--save-with-client",
         type=str2bool,
-        default=True,
+        default=False,
         help="If True, save the model to s3 client"
     )
 
@@ -682,6 +694,8 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         hidden_act="gelu",
         use_flash_attention=params.use_flash_attention,
         attention_dropout=params.attention_dropout,
+        dropout_p=params.dropout_prob,
+        gated_mlp=params.gated_mlp,
         is_causal=params.causal,
     )
     return encoder
@@ -951,7 +965,7 @@ def compute_loss(
         # MVQ loss 
         if params.do_mvq:
             if params.mvq_loss_by_task:
-                mask = task_ids == 2 # AT=2
+                mask = task_ids == 1 
                 mvq_loss = (mvq_loss * mask).sum()
             else:
                 mvq_loss = mvq_loss.sum()
