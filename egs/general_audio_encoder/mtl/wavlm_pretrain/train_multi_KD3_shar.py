@@ -206,7 +206,11 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="probability of replacing a feature with 0",
     )
     
-    parser.add_argument
+    parser.add_argument(
+        "--feature-grad-mult",
+        type=float,
+        default=1.0,
+    )
 
     parser.add_argument(
         "--causal",
@@ -357,7 +361,30 @@ def get_parser():
         "--opt",
         type=str,
         default="scaledadam",
-        choices=["adam", "scaledadam"],
+        choices=["scaledadam", "adam", "adamw"],
+        help="Which optimizer to use",
+    )
+    
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="Weight decay factor, used in AdamW"
+    )
+    
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="eden",
+        choices=["eden", "cosine"],
+        help="Which lr scheduler to use",
+    )
+    
+    parser.add_argument(
+        "--num-training-steps",
+        type=int,
+        default=300000,
+        help="How many training steps. only used when using cosine scheduler"
     )
 
     parser.add_argument(
@@ -619,6 +646,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         mask_length=params.mask_length,
         mask_channel_prob=params.mask_channel_prob,
         mask_channel_length=params.mask_channel_length,
+        feature_grad_mult=params.feature_grad_mult,
     )
     return encoder
 
@@ -1182,7 +1210,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1194,7 +1224,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1221,35 +1251,52 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     if params.opt == "scaledadam":
-        logging.info(f"Using ScaledAdam as the optimizer, base_lr={params.base_lr}")
-        parameters = get_parameter_groups_with_lrs(
-            model, lr=params.base_lr, include_names=True
-        )
         optimizer = ScaledAdam(
-            parameters,
+            get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=True),
             lr=params.base_lr,  # should have no effect
             clipping_scale=2.0,
         )
     elif params.opt == "adam":
-        logging.info(f"Using Adam as the optimizer, lr={params.base_lr}")
+        logging.info("Using Adam optimizer")
+        parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
         optimizer = torch.optim.Adam(
-            model.parameters(),
+            parameters,
             lr=params.base_lr,
             betas=(0.9, 0.98),
+        )
+    elif params.opt == "adamw":
+        logging.info(f"Using AdamW optimizer. Weight decay: {params.weight_decay}")
+        parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=params.base_lr,
+            betas=(0.9, 0.98),
+            weight_decay=params.weight_decay,
         )
     else:
         raise ValueError()
 
-    scheduler = Eden(
-        optimizer,
-        params.lr_batches,
-        params.lr_epochs,
-        warmup_batches=params.warmup_batches,
-        warmup_start=params.warmup_start,
-    )
+    if params.lr_scheduler == "eden":
+        scheduler = Eden(
+            optimizer,
+            params.lr_batches,
+            params.lr_epochs,
+            warmup_batches=params.warmup_batches,
+            warmup_start=params.warmup_start
+        )
+    elif params.lr_scheduler == "cosine":
+        from cosine_lr import CosineLRScheduler
+        scheduler = CosineLRScheduler(
+            optimizer,
+            warmup_batches=params.warmup_batches,
+            max_training_steps=params.num_training_steps,
+        )
+        assert params.num_training_steps >= params.max_iters
+    else:
+        raise ValueError()
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")

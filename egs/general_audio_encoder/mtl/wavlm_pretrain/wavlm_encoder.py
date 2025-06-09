@@ -18,6 +18,8 @@ class WavlmModel(torch.nn.Module):
         mask_length: int = 10,
         mask_channel_prob: float = 0.0,
         mask_channel_length: int = 10,
+        feature_grad_mult: float = 1.0,
+        encoder_layerdrop: float = 0.0
     ):
         super().__init__()
         assert model_version in ["base", "base+", "large"]
@@ -31,6 +33,8 @@ class WavlmModel(torch.nn.Module):
         cfg.mask_length=mask_length
         cfg.mask_channel_prob=mask_channel_prob
         cfg.mask_channel_length=mask_channel_length
+        cfg.feature_grad_mult=feature_grad_mult
+        cfg.encoder_layerdrop=encoder_layerdrop
         self.cfg = cfg
         
         model = WavLM(cfg)
