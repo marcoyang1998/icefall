@@ -1,4 +1,5 @@
 import logging
+import random
 from typing import Optional, Tuple, Callable
 
 import torch
@@ -23,6 +24,7 @@ class LlamaAudioEncoder(nn.Module):
         num_attention_heads: int = 8,
         attention_dropout: float = 0.0,
         dropout_p : float = 0.0,
+        layerdrop_p: float = 0.0,
         hidden_act: str = "gelu",
         gated_mlp: bool = True,
         use_flash_attention: bool = True,
@@ -58,7 +60,7 @@ class LlamaAudioEncoder(nn.Module):
         if is_causal:
             logging.info("Using causal mask in transformer layers")
         
-        logging.info(f"Gated MLP: {gated_mlp}")
+        self.layerdrop_p = layerdrop_p
         self.layers = nn.ModuleList(
             [LlamaEncoderLayer(
                 config, layer_idx, is_causal, dropout_p=dropout_p, gated_mlp=gated_mlp) 
@@ -89,6 +91,8 @@ class LlamaAudioEncoder(nn.Module):
         all_hidden_states = () if output_hidden_states else None
         
         for layer in self.layers[: self.config.num_hidden_layers]:
+            if self.training and random.random() < self.layerdrop_p:
+                continue
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
