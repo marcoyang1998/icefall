@@ -99,7 +99,7 @@ class MultiKDModel(nn.Module):
         """Compute encoder outputs.
         Args:
           x:
-            A 3-D tensor of shape (N, T, C).
+            A 2-D tensor of shape (N, T). Audio waveform
           x_lens:
             A 1-D tensor of shape (N,). It contains the number of frames in `x`
             before padding.

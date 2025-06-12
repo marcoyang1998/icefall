@@ -444,6 +444,7 @@ def decode_one_batch(
 
     supervisions = batch["supervisions"]
     feature_lens = supervisions["num_frames"].to(device)
+    cuts = supervisions["cut"]
 
     if params.causal:
         # this seems to cause insertions at the end of the utterance if used with zipformer.
@@ -817,16 +818,6 @@ def main():
         params.suffix = f"iter-{params.iter}_avg-{params.avg}"
     else:
         params.suffix = f"epoch-{params.epoch}_avg-{params.avg}"
-
-    if params.causal:
-        assert (
-            "," not in params.chunk_size
-        ), "chunk_size should be one value in decoding."
-        assert (
-            "," not in params.left_context_frames
-        ), "left_context_frames should be one value in decoding."
-        params.suffix += f"_chunk-{params.chunk_size}"
-        params.suffix += f"_left-context-{params.left_context_frames}"
 
     if "fast_beam_search" in params.decoding_method:
         params.suffix += f"_beam-{params.beam}"

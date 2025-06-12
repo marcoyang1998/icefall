@@ -279,6 +279,12 @@ class MultiTaskDataModule:
             default="PrecomputedFeatures",
             help="AudioSamples or PrecomputedFeatures",
         )
+        group.add_argument(
+            "--target-frame-rate",
+            type=int,
+            default=50,
+            help="The frame rate of the target"
+        )
         
         # KD related
         group.add_argument(
@@ -454,7 +460,7 @@ class MultiTaskDataModule:
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
-                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
+                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True, pad_to_longest=False)
             )
         else:
             logging.info("Disable MUSAN")
@@ -511,6 +517,7 @@ class MultiTaskDataModule:
             cut_transforms=transforms,
             input_transforms=input_transforms,
             return_cuts=self.args.return_cuts,
+            target_frame_rate=self.args.target_frame_rate,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD,
         )
@@ -531,6 +538,7 @@ class MultiTaskDataModule:
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=self.args.num_mel_bins))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
+                target_frame_rate=self.args.target_frame_rate,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
             )
@@ -680,6 +688,7 @@ class MultiTaskDataModule:
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 return_cuts=self.args.return_cuts,
+                target_frame_rate=self.args.target_frame_rate,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
             )
@@ -687,6 +696,7 @@ class MultiTaskDataModule:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
+                target_frame_rate=self.args.target_frame_rate,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD
             )
@@ -720,6 +730,7 @@ class MultiTaskDataModule:
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
+            target_frame_rate=self.args.target_frame_rate,
             at_KD=self.args.at_KD,
             sv_KD=self.args.sv_KD
         )
