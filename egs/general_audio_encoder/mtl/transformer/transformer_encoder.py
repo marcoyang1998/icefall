@@ -8,6 +8,7 @@ from transformers import LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaMLP, LlamaRMSNorm, LlamaRotaryEmbedding, eager_attention_forward
 )
+from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -21,7 +22,9 @@ class LlamaAudioEncoder(nn.Module):
         num_layers: int = 10,
         num_attention_heads: int = 8,
         attention_dropout: float = 0.0,
+        dropout_p : float = 0.0,
         hidden_act: str = "gelu",
+        gated_mlp: bool = True,
         use_flash_attention: bool = True,
         is_causal: bool = False,
     ):
@@ -55,8 +58,12 @@ class LlamaAudioEncoder(nn.Module):
         if is_causal:
             logging.info("Using causal mask in transformer layers")
         
+        logging.info(f"Gated MLP: {gated_mlp}")
         self.layers = nn.ModuleList(
-            [LlamaEncoderLayer(config, layer_idx, is_causal) for layer_idx in range(config.num_hidden_layers)]
+            [LlamaEncoderLayer(
+                config, layer_idx, is_causal, dropout_p=dropout_p, gated_mlp=gated_mlp) 
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -214,8 +221,29 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+class SimpleMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.up_proj(x)))
+        return down_proj
+
 class LlamaEncoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, layer_idx: int, is_causal: bool = False):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        layer_idx: int,
+        is_causal: bool = False,
+        dropout_p: float = 0.0,
+        gated_mlp: bool = True,
+    ):
         
         super().__init__()
         self.layer_idx = layer_idx
@@ -224,9 +252,15 @@ class LlamaEncoderLayer(nn.Module):
 
         self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx, is_causal=is_causal)
         
-        self.mlp = LlamaMLP(config)
+        if gated_mlp:
+            self.mlp = LlamaMLP(config)
+        else:
+            self.mlp = SimpleMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        
+        self.dropout1 = nn.Dropout(dropout_p)
+        self.dropout2 = nn.Dropout(dropout_p)
     
     def forward(
         self,
@@ -254,12 +288,14 @@ class LlamaEncoderLayer(nn.Module):
             cache_position=cache_position,
             position_embeddings=position_embeddings,
         )
+        hidden_states = self.dropout1(hidden_states)
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = self.dropout2(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -353,10 +389,22 @@ def _test_causal():
     assert torch.all(features[0,:2] == features[1, :2])
     print("Checking causal mask: passed!")
     
+def _test_encoder_layer():
+    model = LlamaAudioEncoder(
+        encoder_dim=768,
+        num_layers=12,
+        use_flash_attention=False,
+        is_causal=False,
+    )
+    layer = model.layers[0]
+    num_params = sum([p.numel() for p in layer.parameters()])
+    print(layer)
+    print(num_params)
     
 
 if __name__=="__main__":
-    _test_padding_mask()
-    _test_causal()
-    _test()
+    _test_encoder_layer()
+    # _test_padding_mask()
+    # _test_causal()
+    # _test()
     
