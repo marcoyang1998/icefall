@@ -82,6 +82,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         cut_transforms: List[Callable[[CutSet], CutSet]] = None,
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
+        target_frame_rate: int = 50,
         at_KD: bool = False,
         sv_KD: bool = False
     ):
@@ -109,6 +110,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.at_KD = at_KD
         self.sv_KD = sv_KD
         
+        self.target_frame_rate = target_frame_rate
         self.dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
         self.dummy_audio_logits = torch.ones(527) * 0.5
 
@@ -168,6 +170,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             "codebook_indexes",
             dummy=self.dummy_codebook_indexes,
             temporal_array=True,
+            target_frame_rate=self.target_frame_rate,
             pad_value=-100,
         )
         
@@ -251,14 +254,15 @@ def load_codebook_indexes(c):
 def _collate_custom_field(
     cuts: CutSet, 
     field: str,
-    dummy: np.array = None,
+    dummy: torch.Tensor = None,
     temporal_array: bool = True,
+    target_frame_rate: int = 50,
     pad_value=None,
 ):
     
     # by default, we assert the frame_shift is 0.02
     if temporal_array:
-        max_frames = [int(c.duration * 50) for c in cuts]
+        max_frames = [int(c.duration * target_frame_rate) for c in cuts]
         
         temporal_dim = 0
         pad_value = -100
