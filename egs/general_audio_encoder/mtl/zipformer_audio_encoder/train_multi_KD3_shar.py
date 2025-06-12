@@ -1459,21 +1459,22 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(chinese_cut_durations)
     
     # combine the asr data into a BIG cut
-    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
-    if len(asr_training_cuts) > 1:
-        asr_training_cuts = CutSet.mux(
-            *asr_training_cuts,
-            weights=asr_training_cuts_lens,
-            stop_early=False,
-        )
-    else:
-        asr_training_cuts = asr_training_cuts[0]
+    if len(asr_training_cuts) >= 1:
+        # assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+        if len(asr_training_cuts) > 1:
+            asr_training_cuts = CutSet.mux(
+                *asr_training_cuts,
+                weights=asr_training_cuts_lens,
+                stop_early=False,
+            )
+        else:
+            asr_training_cuts = asr_training_cuts[0]
     
-    train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
+        train_cuts["cuts_asr"] = asr_training_cuts
+        train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # audio data
-    if params.use_audioset and params.do_audio_tagging:
+    if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
             audioset_cuts = librispeech.audioset_cuts().repeat(
