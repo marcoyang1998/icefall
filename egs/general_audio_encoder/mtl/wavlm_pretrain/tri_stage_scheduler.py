@@ -6,7 +6,7 @@ from optim import LRScheduler
 class TriStageLRSchedueler(LRScheduler):
     def __init__(
         self, 
-        optimizer,
+        optimizer: Optimizer,
         base_lr: float,
         total_steps: int = 200000,
         verbose: bool = False
