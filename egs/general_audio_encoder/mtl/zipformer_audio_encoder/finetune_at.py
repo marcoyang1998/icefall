@@ -69,6 +69,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
+import torch.distributed as dist
 from at_datamodule import MultiTaskDataModule
 from attention_decoder import AttentionDecoderModel
 from decoder import Decoder
@@ -114,7 +115,9 @@ from utils import (
     MetricsTracker,
     _add_task_id,
     map_zh,
-    setup_distributed,   
+    setup_distributed,
+    _save_checkpoint,
+    _save_checkpoint_with_global_batch_idx,
 )
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
@@ -598,6 +601,13 @@ def get_parser():
         end of each epoch where `xxx` is the epoch number counting from 1.
         """,
     )
+    
+    parser.add_argument(
+        "--save-with-client",
+        type=str2bool,
+        default=True,
+        help="If True, save the model to s3 client"
+    )
 
     parser.add_argument(
         "--keep-last-k",
@@ -988,25 +998,41 @@ def save_checkpoint(
     if rank != 0:
         return
     filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
-    save_checkpoint_impl(
-        filename=filename,
-        model=model,
-        model_avg=model_avg,
-        params=params,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        sampler=sampler,
-        scaler=scaler,
-        rank=rank,
-    )
+    if params.save_with_client:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        filename = "brainllm:s3://yangxiaoyu/" + str(filename) 
+        _save_checkpoint(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
+    else:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        save_checkpoint_impl(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
 
-    if params.best_train_epoch == params.cur_epoch:
-        best_train_filename = params.exp_dir / "best-train-loss.pt"
-        copyfile(src=filename, dst=best_train_filename)
+        if params.best_train_epoch == params.cur_epoch:
+            best_train_filename = params.exp_dir / "best-train-loss.pt"
+            copyfile(src=filename, dst=best_train_filename)
 
-    if params.best_valid_epoch == params.cur_epoch:
-        best_valid_filename = params.exp_dir / "best-valid-loss.pt"
-        copyfile(src=filename, dst=best_valid_filename)
+        if params.best_valid_epoch == params.cur_epoch:
+            best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+            copyfile(src=filename, dst=best_valid_filename)
 
 
 def compute_loss(
@@ -1289,7 +1315,7 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad()
         except:  # noqa
-            save_bad_model()
+            # save_bad_model()
             display_and_save_batch(batch, params=params, sp=sp)
             raise
 
@@ -1306,28 +1332,42 @@ def train_one_epoch(
                 model_cur=model,
                 model_avg=model_avg,
             )
-
+        
         if (
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            save_checkpoint_with_global_batch_idx(
-                out_dir=params.exp_dir,
-                global_batch_idx=params.batch_idx_train,
-                model=model,
-                model_avg=model_avg,
-                params=params,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                sampler=train_dl.sampler if not params.use_shar else None,
-                scaler=scaler,
-                rank=rank,
-            )
-            remove_checkpoints(
-                out_dir=params.exp_dir,
-                topk=params.keep_last_k,
-                rank=rank,
-            )
+            if params.save_with_client:
+                _save_checkpoint_with_global_batch_idx(
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                if world_size > 1:
+                    dist.barrier()
+            else:                
+                save_checkpoint_with_global_batch_idx(
+                    out_dir=params.exp_dir,
+                    global_batch_idx=params.batch_idx_train,
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                remove_checkpoints(
+                    out_dir=params.exp_dir,
+                    topk=params.keep_last_k,
+                    rank=rank,
+                )
 
         if batch_idx % 100 == 0 and params.use_fp16:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
@@ -1339,11 +1379,11 @@ def train_one_epoch(
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
                 if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
+                    # save_bad_model(suffix="-first-warning")
                     saved_bad_model = True
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
-                save_bad_model()
+                # save_bad_model()
                 raise RuntimeError(
                     f"grad_scale is too small, exiting: {cur_grad_scale}"
                 )
@@ -1465,6 +1505,16 @@ def run(rank, world_size, args):
     if rank == 0:
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
+        
+    # save the model to client
+    if rank == 0 and params.save_with_client:
+        logging.info(f"Saving the checkpoints with s3 client.")
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/zhangchen/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
 
     # load model parameters for model fine-tuning
     if params.do_finetune:

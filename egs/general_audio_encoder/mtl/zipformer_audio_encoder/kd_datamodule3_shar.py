@@ -260,6 +260,12 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--rir-prob",
+            type=float,
+            default=0.5,
+        )
+        
+        group.add_argument(
             "--enable-musan",
             type=str2bool,
             default=True,
@@ -446,7 +452,7 @@ class MultiTaskDataModule:
                 logging.info("Use the fast random RIR generator as no RIR recordings are provided")
                 rir_cuts = None
             transforms.append(
-                ReverbWithImpulseResponse(rir_recordings=rir_cuts, p=0.5)
+                ReverbWithImpulseResponse(rir_recordings=rir_cuts, p=self.args.rir_prob)
             )
         
         if self.args.enable_musan:
