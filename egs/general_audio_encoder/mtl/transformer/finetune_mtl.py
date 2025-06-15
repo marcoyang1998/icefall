@@ -77,7 +77,7 @@ from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_asr import MultiTaskModel
 from optim import Eden, ScaledAdam
-from subsampling import Conv2dSubsampling
+from subsampling import Conv2dSubsampling, Conv2dSubsampling4
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -232,6 +232,31 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=True,
         help="If True, enable flash attention.",
     )
+    
+    parser.add_argument(
+        "--attention-dropout",
+        type=float,
+        default=0.0,
+    )
+    
+    parser.add_argument(
+        "--dropout-prob",
+        type=float,
+        default=0.0,
+    )
+    
+    parser.add_argument(
+        "--gated-mlp",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--layerdrop-prob",
+        type=float,
+        default=0.0,
+        help="Layer dropout prob"
+    )
 
     parser.add_argument(
         "--decoder-dim",
@@ -300,6 +325,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If True, use CTC head.",
+    )
+    
+    parser.add_argument(
+        "--subsampling-factor",
+        type=int,
+        default=2,
+        help="Controls the selection subsampling frontend."
     )
 
 
@@ -391,8 +423,30 @@ def get_parser():
         "--opt",
         type=str,
         default="scaledadam",
-        choices=["scaledadam", "adam"],
+        choices=["scaledadam", "adam", "adamw"],
         help="Which optimizer to use",
+    )
+    
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="Weight decay factor, used in AdamW"
+    )
+    
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="eden",
+        choices=["eden", "cosine"],
+        help="Which lr scheduler to use",
+    )
+    
+    parser.add_argument(
+        "--num-training-steps",
+        type=int,
+        default=300000,
+        help="How many training steps. only used when using cosine scheduler"
     )
     
     parser.add_argument(
@@ -642,10 +696,20 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # In the normal configuration, we will downsample once more at the end
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
-    encoder_embed = Conv2dSubsampling(
-        idim=params.feature_dim,
-        odim=params.encoder_dim,
-    )
+    if params.subsampling_factor == 2:
+        logging.info(f"Using subsample factor = 2")
+        encoder_embed = Conv2dSubsampling(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
+    elif params.subsampling_factor == 4:
+        logging.info(f"Using subsample factor = 4")
+        encoder_embed = Conv2dSubsampling4(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
+    else:
+        raise ValueError()
     return encoder_embed
 
 
@@ -656,6 +720,10 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         num_attention_heads=params.num_heads,
         hidden_act="gelu",
         use_flash_attention=params.use_flash_attention,
+        attention_dropout=params.attention_dropout,
+        dropout_p=params.dropout_prob,
+        gated_mlp=params.gated_mlp,
+        layerdrop_p=params.layerdrop_prob,
         is_causal=params.causal,
     )
     return encoder
@@ -1386,23 +1454,44 @@ def run(rank, world_size, args):
             clipping_scale=2.0,
         )
     elif params.opt == "adam":
+        logging.info("Using Adam optimizer")
         parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
         optimizer = torch.optim.Adam(
             parameters,
             lr=params.base_lr,
             betas=(0.9, 0.98),
         )
+    elif params.opt == "adamw":
+        logging.info(f"Using AdamW optimizer. Weight decay: {params.weight_decay}")
+        parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=params.base_lr,
+            betas=(0.9, 0.98),
+            weight_decay=params.weight_decay,
+        )
     else:
         raise ValueError()
         
 
-    scheduler = Eden(
-        optimizer,
-        params.lr_batches,
-        params.lr_epochs,
-        warmup_batches=params.warmup_batches,
-        warmup_start=params.warmup_start,
-    )
+    if params.lr_scheduler == "eden":
+        scheduler = Eden(
+            optimizer,
+            params.lr_batches,
+            params.lr_epochs,
+            warmup_batches=params.warmup_batches,
+            warmup_start=params.warmup_start
+        )
+    elif params.lr_scheduler == "cosine":
+        from cosine_lr import CosineLRScheduler
+        scheduler = CosineLRScheduler(
+            optimizer,
+            warmup_batches=params.warmup_batches,
+            max_training_steps=params.num_training_steps,
+        )
+        assert params.num_training_steps >= params.max_iters
+    else:
+        raise ValueError()
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
