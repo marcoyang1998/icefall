@@ -63,13 +63,12 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-import torch.distributed as dist
 from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd_mae import MultiKDModel
+from model_multi_kd_w2v2_mask import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -78,13 +77,7 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import (
-    _add_task_id, 
-    MetricsTracker, 
-    setup_distributed,
-    _save_checkpoint,
-    _save_checkpoint_with_global_batch_idx,
-)
+from utils import _add_task_id, MetricsTracker, setup_distributed
 
 from zipformer2 import Zipformer2
 
@@ -177,7 +170,6 @@ def add_finetune_arguments(parser: argparse.ArgumentParser):
     )
 
 def add_model_arguments(parser: argparse.ArgumentParser):
-    # encoder related
     parser.add_argument(
         "--num-encoder-layers",
         type=str,
@@ -218,57 +210,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str,
         default="192,256,384,512,384,256",
         help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
-    )
-    
-    # decoder related arguments
-    parser.add_argument(
-        "--num-decoder-layers",
-        type=str,
-        default="2,2,2,2,2,2",
-        help="Number of zipformer decoder layers per stack, comma separated.",
-    )
-    
-    parser.add_argument(
-        "--decoder-dim",
-        type=str,
-        default="256,256,256,256,256,256",
-    )
-    
-    parser.add_argument(
-        "--decoder-downsampling-factor",
-        type=str,
-        default="1,2,4,8,4,2",
-        help="Downsampling factor for each stack of encoder layers.",
-    )
-    
-    parser.add_argument(
-        "--decoder-feedforward-dim",
-        type=str,
-        default="768,768,768,768,768,768",
-        help="Feedforward dimension of the zipformer encoder layers, per stack, comma separated.",
-    )
-    
-    parser.add_argument(
-        "--decoder-unmasked-dim",
-        type=str,
-        default="192,192,192,192,192,192",
-        help="Unmasked dimensions in the decoders, relates to augmentation during training.  "
-        "A single int or comma-separated list.  Must be <= each corresponding encoder_dim.",
-    )
-    
-    parser.add_argument(
-        "--decoder-num-heads",
-        type=str,
-        default="4,4,4,8,4,4",
-        help="Number of attention heads in the zipformer encoder layers: a single int or comma-separated list.",
-    )
-    
-    parser.add_argument(
-        "--decoder-cnn-module-kernel",
-        type=str,
-        default="31,31,15,15,15,31",
-        help="Sizes of convolutional kernels in convolution modules in each encoder stack: "
-        "a single int or comma-separated list.",
     )
 
     parser.add_argument(
@@ -339,6 +280,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
+    # mvq related
     parser.add_argument(
         "--do-mvq",
         type=str2bool,
@@ -348,7 +290,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--do-audio-tagging",
         type=str2bool,
-        default=False,
+        default=True,
         help="If do audio tagging multi task training"
     )
     
@@ -395,34 +337,43 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--mvq-loss-by-task",
         type=str2bool,
-        default=False,
+        default=True,
         help="If True, only compute MVQ loss on the task from which the sample is drawn."
         "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
     )
     
+    # masking related
     parser.add_argument(
-        "--mae-downsample-factor",
-        type=int,
-        default=4,
-        help="""The final downsample factor after the decoder. This includes both
-        the downsampling at encoder and decoder.
-        """
+        "--loss-only-mask",
+        type=str2bool,
+        default=False,
+        help="If True, only compute loss on the masked indices"
     )
-    
     parser.add_argument(
-        "--mae-loss-norm",
-        type=str,
-        default="sample",
-        choices=["sample", "batch", "frame"]
+        "--mask-length", type=int, default=10, help="mask_length"
     )
-    
+
     parser.add_argument(
-        "--mae-loss-scale",
+        "--mask-prob",
         type=float,
-        default=0.1,
-        help="The loss scale for MAE loss"
+        default=0.65,
+        help="probability of replacing a token with mask",
     )
-    
+
+    parser.add_argument(
+        "--mask-selection",
+        type=str,
+        choices=["static", "uniform", "normal", "poisson"],
+        default="static",
+        help="how to choose mask length",
+    )
+
+    parser.add_argument(
+        "--mask-other",
+        type=float,
+        default=0,
+        help="secondary mask argument (used for more complex distributions),see help in compute_mask_indicesh",
+    )
 
 
 def get_parser():
@@ -589,14 +540,6 @@ def get_parser():
         help="Scale for audio tagging loss.",
     )
     
-    # TODO: make this applicable to more than two losses
-    parser.add_argument(
-        "--mvq-loss-scale",
-        type=float,
-        default=1.0,
-        help="The scale of mvq losses"
-    )
-    
     parser.add_argument(
         "--speaker-verification-loss-scale",
         type=float,
@@ -636,13 +579,6 @@ def get_parser():
         Note: It also saves checkpoint to `exp-dir/epoch-xxx.pt` at the
         end of each epoch where `xxx` is the epoch number counting from 1.
         """,
-    )
-    
-    parser.add_argument(
-        "--save-with-client",
-        type=str2bool,
-        default=True,
-        help="If True, save the model to s3 client"
     )
 
     parser.add_argument(
@@ -735,6 +671,8 @@ def get_params() -> AttributeDict:
 
         - encoder_dim: Hidden dim for multi-head attention model.
 
+        - num_decoder_layers: Number of decoder layer of transformer decoder.
+
         - warm_step: The warmup period that dictates the decay of the
               scale on "simple" (un-pruned) loss.
     """
@@ -801,38 +739,13 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         chunk_size=_to_int_tuple(params.chunk_size),
         left_context_frames=_to_int_tuple(params.left_context_frames),
     )
-    
-    num_params = sum([p.numel() for p in encoder.parameters()])
-    logging.info(f"Number of parameters in the encoder: {num_params}")
     return encoder
-
-def get_decoder(params: AttributeDict) -> nn.Module:
-    decoder = Zipformer2(
-        output_downsampling_factor=1, # this is fixed, we don't want further downsample
-        num_encoder_layers=_to_int_tuple(params.num_decoder_layers),
-        downsampling_factor=_to_int_tuple(params.decoder_downsampling_factor),
-        encoder_dim=_to_int_tuple(params.decoder_dim),
-        encoder_unmasked_dim=_to_int_tuple(params.decoder_unmasked_dim),
-        feedforward_dim=_to_int_tuple(params.decoder_feedforward_dim),
-        pos_head_dim=_to_int_tuple(params.pos_head_dim),
-        value_head_dim=_to_int_tuple(params.value_head_dim),
-        pos_dim=params.pos_dim,
-        num_heads=_to_int_tuple(params.decoder_num_heads),
-        cnn_module_kernel=_to_int_tuple(params.decoder_cnn_module_kernel),
-        causal=False,
-    )
-    
-    num_params = sum([p.numel() for p in decoder.parameters()])
-    logging.info(f"Number of parameters in the decoder: {num_params}")
-        
-    return decoder
 
 
 def get_model(params: AttributeDict) -> nn.Module:
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
-    decoder = get_decoder(params)
     
     if params.interpolate_teacher:
         logging.warning(f"Interpolate the teacher indexes to match the length of the student")
@@ -845,14 +758,13 @@ def get_model(params: AttributeDict) -> nn.Module:
                 f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
                 "However, the output downsampling factor is 1. This could be wrong!"
             )
-    assert params.mae_downsample_factor == params.output_downsampling_factor * 2
-
+    assert params.enable_spec_aug == False, "Should not use specaug when using w2v2 style masking"
+    if params.loss_only_mask:
+        logging.info("Only computing loss on the masked positions")
+    
     model = MultiKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
-        decoder=decoder,
-        decoder_dim=max(_to_int_tuple(params.decoder_dim)),
-        decoder_input_dim=_to_int_tuple(params.decoder_dim)[0],
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
         num_codebooks=params.num_codebooks,
         distillation_layer=params.distillation_layer,
@@ -860,8 +772,11 @@ def get_model(params: AttributeDict) -> nn.Module:
         interpolate_teacher=params.interpolate_teacher,
         teacher_frame_ratio=params.teacher_frame_ratio,
         n_mels=params.feature_dim,
-        mae_loss_norm=params.mae_loss_norm,
-        mae_downsample_factor=params.mae_downsample_factor,
+        mask_prob=params.mask_prob,
+        mask_length=params.mask_length,
+        mask_selection=params.mask_selection,
+        mask_other=params.mask_other,
+        loss_only_mask=params.loss_only_mask,
     )
     return model
 
@@ -1003,42 +918,26 @@ def save_checkpoint(
     """
     if rank != 0:
         return
-    
-    if params.save_with_client:
-        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
-        filename = "brainllm:s3://yangxiaoyu/" + str(filename) 
-        _save_checkpoint(
-            filename=filename,
-            model=model,
-            model_avg=model_avg,
-            params=params,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            sampler=sampler,
-            scaler=scaler,
-            rank=rank,
-        )
-    else:
-        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
-        save_checkpoint_impl(
-            filename=filename,
-            model=model,
-            model_avg=model_avg,
-            params=params,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            sampler=sampler,
-            scaler=scaler,
-            rank=rank,
-        )
+    filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+    save_checkpoint_impl(
+        filename=filename,
+        model=model,
+        model_avg=model_avg,
+        params=params,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        sampler=sampler,
+        scaler=scaler,
+        rank=rank,
+    )
 
-        if params.best_train_epoch == params.cur_epoch:
-            best_train_filename = params.exp_dir / "best-train-loss.pt"
-            copyfile(src=filename, dst=best_train_filename)
+    if params.best_train_epoch == params.cur_epoch:
+        best_train_filename = params.exp_dir / "best-train-loss.pt"
+        copyfile(src=filename, dst=best_train_filename)
 
-        if params.best_valid_epoch == params.cur_epoch:
-            best_valid_filename = params.exp_dir / "best-valid-loss.pt"
-            copyfile(src=filename, dst=best_valid_filename)
+    if params.best_valid_epoch == params.cur_epoch:
+        best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+        copyfile(src=filename, dst=best_valid_filename)
 
 
 def compute_loss(
@@ -1076,7 +975,7 @@ def compute_loss(
     cuts = supervisions["cut"]
         
     feature_lens = supervisions["num_frames"].to(device)
-    task_ids = batch["task_ids"].int().to(device) 
+    task_ids = batch["task_ids"].int().to(device)
     
     if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
@@ -1094,30 +993,26 @@ def compute_loss(
         at_targets = None
     
     with torch.set_grad_enabled(is_training):
-        mvq_loss, audio_tagging_loss, mae_loss = model(
+        mvq_loss, audio_tagging_loss = model(
             x=feature,
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
-            fbank_target=feature,
         )
 
         loss = 0.0
+
         # task_id=1: ASR data
         # task_id=2: AT data
-        
-        # MVQ loss, first is whisper MVQ, second is Dasheng MVQ
+
+        # MVQ loss 
         if params.do_mvq:
             if params.mvq_loss_by_task:
                 mask = task_ids == 1 # ASR=1
                 mvq_loss = (mvq_loss * mask).sum()
-                mae_loss = (mae_loss * mask).sum()
             else:
                 mvq_loss = mvq_loss.sum()
-                mae_loss = mae_loss.sum()
-            
-            loss += mvq_loss * params.mvq_loss_scale
-            loss += mae_loss * params.mae_loss_scale
+            loss += mvq_loss
             
         # AT loss
         if params.do_audio_tagging:
@@ -1133,13 +1028,12 @@ def compute_loss(
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
         info["utterances"] = task_ids.size(0)
 
-    # Note: We use reduction=sum while computing the loss
+    # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
-    info["mae_loss"] = mae_loss.detach().cpu().item()
 
     return loss, info
 
@@ -1254,17 +1148,24 @@ def train_one_epoch(
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
         
-        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
-        unique_origin = set(shard_origin)
-        count = {orig: 0 for orig in unique_origin}
-        for sh in shard_origin:
-            count[sh] += 1
-               
-        if batch_idx % 200 == 1:
-            shard_epoch = [int(c.shar_epoch) for c in cuts]
-            max_epoch = max(shard_epoch)
-            logging.info(f"Estimated epoch is {max_epoch}")
-            logging.info(count)
+        if params.use_shar:
+            shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
+            unique_origin = set(shard_origin)
+            for ori in shard_origin:
+                if ori in shard_count:
+                    shard_count[ori] += 1
+                else:
+                    shard_count[ori] = 1
+            count = {orig: 0 for orig in unique_origin}
+            for sh in shard_origin:
+                count[sh] += 1
+                
+            if batch_idx % 200 == 1:
+                shard_epoch = [int(c.shar_epoch) for c in cuts]
+                max_epoch = max(shard_epoch)
+                logging.info(f"Estimated epoch is {max_epoch}")
+                logging.info(count)
+                logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1286,7 +1187,7 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad()
         except:  # noqa
-            # save_bad_model()
+            save_bad_model()
             display_and_save_batch(batch, params=params, sp=sp)
             raise
 
@@ -1303,43 +1204,28 @@ def train_one_epoch(
                 model_cur=model,
                 model_avg=model_avg,
             )
-        
+
         if (
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            
-            if params.save_with_client:
-                _save_checkpoint_with_global_batch_idx(
-                    model=model,
-                    model_avg=model_avg,
-                    params=params,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    sampler=train_dl.sampler if not params.use_shar else None,
-                    scaler=scaler,
-                    rank=rank,
-                )
-                if world_size > 1:
-                    dist.barrier()
-            else:                
-                save_checkpoint_with_global_batch_idx(
-                    out_dir=params.exp_dir,
-                    global_batch_idx=params.batch_idx_train,
-                    model=model,
-                    model_avg=model_avg,
-                    params=params,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    sampler=train_dl.sampler if not params.use_shar else None,
-                    scaler=scaler,
-                    rank=rank,
-                )
-                remove_checkpoints(
-                    out_dir=params.exp_dir,
-                    topk=params.keep_last_k,
-                    rank=rank,
-                )
+            save_checkpoint_with_global_batch_idx(
+                out_dir=params.exp_dir,
+                global_batch_idx=params.batch_idx_train,
+                model=model,
+                model_avg=model_avg,
+                params=params,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                sampler=train_dl.sampler if not params.use_shar else None,
+                scaler=scaler,
+                rank=rank,
+            )
+            remove_checkpoints(
+                out_dir=params.exp_dir,
+                topk=params.keep_last_k,
+                rank=rank,
+            )
 
         if batch_idx % 100 == 0 and params.use_fp16:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
@@ -1464,16 +1350,6 @@ def run(rank, world_size, args):
     if rank == 0:
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
-        
-    # save the model to client
-    if rank == 0 and params.save_with_client:
-        logging.info(f"Saving the checkpoints with s3 client.")
-        from petrel_client.client import Client
-        conf_path = "/mnt/petrelfs/zhangchen/petreloss.conf"
-        client = Client(conf_path)
-        params.client = client
-    else:
-        params.client = None
 
     assert params.start_epoch > 0, params.start_epoch
     checkpoints = load_checkpoint_if_available(
@@ -1547,7 +1423,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
         
-    
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
@@ -1568,23 +1443,6 @@ def run(rank, world_size, args):
         asr_training_cuts.append(gigaspeech_cuts)
         asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
         asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
-        
-    if params.use_wenetspeech:
-        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
-        wenetspeech_cuts_len = {
-            "S": 151600,
-            "M": 1514500,
-            "L": 13306651, # TODO: update this number
-        }
-        wenetspeech_cuts_duration = {
-            "S": 100,
-            "M": 1000,
-            "L": 9700,
-        }
-        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
     
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
@@ -1611,13 +1469,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(2619190)
         asr_training_cuts_duration.append(10801)
     
-    if params.use_extra_chinese_dataset:
-        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(chineses_cuts)
-        asr_training_cuts_lens.append(chinese_cuts_len)
-        asr_training_cuts_duration.append(chinese_cut_durations)
-        
     if params.use_extra_english_dataset:
         englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
         englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
@@ -1625,9 +1476,33 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(english_cuts_len)
         asr_training_cuts_duration.append(english_cut_durations)
     
-    # If asr cuts are ever used
-    if len(asr_training_cuts) >= 1:    
-        # combine the asr data into a BIG cut
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts_len = {
+            "S": 151600,
+            "M": 1514500,
+            "L": 13306651, # TODO: update this number
+        }
+        wenetspeech_cuts_duration = {
+            "S": 100,
+            "M": 1000,
+            "L": 9700,
+        }
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(wenetspeech_cuts)
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+    
+    if params.use_extra_chinese_dataset:
+        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(chineses_cuts)
+        asr_training_cuts_lens.append(chinese_cuts_len)
+        asr_training_cuts_duration.append(chinese_cut_durations)
+    
+    # combine the asr data into a BIG cut
+    if len(asr_training_cuts) >= 1:
+        # assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
         if len(asr_training_cuts) > 1:
             asr_training_cuts = CutSet.mux(
                 *asr_training_cuts,
@@ -1640,10 +1515,7 @@ def run(rank, world_size, args):
         train_cuts["cuts_asr"] = asr_training_cuts
         train_cuts_duration.append(sum(asr_training_cuts_duration))
     
-    # general audio data
-    if params.do_audio_tagging:
-        assert params.use_audioset, "If we do audio tagging, we must use audioset"
-        
+    # audio data
     if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
@@ -1673,7 +1545,7 @@ def run(rank, world_size, args):
     logging.info(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 0.98 or c.duration > 29.0:
+        if c.duration < 0.98 or c.duration > 29.9:
             return False
 
         return True
