@@ -47,10 +47,11 @@ def main():
     for spkr in speakers:
         audio_folder = os.path.join(dataset_dir, spkr, "audio")
         
-        audios = glob.glob(f"{audio_folder}/*/*/*.m4a")
+        # we assume you already finish the conversion from m4a to wav
+        audios = glob.glob(f"{audio_folder}/*/*/*.wav") 
         for audio in audios:
             emotion, level, uttid = audio.split("/")[-3:]
-            cut_id = "-".join([spkr, emotion, level, uttid.replace(".m4a", "")])
+            cut_id = "-".join([spkr, emotion, level, uttid.replace(".wav", "")])
             
             try:
                 recording = Recording.from_file(audio, cut_id)
