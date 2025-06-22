@@ -1,4 +1,4 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 #
 # Copyright    2024  University of Cambridge  (authors: Xiaoyu Yang,
 #
@@ -63,12 +63,12 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar_speech_audio_multi_teacher import MultiTaskDataModule
+from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd_multi_teacher import MultiKDModel
+from model_multi_kd import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -302,20 +302,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     
     parser.add_argument(
         "--distillation-layer",
-        type=str,
-        default="-1,-1",
+        type=int,
+        default=-1,
     )
     
     parser.add_argument(
         "--distillation-delta",
-        type=str,
-        default="0,0",
+        type=int,
+        default=0,
     )
     
     parser.add_argument(
         "--teacher-frame-ratio",
-        type=str,
-        default="2,2",
+        type=int,
+        default=2,
         help="The frame rate ratio between teacher and student"
     )
     
@@ -329,8 +329,16 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     
     parser.add_argument(
         "--num-codebooks",
-        type=str,
-        default="16,16",
+        type=int,
+        default=8,
+    )
+    
+    parser.add_argument(
+        "--mvq-loss-by-task",
+        type=str2bool,
+        default=True,
+        help="If True, only compute MVQ loss on the task from which the sample is drawn."
+        "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
     )
     
 
@@ -497,21 +505,6 @@ def get_parser():
         type=float,
         default=1.0,
         help="Scale for audio tagging loss.",
-    )
-    
-    # TODO: make this applicable to more than two losses
-    parser.add_argument(
-        "--speech-mvq-loss-scale",
-        type=float,
-        default=1.0,
-        help="The scale of speech mvq losses"
-    )
-
-    parser.add_argument(
-        "--audio-mvq-loss-scale",
-        type=float,
-        default=1.0,
-        help="The scale of audio mvq losses"
     )
     
     parser.add_argument(
@@ -737,11 +730,11 @@ def get_model(params: AttributeDict) -> nn.Module:
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        num_codebooks=_to_int_tuple(params.num_codebooks),
-        distillation_layer=_to_int_tuple(params.distillation_layer),
-        distillation_delta=_to_int_tuple(params.distillation_delta),
+        num_codebooks=params.num_codebooks,
+        distillation_layer=params.distillation_layer,
+        distillation_delta=params.distillation_delta,
         interpolate_teacher=params.interpolate_teacher,
-        teacher_frame_ratio=_to_int_tuple(params.teacher_frame_ratio),
+        teacher_frame_ratio=params.teacher_frame_ratio,
     )
     return model
 
@@ -940,16 +933,16 @@ def compute_loss(
     cuts = supervisions["cut"]
         
     feature_lens = supervisions["num_frames"].to(device)
-    task_ids = batch["task_ids"].int().to(device) 
+    task_ids = batch["task_ids"].int().to(device)
     
     if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
             duration = sum([c.duration for c in cuts if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
             logging.info(f"Total duration of task {t}: {duration}")
+
     # mvq tokens
-    mvq_tokens = batch["cb_indexes"]
-    mvq_tokens = [tokens.to(device) for tokens in mvq_tokens]
+    mvq_tokens = batch["cb_indexes"].to(device)
     
     # audio tagging label
     if params.do_audio_tagging:
@@ -958,52 +951,27 @@ def compute_loss(
         at_targets = None
     
     with torch.set_grad_enabled(is_training):
-        losses = model(
+        mvq_loss, audio_tagging_loss = model(
             x=feature,
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
         )
 
-        speech_mvq_loss, audio_mvq_loss = losses[:-1]
-        audio_tagging_loss = losses[-1]
         loss = 0.0
 
         # task_id=1: ASR data
         # task_id=2: AT data
-        
-        # MVQ loss, first is whisper MVQ, second is Dasheng MVQ
-        mvq_loss_values = []
-        if params.do_mvq:
-            speech_mask = task_ids == 1 # ASR data task_id=1
-            num_speech_frames = feature_lens[speech_mask].sum() // 4 # equivalent frames
-            if torch.isnan(speech_mvq_loss).any(): # filter the nan loss
-                logging.info(f"Detected NaN in speech mvq loss: {speech_mvq_loss}")
-                speech_mvq_loss = torch.nan_to_num(speech_mvq_loss, nan=0.0)
-            speech_mvq_loss = (speech_mvq_loss * speech_mask).sum()
-            mvq_loss_values.append(speech_mvq_loss)
-            # loss += speech_mvq_loss/ (num_speech_frames + 1) * params.speech_mvq_loss_scale # TODO: make this an option
-            loss += speech_mvq_loss * params.speech_mvq_loss_scale # TODO: make this an option
 
-            audio_mask = task_ids == 2
-            num_audio_frames = feature_lens[audio_mask].sum() // 4 # equivalent frames
-            
-            if num_audio_frames == 0:
-                correction_factor = 0.0
-            elif num_speech_frames == 0:
-                correction_factor = 1.0
+        # MVQ loss
+        if params.do_mvq:
+            if params.mvq_loss_by_task:
+                mask = task_ids == 1 # ASR=1
+                mvq_loss = (mvq_loss * mask).sum()
             else:
-                correction_factor = num_speech_frames / num_audio_frames
-                if random.random() < 0.02:
-                    logging.info(f"Correction factor: {correction_factor}")
-            if torch.isnan(audio_mvq_loss).any():
-                logging.info(f"Detected NaN in audio mvq loss: {audio_mvq_loss}")
-                audio_mvq_loss = torch.nan_to_num(audio_mvq_loss, nan=0.0)
-            audio_mvq_loss = (audio_mvq_loss * audio_mask).sum()
-            mvq_loss_values.append(audio_mvq_loss) # the un-normalized loss
-            # loss += (audio_mvq_loss / (num_audio_frames + 1)) * params.audio_mvq_loss_scale # TODO: make this an option
-            loss += audio_mvq_loss * correction_factor * params.audio_mvq_loss_scale # TODO: make this an option
-        
+                mvq_loss = mvq_loss.sum()
+            loss += mvq_loss
+            
         # AT loss
         if params.do_audio_tagging:
             mask = task_ids == 2 # AT=2
@@ -1012,23 +980,19 @@ def compute_loss(
 
     assert loss.requires_grad == is_training
 
-    info = MetricsTracker(normalize=True)
+    info = MetricsTracker()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
         info["utterances"] = task_ids.size(0)
 
-    # Note: We use reduction=sum while computing the loss
+    # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
-        teachers = ["speech", "audio"]
-        for i, mvq_loss in enumerate(mvq_loss_values):
-            info[f"{teachers[i]}_mvq_loss"] = mvq_loss.detach().cpu().item()
+        info["mvq_loss"] = mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
-    # logging.info(f"Batch: {params.batch_idx_train}: speech mvq loss: {speech_mvq_loss}, num_frames: {num_speech_frames}")
-    # logging.info(f"Batch: {params.batch_idx_train}: audio mvq loss: {audio_mvq_loss}, num_frames: {num_audio_frames}")
     return loss, info
 
 
@@ -1042,7 +1006,7 @@ def compute_validation_loss(
     """Run the validation process."""
     model.eval()
 
-    tot_loss = MetricsTracker(normalize=True)
+    tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
         loss, loss_info = compute_loss(
@@ -1126,7 +1090,7 @@ def train_one_epoch(
             params=params,
             optimizer=optimizer,
             scheduler=scheduler,
-            sampler=train_dl.sampler if not params.use_shar else None,
+            sampler=train_dl.sampler,
             scaler=scaler,
             rank=0,
         )
@@ -1142,17 +1106,24 @@ def train_one_epoch(
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
         
-        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
-        unique_origin = set(shard_origin)
-        count = {orig: 0 for orig in unique_origin}
-        for sh in shard_origin:
-            count[sh] += 1
-               
-        if batch_idx % 200 == 1:
-            shard_epoch = [int(c.shar_epoch) for c in cuts]
-            max_epoch = max(shard_epoch)
-            logging.info(f"Estimated epoch is {max_epoch}")
-            logging.info(count)
+        if params.use_shar:
+            shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
+            unique_origin = set(shard_origin)
+            for ori in shard_origin:
+                if ori in shard_count:
+                    shard_count[ori] += 1
+                else:
+                    shard_count[ori] = 1
+            count = {orig: 0 for orig in unique_origin}
+            for sh in shard_origin:
+                count[sh] += 1
+                
+            if batch_idx % 200 == 1:
+                shard_epoch = [int(c.shar_epoch) for c in cuts]
+                max_epoch = max(shard_epoch)
+                logging.info(f"Estimated epoch is {max_epoch}")
+                logging.info(count)
+                logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1410,7 +1381,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
         
-    
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
@@ -1429,25 +1399,8 @@ def run(rank, world_size, args):
         }
         gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(gigaspeech_cuts)
-        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset] * params.repeat_gigaspeech)
-        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset] * params.repeat_gigaspeech)
-        
-    if params.use_wenetspeech:
-        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
-        wenetspeech_cuts_len = {
-            "S": 151600,
-            "M": 1514500,
-            "L": 13306651, # TODO: update this number
-        }
-        wenetspeech_cuts_duration = {
-            "S": 100,
-            "M": 1000,
-            "L": 9700,
-        }
-        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
+        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
     
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
@@ -1474,13 +1427,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(2619190)
         asr_training_cuts_duration.append(10801)
     
-    if params.use_extra_chinese_dataset:
-        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
-        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(chineses_cuts)
-        asr_training_cuts_lens.append(chinese_cuts_len)
-        asr_training_cuts_duration.append(chinese_cut_durations)
-        
     if params.use_extra_english_dataset:
         englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
         englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
@@ -1488,9 +1434,33 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(english_cuts_len)
         asr_training_cuts_duration.append(english_cut_durations)
     
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts_len = {
+            "S": 151600,
+            "M": 1514500,
+            "L": 13306651, # TODO: update this number
+        }
+        wenetspeech_cuts_duration = {
+            "S": 100,
+            "M": 1000,
+            "L": 9700,
+        }
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(wenetspeech_cuts)
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+    
+    if params.use_extra_chinese_dataset:
+        chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
+        chineses_cuts = chineses_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(chineses_cuts)
+        asr_training_cuts_lens.append(chinese_cuts_len)
+        asr_training_cuts_duration.append(chinese_cut_durations)
+    
     # combine the asr data into a BIG cut
     if len(asr_training_cuts) >= 1:
-        assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+        # assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
         if len(asr_training_cuts) > 1:
             asr_training_cuts = CutSet.mux(
                 *asr_training_cuts,
@@ -1499,20 +1469,11 @@ def run(rank, world_size, args):
             )
         else:
             asr_training_cuts = asr_training_cuts[0]
-    else:
-        asr_training_cuts = CutSet()
-    train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
     
-    # general audio data
-    if params.do_audio_tagging:
-        assert params.use_audioset, "If we do audio tagging, we must use audioset"
-        
-    def change_codebook_indexes(c):
-        c.audio_codebook_indexes = c.codebook_indexes
-        del c.codebook_indexes
-        return c
-        
+        train_cuts["cuts_asr"] = asr_training_cuts
+        train_cuts_duration.append(sum(asr_training_cuts_duration))
+    
+    # audio data
     if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
@@ -1532,7 +1493,6 @@ def run(rank, world_size, args):
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
-        audioset_cuts = audioset_cuts.map(change_codebook_indexes)
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
@@ -1543,7 +1503,7 @@ def run(rank, world_size, args):
     logging.info(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 0.98 or c.duration > 29.0:
+        if c.duration < 0.98 or c.duration > 29.9:
             return False
 
         return True
@@ -1617,7 +1577,6 @@ def run(rank, world_size, args):
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
-        as_eval_cuts = as_eval_cuts.map(change_codebook_indexes)
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
