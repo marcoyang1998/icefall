@@ -47,7 +47,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
-from dataset2_npy import MultiTaskKDDataset
+from dataset2_npy_cache import MultiTaskKDDataset
 from icefall.utils import str2bool
 
 
@@ -387,6 +387,24 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--use-msp-podcast",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--repeat-msp-podcast",
+            type=int,
+            default=1,
+        )
+        
+        group.add_argument(
+            "--use-emotion-dataset",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
             "--use-audioset",
             type=str2bool,
             default=False,
@@ -460,7 +478,7 @@ class MultiTaskDataModule:
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
-                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True, pad_to_longest=False)
+                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
             )
         else:
             logging.info("Disable MUSAN")
@@ -1188,6 +1206,92 @@ class MultiTaskDataModule:
                 self.args.manifest_dir / "cuts_vox2_train.jsonl.gz"
             )
         return cuts
+    
+    @lru_cache()
+    def meld_train_cust(self) -> CutSet:
+        logging.info("About to get MELD training cuts")
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/MELD/train",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "meld_cuts_train.jsonl.gz"
+            )
+            
+    @lru_cache()
+    def iemocap_cust(self) -> CutSet:
+        logging.info("About to get IEMOCAP cuts")
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/iemocap/all",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "iemocap_cuts_all.jsonl.gz"
+            )
+            
+    @lru_cache()
+    def mead_cuts(self) -> CutSet:
+        logging.info("About to get MEAD cuts")
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/mead/all",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "mead_cuts_all.jsonl.gz"
+            )
+    
+    @lru_cache()
+    def multi_emotion_cuts(self) -> CutSet:
+        logging.info("About to combine multiple emotion datasets")
+        iemocap_cuts = self.iemocap_cust() # 7 hrs, 5502 cuts
+        mead_cuts = self.mead_cuts() # 37 hrs, 31720 cuts
+        meld_cuts = self.meld_train_cust() # 8.5 hrs, 9045 cuts
+        return CutSet.mux(
+            *[iemocap_cuts, mead_cuts, meld_cuts],
+            stop_early=False,
+            weights=[5502, 31720, 9045]
+        )
+    
+    @lru_cache()
+    def msp_podcast_train_cust(self) -> CutSet:
+        logging.info("About to get msp podcast training cuts")
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/msp_podcast/Train",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "msp_podcast_cuts_Train.jsonl.gz"
+            )
+            
+    @lru_cache()
+    def msp_podcast_dev_cust(self) -> CutSet:
+        logging.info("About to get msp podcast development cuts")
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/msp_podcast/Development",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "msp_podcast_cuts_Development.jsonl.gz"
+            )
+        
 
 
 if __name__=="__main__":
