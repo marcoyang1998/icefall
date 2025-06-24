@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 export PYTHONPATH=./../../../:$PYTHONPATH
+export PYTHONPATH=~/xiaoyu/workspace/lhotse:$PYTHONPATH
 
 # data related
 use_librispeech=0
@@ -27,7 +28,7 @@ time_mask_ratio=1.0
 
 # finetune args
 do_finetune=1
-finetune_ckpt=zipformer_audio_encoder/exp-full-libri-96M-zipformer-non-streaming-whisper-dasheng-multi-mvq-cb16-do-at-0-mask-ratio-1.0-musan-1/iter-224000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-96M-zipformer-mae-as-full-out-ds-2-w2v2-mask-prob-0.5-len-10-channel-mask-prob-0.25-len-15-mae-scale-0.2-norm-frame-mvq-1.0-small-decoder-dasheng-large-as-mvq-cb8-musan-1-shar/iter-300000-avg-4.pt
 
 freeze_encoder=0
 freeze_encoder_steps=2000
@@ -37,23 +38,24 @@ encoder_lr_scale=0.05
 
 md=1000
 
-exp_dir=zipformer_audio_encoder_finetune/exp-finetune-as-${audioset_subset}\
--lr-${lr}-causal-${causal}-musan-${enable_musan}-mixup-${mixup_prob}-freeze-encoder-${freeze_encoder}\
+exp_dir=zipformer_audio_encoder_finetune/exp-finetune-AT-as-${audioset_subset}\
+-lr-${lr}-musan-${enable_musan}-mixup-${mixup_prob}-freeze-encoder-${freeze_encoder}\
 -freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-multi-mvq-224k
+-from-small-decoder-mae-scale-0.2-w2v2-mask-p-0.5-channel-0.25-dasheng-as-mvq-cb8-with-musan-300k
 
+echo $exp_dir
 # exp_dir=zipformer_audio_encoder_finetune/exp-debug
 
-export CUDA_VISIBLE_DEVICES="0,1"
-torchrun --nproc_per_node=2 --master_port=19130 \
+# export CUDA_VISIBLE_DEVICES="0,1"
+torchrun --nproc_per_node=2 --master_port=19120 \
   zipformer_audio_encoder/finetune_at.py \
-    --num-epochs 50 \
+    --num-epochs 30 \
     --start-epoch 1 \
     --use-fp16 1 \
     --use-librispeech $use_librispeech --full-libri $full_libri \
     --use-audioset $use_audioset --audioset-subset $audioset_subset --repeat-audioset $repeat_audioset \
     --exp-dir $exp_dir \
-    --manifest-dir data/fbank_as_ced_mAP50 \
+    --manifest-dir data_s3/vq_dasheng_large_cb_16 \
     --base-lr $lr \
     --enable-musan $enable_musan \
     --enable-spec-aug $enable_spec_aug --spec-aug-time-warp-factor $time_warp --time-mask-ratio $time_mask_ratio\
@@ -70,7 +72,9 @@ torchrun --nproc_per_node=2 --master_port=19130 \
     --encoder-dim 192,256,448,768,448,192 \
     --encoder-unmasked-dim 192,192,256,256,256,192 \
     --on-the-fly-feats 1 \
-    --num-workers 2 \
+    --num-workers 16 \
     --max-duration $md
 
 echo "Done"
+
+# ./run/inference_audio_tagging.sh

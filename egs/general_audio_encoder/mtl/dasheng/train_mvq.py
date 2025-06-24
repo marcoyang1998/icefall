@@ -8,7 +8,7 @@ from lhotse import load_manifest_lazy
 import multi_quantization as quantization
 import numpy as np
 
-from icefall.utils import setup_logger
+from icefall.utils import setup_logger, str2bool
 
 def get_parser():
     parser = argparse.ArgumentParser()
@@ -28,6 +28,13 @@ def get_parser():
         "--num-codebooks",
         type=int,
         default=4,
+    )
+    
+    parser.add_argument(
+        "--normalize",
+        type=str2bool,
+        default=False,
+        help="If True, normalize the features by channel"
     )
     
     parser.add_argument(
@@ -84,6 +91,14 @@ def train_quantizer(args):
     )
     
     train, valid = prepare_data(training_manifest, split=True)
+    if args.normalize:
+        mu = train.mean(dim=0) # (C)
+        std = train.std(dim=0) # (C)
+        train = (train - mu) / std
+        valid = (valid - mu) / std
+    else:
+        mu, std = None, None
+        
     B = 1024  # Minibatch size, this is very arbitrary,
     # it's close to what we used when we tuned this method.
 
@@ -105,7 +120,12 @@ def train_quantizer(args):
 
     quantizer = trainer.get_quantizer()
     logging.info(f"Saving the quantizer to {args.quantizer_path}")
-    torch.save(quantizer.state_dict(), args.quantizer_path)
+    state_dict = {
+        "quantizer": quantizer.state_dict(),
+        "mu": mu,
+        "std": std,
+    }
+    torch.save(state_dict, args.quantizer_path)
     
     return quantizer
 
@@ -143,7 +163,7 @@ def main(args):
             num_codebooks=args.num_codebooks,
             codebook_size=256,
         )
-        quantizer.load_state_dict(torch.load(args.quantizer_path))
+        quantizer.load_state_dict(torch.load(args.quantizer_path)["quantizer"])
         quantizer.to(device)
     else:
         quantizer = train_quantizer(args)
