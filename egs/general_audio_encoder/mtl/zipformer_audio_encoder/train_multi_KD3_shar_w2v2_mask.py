@@ -356,6 +356,15 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If True, only compute loss on the masked indices"
     )
+    
+    parser.add_argument(
+        "--mask-mode",
+        type=str,
+        default="w2v2",
+        choices=["w2v2", "block"],
+        help="The masking mode",
+    )
+    
     parser.add_argument(
         "--mask-length", type=int, default=10, help="mask_length"
     )
@@ -380,6 +389,17 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0,
         help="secondary mask argument (used for more complex distributions),see help in compute_mask_indicesh",
+    )
+    
+    parser.add_argument(
+        "--mask-channel-length", type=int, default=15, help="mask_length"
+    )
+    
+    parser.add_argument(
+        "--mask-channel-prob",
+        type=float,
+        default=0.0,
+        help="probability of replacing a channel with mask",
     )
 
 
@@ -785,11 +805,13 @@ def get_model(params: AttributeDict) -> nn.Module:
         distillation_delta=params.distillation_delta,
         interpolate_teacher=params.interpolate_teacher,
         teacher_frame_ratio=params.teacher_frame_ratio,
-        n_mels=params.feature_dim,
+        mask_mode=params.mask_mode,
         mask_prob=params.mask_prob,
         mask_length=params.mask_length,
         mask_selection=params.mask_selection,
         mask_other=params.mask_other,
+        mask_channel_prob=params.mask_channel_prob,
+        mask_channel_length=params.mask_channel_length,
         loss_only_mask=params.loss_only_mask,
     )
     return model
@@ -1027,6 +1049,7 @@ def compute_loss(
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
+            mask=is_training,
         )
 
         loss = 0.0
