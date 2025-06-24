@@ -209,6 +209,18 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.0,
     )
+    
+    parser.add_argument(
+        "--dropout-prob",
+        type=float,
+        default=0.0,
+    )
+    
+    parser.add_argument(
+        "--gated-mlp",
+        type=str2bool,
+        default=True,
+    )
 
     parser.add_argument(
         "--causal",
@@ -662,15 +674,19 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
     if params.subsampling_factor == 2:
+        logging.info(f"Using subsample factor = 2")
         encoder_embed = Conv2dSubsampling(
             idim=params.feature_dim,
             odim=params.encoder_dim,
         )
-    else:
+    elif params.subsampling_factor == 4:
+        logging.info(f"Using subsample factor = 4")
         encoder_embed = Conv2dSubsampling4(
             idim=params.feature_dim,
             odim=params.encoder_dim,
         )
+    else:
+        raise ValueError()
     return encoder_embed
 
 
@@ -682,6 +698,8 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         hidden_act="gelu",
         use_flash_attention=params.use_flash_attention,
         attention_dropout=params.attention_dropout,
+        dropout_p=params.dropout_prob,
+        gated_mlp=params.gated_mlp,
         is_causal=params.causal,
     )
     return encoder
@@ -695,6 +713,13 @@ def get_model(params: AttributeDict) -> nn.Module:
     if params.interpolate_teacher:
         logging.warning(f"Interpolate the teacher indexes to match the length of the student")
         assert params.teacher_frame_ratio == 1
+        
+    if params.teacher_frame_ratio == 1:
+        assert params.subsampling_factor == 2
+    elif params.teacher_frame_ratio == 2:
+        assert params.subsampling_factor == 4
+    else:
+        raise ValueError()
 
     model = MultiKDModel(
         encoder_embed=encoder_embed,

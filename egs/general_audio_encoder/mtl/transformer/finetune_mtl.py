@@ -69,6 +69,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
+import torch.distributed as dist
 from mtl_datamodule import MultiTaskDataModule
 from decoder import Decoder
 from joiner import Joiner
@@ -77,7 +78,7 @@ from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_asr import MultiTaskModel
 from optim import Eden, ScaledAdam
-from subsampling import Conv2dSubsampling
+from subsampling import Conv2dSubsampling, Conv2dSubsampling4
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -112,7 +113,9 @@ from utils import (
     MetricsTracker,
     _add_task_id,
     map_zh,
-    setup_distributed,   
+    setup_distributed,
+    _save_checkpoint,
+    _save_checkpoint_with_global_batch_idx,
 )
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
@@ -232,6 +235,31 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=True,
         help="If True, enable flash attention.",
     )
+    
+    parser.add_argument(
+        "--attention-dropout",
+        type=float,
+        default=0.0,
+    )
+    
+    parser.add_argument(
+        "--dropout-prob",
+        type=float,
+        default=0.0,
+    )
+    
+    parser.add_argument(
+        "--gated-mlp",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--layerdrop-prob",
+        type=float,
+        default=0.0,
+        help="Layer dropout prob"
+    )
 
     parser.add_argument(
         "--decoder-dim",
@@ -300,6 +328,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If True, use CTC head.",
+    )
+    
+    parser.add_argument(
+        "--subsampling-factor",
+        type=int,
+        default=2,
+        help="Controls the selection subsampling frontend."
     )
 
 
@@ -391,8 +426,30 @@ def get_parser():
         "--opt",
         type=str,
         default="scaledadam",
-        choices=["scaledadam", "adam"],
+        choices=["scaledadam", "adam", "adamw"],
         help="Which optimizer to use",
+    )
+    
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="Weight decay factor, used in AdamW"
+    )
+    
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="eden",
+        choices=["eden", "cosine", "tri_stage"],
+        help="Which lr scheduler to use",
+    )
+    
+    parser.add_argument(
+        "--num-training-steps",
+        type=int,
+        default=300000,
+        help="How many training steps. only used when using cosine scheduler"
     )
     
     parser.add_argument(
@@ -522,6 +579,13 @@ def get_parser():
         end of each epoch where `xxx` is the epoch number counting from 1.
         """,
     )
+    
+    parser.add_argument(
+        "--save-with-client",
+        type=str2bool,
+        default=True,
+        help="If True, save the model to s3 client"
+    )
 
     parser.add_argument(
         "--keep-last-k",
@@ -623,7 +687,6 @@ def get_params() -> AttributeDict:
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 128,
-            "subsampling_factor": 2,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
             "num_tasks": 2,
@@ -642,10 +705,20 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # In the normal configuration, we will downsample once more at the end
     # by a factor of 2, and most of the encoder stacks will run at a lower
     # sampling rate.
-    encoder_embed = Conv2dSubsampling(
-        idim=params.feature_dim,
-        odim=params.encoder_dim,
-    )
+    if params.subsampling_factor == 2:
+        logging.info(f"Using subsample factor = 2")
+        encoder_embed = Conv2dSubsampling(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
+    elif params.subsampling_factor == 4:
+        logging.info(f"Using subsample factor = 4")
+        encoder_embed = Conv2dSubsampling4(
+            idim=params.feature_dim,
+            odim=params.encoder_dim,
+        )
+    else:
+        raise ValueError()
     return encoder_embed
 
 
@@ -656,6 +729,10 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
         num_attention_heads=params.num_heads,
         hidden_act="gelu",
         use_flash_attention=params.use_flash_attention,
+        attention_dropout=params.attention_dropout,
+        dropout_p=params.dropout_prob,
+        gated_mlp=params.gated_mlp,
+        layerdrop_p=params.layerdrop_prob,
         is_causal=params.causal,
     )
     return encoder
@@ -860,25 +937,41 @@ def save_checkpoint(
     if rank != 0:
         return
     filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
-    save_checkpoint_impl(
-        filename=filename,
-        model=model,
-        model_avg=model_avg,
-        params=params,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        sampler=sampler,
-        scaler=scaler,
-        rank=rank,
-    )
+    if params.save_with_client:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        filename = "brainllm:s3://yangxiaoyu/" + str(filename) 
+        _save_checkpoint(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
+    else:
+        filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
+        save_checkpoint_impl(
+            filename=filename,
+            model=model,
+            model_avg=model_avg,
+            params=params,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            sampler=sampler,
+            scaler=scaler,
+            rank=rank,
+        )
 
-    if params.best_train_epoch == params.cur_epoch:
-        best_train_filename = params.exp_dir / "best-train-loss.pt"
-        copyfile(src=filename, dst=best_train_filename)
+        if params.best_train_epoch == params.cur_epoch:
+            best_train_filename = params.exp_dir / "best-train-loss.pt"
+            copyfile(src=filename, dst=best_train_filename)
 
-    if params.best_valid_epoch == params.cur_epoch:
-        best_valid_filename = params.exp_dir / "best-valid-loss.pt"
-        copyfile(src=filename, dst=best_valid_filename)
+        if params.best_valid_epoch == params.cur_epoch:
+            best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+            copyfile(src=filename, dst=best_valid_filename)
 
 
 def compute_loss(
@@ -1030,7 +1123,7 @@ def compute_validation_loss(
     tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
-        with torch.cuda.amp.autocast(enabled=params.use_fp16):
+        with torch.amp.autocast("cuda", enabled=params.use_fp16):
             loss, loss_info = compute_loss(
                 params=params,
                 model=model,
@@ -1141,7 +1234,7 @@ def train_one_epoch(
                 logging.info(f"Estimated epoch is {max_epoch}")
                 logging.info(count)
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.amp.autocast("cuda", enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1183,23 +1276,37 @@ def train_one_epoch(
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            save_checkpoint_with_global_batch_idx(
-                out_dir=params.exp_dir,
-                global_batch_idx=params.batch_idx_train,
-                model=model,
-                model_avg=model_avg,
-                params=params,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                sampler=train_dl.sampler if not params.use_shar else None,
-                scaler=scaler,
-                rank=rank,
-            )
-            remove_checkpoints(
-                out_dir=params.exp_dir,
-                topk=params.keep_last_k,
-                rank=rank,
-            )
+            if params.save_with_client:
+                _save_checkpoint_with_global_batch_idx(
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                if world_size > 1:
+                    dist.barrier()
+            else:                
+                save_checkpoint_with_global_batch_idx(
+                    out_dir=params.exp_dir,
+                    global_batch_idx=params.batch_idx_train,
+                    model=model,
+                    model_avg=model_avg,
+                    params=params,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    sampler=train_dl.sampler if not params.use_shar else None,
+                    scaler=scaler,
+                    rank=rank,
+                )
+                remove_checkpoints(
+                    out_dir=params.exp_dir,
+                    topk=params.keep_last_k,
+                    rank=rank,
+                )
 
         if batch_idx % 100 == 0 and params.use_fp16:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
@@ -1338,6 +1445,16 @@ def run(rank, world_size, args):
         # model_avg is only used with rank 0
         model_avg = copy.deepcopy(model).to(torch.float64)
 
+    # save the model to client
+    if rank == 0 and params.save_with_client:
+        logging.info(f"Saving the checkpoints with s3 client.")
+        from petrel_client.client import Client
+        conf_path = "/mnt/petrelfs/zhangchen/petreloss.conf"
+        client = Client(conf_path)
+        params.client = client
+    else:
+        params.client = None
+    
     # load model parameters for model fine-tuning
     if params.do_finetune:
         assert params.start_epoch == 1, "Fine-tune must start from epoch 1"
@@ -1392,17 +1509,44 @@ def run(rank, world_size, args):
             lr=params.base_lr,
             betas=(0.9, 0.98),
         )
+    elif params.opt == "adamw":
+        logging.info(f"Using AdamW optimizer. Weight decay: {params.weight_decay}")
+        parameters = get_parameter_groups_with_lrs(model, lr=params.base_lr, include_names=False)
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=params.base_lr,
+            betas=(0.9, 0.98),
+            weight_decay=params.weight_decay,
+        )
     else:
         raise ValueError()
         
 
-    scheduler = Eden(
-        optimizer,
-        params.lr_batches,
-        params.lr_epochs,
-        warmup_batches=params.warmup_batches,
-        warmup_start=params.warmup_start,
-    )
+    if params.lr_scheduler == "eden":
+        scheduler = Eden(
+            optimizer,
+            params.lr_batches,
+            params.lr_epochs,
+            warmup_batches=params.warmup_batches,
+            warmup_start=params.warmup_start
+        )
+    elif params.lr_scheduler == "cosine":
+        from cosine_lr import CosineLRScheduler
+        scheduler = CosineLRScheduler(
+            optimizer,
+            warmup_batches=params.warmup_batches,
+            max_training_steps=params.num_training_steps,
+        )
+        assert params.num_training_steps >= params.max_iters
+    elif params.lr_scheduler == "tri_stage":
+        from tri_stage_scheduler import TriStageLRSchedueler
+        scheduler = TriStageLRSchedueler(
+            optimizer,
+            base_lr=params.base_lr,
+            total_steps=params.num_training_steps,
+        )
+    else:
+        raise ValueError()
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
@@ -1781,7 +1925,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.amp.autocast("cuda", enabled=params.use_fp16):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,
