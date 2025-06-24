@@ -468,6 +468,13 @@ def decode_one_batch(
         )
 
     encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens)
+    # torch.save(feature, "fbank_gt.pt")
+    # torch.save(encoder_out, "encoder_out_gt.pt")
+    # torch.save(encoder_out_lens, "encoder_out_lens_gt.pt")
+    # cuts = supervisions["cut"]
+    # from lhotse import CutSet
+    # cuts = CutSet.from_cuts(cuts)
+    # cuts.to_jsonl("test.jsonl.gz")
 
     hyps = []
 

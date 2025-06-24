@@ -107,6 +107,13 @@ def get_parser():
         type=str,
         default="brainllm:s3://yangxiaoyu",
     )
+    
+    parser.add_argument(
+        "--context-size",
+        type=int,
+        default=2,
+        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
+    )
 
     add_model_arguments(parser)
 
@@ -133,6 +140,9 @@ def main():
         params.client = client
     else:
         params.client = None
+    
+    params.vocab_size = 500
+    params.blank_id = 0
 
     logging.info(f"Device: {device}")
     logging.info(params)

@@ -61,6 +61,8 @@ class LlamaAudioEncoder(nn.Module):
             logging.info("Using causal mask in transformer layers")
         
         self.layerdrop_p = layerdrop_p
+        if self.layerdrop_p > 0.0:
+            logging.info(f"Using layerdrop with prob {layerdrop_p}")
         self.layers = nn.ModuleList(
             [LlamaEncoderLayer(
                 config, layer_idx, is_causal, dropout_p=dropout_p, gated_mlp=gated_mlp) 
