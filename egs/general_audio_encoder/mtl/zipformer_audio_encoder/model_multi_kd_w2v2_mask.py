@@ -44,10 +44,16 @@ class MultiKDModel(nn.Module):
         interpolate_teacher: bool = False,
         n_mels: int = 128,
         num_events: int = 527,
+        mask_mode: str = "w2v2",
         mask_prob: float = 0.65,
         mask_length: int = 10,
         mask_selection: str = "static",
         mask_other: float = 0.0,
+        min_masks: int = 2,
+        mask_channel_prob: float = 0.0,
+        mask_channel_length: int = 10,
+        mask_channel_selection: str = "static",
+        mask_channel_other: float = 0.0,
         loss_only_mask: bool = False,
     ):
         """A model that performs MVQ KD pre-training .
@@ -71,6 +77,10 @@ class MultiKDModel(nn.Module):
             Should be zero for non-streaming models, and a positive number for streaming models
           teacher_frame_ratio:
             The frame rate ratio between the target and the model output
+          mask_mode:
+            The masking mode.
+                w2v2: the wav2vec2 style of masking, allows overlap
+                custom: no overlap, therefore bigger masking ratio 
           mask_prob:
             The probability of selecting choosing one frame as the start index
           mask_length:
@@ -110,11 +120,20 @@ class MultiKDModel(nn.Module):
         ) # 527 classes
         
         # masking related
+        assert mask_mode in ["w2v2", "block"], f"Unseen mask mode: {mask_mode}"
+        self.mask_mode = mask_mode
+        
         self.mask_emb = nn.Parameter(torch.FloatTensor(n_mels).normal_()) 
         self.mask_prob = mask_prob
         self.mask_length = mask_length
         self.mask_selection = mask_selection
         self.mask_other = mask_other
+        self.min_masks = min_masks
+        
+        self.mask_channel_prob = mask_channel_prob
+        self.mask_channel_length = mask_channel_length
+        self.mask_channel_selection = mask_channel_selection
+        self.mask_channel_other = mask_channel_other
         
         self.loss_only_mask = loss_only_mask
 
@@ -277,10 +296,80 @@ class MultiKDModel(nn.Module):
         self,
         x: torch.Tensor,
         padding_mask: torch.Tensor = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply mask according to the mask_mode, return the masked features and the masked positions
+
+        Args:
+            x (torch.Tensor): The input fbank features
+            padding_mask (torch.Tensor, optional): The padding mask
+
+        Returns:
+            The masked fbank feature and the masked_indices, with masked positions as 1
+        """
+        # apply mask to the fbank features, two modes applicable
+        if self.mask_mode == "w2v2":
+            x, masked_indices = self.apply_mask_w2v2(x, padding_mask)
+        elif self.mask_mode == "block":
+            x, masked_indices = self.apply_mask_block(x, padding_mask)
+        else:
+            raise NotImplementedError()
+        
+        if random.random() > 0.97:
+            logging.info(f"Apply {self.mask_mode} masking. A proportion of {masked_indices.sum()/masked_indices.numel():.2f} frames are masked")
+        return x, masked_indices
+        
+    
+    def apply_mask_block(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ):
+        B,T,C = x.shape
+        assert self.mask_prob > 0.0
+
+        mask_indices = compute_mask_indices_block(
+            shape=(B,T),
+            padding_mask=padding_mask,
+            mask_prob=self.mask_prob,
+            mask_length=self.mask_length,
+            min_masks=self.min_masks,
+        ).to(x.device)
+        
+        x = index_put(x, mask_indices.bool(), self.mask_emb)
+
+        return x, mask_indices
+    
+    def apply_mask_w2v2(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
     ):
         # this function is modified from fairseq: https://github.com/facebookresearch/fairseq/blob/bedb259bf34a9fc22073c13a1cee23192fa70ef3/fairseq/models/wav2vec/wav2vec2.py#L429
         # The masked indices have value 1
         B, T, C = x.shape
+        
+        # we mask channel first, then mask timestamps
+        if self.mask_channel_prob > 0:
+            mask_channel_indices = compute_mask_indices(
+                (B, C),
+                None,
+                self.mask_channel_prob,
+                self.mask_channel_length,
+                self.mask_channel_selection,
+                self.mask_channel_other,
+                no_overlap=False,
+                min_space=1,
+                require_same_masks=False,
+            )
+            mask_channel_indices = (
+                torch.from_numpy(mask_channel_indices)
+                .to(x.device)
+                .unsqueeze(1)
+                .expand(-1, T, -1)
+            )
+            if random.random() > 0.98:
+                logging.info(f"A proportion of {mask_channel_indices.sum()/mask_channel_indices.numel():.2f} feature dims are masked")
+            x[mask_channel_indices] = 0
 
         if self.mask_prob > 0:
             mask_indices = compute_mask_indices(
@@ -290,7 +379,7 @@ class MultiKDModel(nn.Module):
                 self.mask_length,
                 mask_type=self.mask_selection,
                 mask_other=self.mask_other,
-                min_masks=2,
+                min_masks=2, # fixed
                 no_overlap=False,  # False
                 min_space=1,  # 1
                 require_same_masks=False,
@@ -298,8 +387,6 @@ class MultiKDModel(nn.Module):
             mask_indices = torch.from_numpy(mask_indices).to(x.device)
             x = index_put(x, mask_indices, self.mask_emb)
             mask_indices = mask_indices.float()
-            if random.random() > 0.98:
-                logging.info(f"A proportion of {mask_indices.sum()/mask_indices.numel():.2f} frames are masked")
         else:
             mask_indices = None
 
@@ -360,6 +447,34 @@ class MultiKDModel(nn.Module):
 def index_put(tensor, indices, value):
     tensor[indices] = value
     return tensor    
+
+def compute_mask_indices_block(
+    shape,
+    padding_mask,
+    mask_prob: float = 0.5,
+    mask_length: int = 10,
+    min_masks: int = 2,
+):
+    # self-implemented mask, no overlap
+    B,T = shape
+    mask_indices = []
+    for i in range(B):
+        if padding_mask is not None:
+            num_segments = (T - padding_mask[i].sum()) // mask_length # discard the last few frames
+        else:
+            num_segments = T // mask_length 
+        segment_mask = torch.rand(num_segments) < mask_prob 
+        while sum(segment_mask) < min_masks:
+            segment_mask = torch.rand(num_segments) < mask_prob
+        segment_mask_expanded = segment_mask.unsqueeze(-1).expand(num_segments, mask_length)
+        segment_mask_expanded = segment_mask_expanded.reshape(-1).float()
+        if segment_mask_expanded.size(0) < T:
+            pad = T - segment_mask_expanded.size(0)
+            segment_mask_expanded = torch.cat([segment_mask_expanded, torch.zeros(pad)])
+        mask_indices.append(segment_mask_expanded)
+
+    mask_indices = torch.stack(mask_indices)
+    return mask_indices
 
 def compute_mask_indices(
     shape: Tuple[int, int],
@@ -552,14 +667,54 @@ def compute_mask_indices(
 
     return mask
 
-def _test_mask():
+def _test_w2v2_channel_mask():
+    x = torch.ones(100, 1000, 128)
+    B, T, C = x.shape
+    
+    configs = [(0.25, 15), (0.25, 20), (0.5, 15),]
+    # configs = [(0.2, 20), (0.3, 20), (0.4, 20),]
+    for config in configs:
+        mask_channel_prob, mask_channel_length = config
+        ratios = []
+        for i in range(20):
+            mask_channel_indices = compute_mask_indices(
+                (B, C),
+                None,
+                mask_channel_prob,
+                mask_channel_length,
+                "static",
+                0.0,
+                no_overlap=False,
+                min_space=1,
+                require_same_masks=False,
+            )
+            mask_channel_indices = (
+                torch.from_numpy(mask_channel_indices)
+                .to(x.device)
+                .unsqueeze(1)
+                .expand(-1, T, -1)
+            )
+            ratio = mask_channel_indices.sum() / mask_channel_indices.numel()
+            ratios.append(ratio)
+        import pdb; pdb.set_trace()
+        avg_ratio = sum(ratios) / len(ratios)
+        print(f"Current config: mask_channel_prob = {mask_channel_prob}, mask_channel_length = {mask_channel_length}")
+        print(f"Averaged masking ratio: {avg_ratio}")
+
+def _test_w2v2_mask():
     x = torch.ones(100, 1000, 128)
     B, T, C = x.shape
     
     mask_prob = 0.65
     mask_length = 10
     
-    configs = [(0.65, 10), (0.01, 40), (0.1, 40), (0.2, 40), (0.2, 20)]
+    # configs = [(0.65, 10), (0.01, 40), (0.1, 40), (0.2, 40), (0.2, 20), (0.35, 10), (0.35, 20), (0.25, 20)]
+    configs = []
+    for i in range(6):
+        p = 0.05 + (i+1) * 0.1
+        for l in [10, 20, 30, 40]:
+            configs.append((p, l))
+    configs = [(0.65, 10), (0.02, 40), (0.05, 40), (0.1, 40)]
     for config in configs:
         mask_prob, mask_length = config
         ratios = []
@@ -583,5 +738,37 @@ def _test_mask():
         print(f"Current config: mask_prob = {mask_prob}, mask_length = {mask_length}")
         print(f"Averaged masking ratio: {avg_ratio}")
 
+def _test_custom_mask():
+    x = torch.ones(100, 1000, 128)
+    B, T, C = x.shape
+    
+    configs = [(0.5, 20), (0.2, 20), (0.3, 20), (0.4, 20), (0.5, 20)]
+    for config in configs:
+        mask_prob, mask_length = config
+        ratios = []
+        for i in range(20):
+            all_possible_mask_lengths = [mask_length + i * 2 for i in range(-5, 6)]
+            mask_length = random.sample(all_possible_mask_lengths, 1)[0]
+            assert mask_length > 0, f"Sampled mask_length smaller than 0, {mask_length}"
+            
+            mask_indices = compute_mask_indices_block(
+                shape=(B, T),
+                padding_mask=None,
+                mask_prob=mask_prob,
+                mask_length=mask_length,
+                min_masks=2,
+            )
+            import pdb; pdb.set_trace()
+            ratio = mask_indices.sum() / mask_indices.numel()
+            ratios.append(ratio)
+        avg_ratio = sum(ratios) / len(ratios)
+        print(f"Current config: mask_prob = {mask_prob}, mask_length = {mask_length}")
+        print(f"Averaged masking ratio: {avg_ratio}")
+        
+def _test_specaug_feature():
+    pass
+
 if __name__=="__main__":
-    _test_mask()
+    _test_w2v2_channel_mask()
+    # _test_w2v2_mask()
+    # _test_custom_mask()
