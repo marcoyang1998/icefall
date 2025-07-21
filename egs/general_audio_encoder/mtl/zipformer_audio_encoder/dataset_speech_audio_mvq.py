@@ -86,6 +86,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         num_cb_speech: int = 16,
         audio_target_frame_rate: int = 25,
         num_cb_audio: int = 16,
+        batch_duration_threshold: int = 2000,
     ):
         """
         IterableDataset constructor.
@@ -123,6 +124,14 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # throughout the epoch. It regularly closes open file handles to
         # reset the internal HDF5 caches.
         self.hdf5_fix = Hdf5MemoryIssueFix(reset_interval=100)
+        
+        # a strict constraint on the total duration (after padding), if
+        # a batch exceeds this limit, will remove the last (short) few cuts
+        # until the total duration is under this limit
+        # This is especially helpful for Zipsampler, as one sampler could yield
+        # a lot of cuts with short length, while the other with cuts that are very
+        # long, making the total batch extremly large!
+        self.batch_duration_threshold = batch_duration_threshold
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
@@ -135,7 +144,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         # Sort the cuts by duration so that the first one determines the batch time dimensions.
         cuts = cuts.sort_by_duration(ascending=False)
-
+        cuts = filter_cuts_by_duration(cuts, batch_duration_threshold=self.batch_duration_threshold)
+        
         # Optional CutSet transforms - e.g. padding, or speed perturbation that adjusts
         # the supervision boundaries.
         for tnfm in self.cut_transforms:
@@ -154,6 +164,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             inputs, _, cuts = input_tpl
         else:
             inputs, _ = input_tpl
+        assert inputs.shape[0] == len(cuts)
 
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
@@ -168,7 +179,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
-        # cuts_pre_mixed = fix_start(cuts_pre_mixed)
+        cuts_pre_mixed = fix_start(cuts_pre_mixed)
+        assert len(cuts_pre_mixed) == len(cuts)
         
         # load speech indexes
         mvq_tokens, mvq_token_lens = _collate_custom_field(
@@ -195,7 +207,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
                 cuts_pre_mixed, "beats_embedding", dummy=self.dummy_audio_logits, temporal_array=False
             ) # (N,C)
         else:        
-            audio_events = [c.supervisions[0].audio_event for c in cuts_pre_mixed] # the label indices are in CED format
+            audio_events = [getattr(c.supervisions[0], "audio_event", "0") for c in cuts_pre_mixed] # the label indices are in CED format
             at_targets, _ = str2multihot(audio_events) # (N, num_events)
             
         sv_targets = None
@@ -232,14 +244,26 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         return batch
 
+def filter_cuts_by_duration(cuts: CutSet, batch_duration_threshold: int = 2000) -> CutSet:
+    # the cuts are sorted by duration in decending order
+    max_duration = cuts[0].duration
+    num_cuts = len(cuts)
+    max_cuts = int(batch_duration_threshold // max_duration)
+    if max_cuts < num_cuts:
+        return cuts.subset(first=max_cuts)
+    else:
+        return cuts
+
 def fix_start(cuts):
     # make the start of codebook indexes the same as the cut
     new_cuts = []
     for cut in cuts:
         if cut.has_custom("codebook_indexes"):
-            cut.codebook_indexes.start = cut.start
+            if not isinstance(cut.codebook_indexes, dict):
+                cut.codebook_indexes.start = cut.start
         if cut.has_custom("audio_codebook_indexes"):
-            cut.audio_codebook_indexes.start = cut.start
+            if not isinstance(cut.audio_codebook_indexes, dict):
+                cut.audio_codebook_indexes.start = cut.start
         new_cuts.append(cut)
     return new_cuts
 
@@ -250,10 +274,10 @@ def validate_multi_kd(cuts: CutSet) -> None:
         assert cut.has_custom("task_id")
         if cut.task_id == 1: 
             # speech cuts, should have codebook indexes
-            assert cut.has_custom("codebook_indexes") or cut.has_custom("audio_codebook_indexes")
+            assert cut.has_custom("codebook_indexes")
         elif cut.task_id == 2:
-            # audio cuts, should have audio logits
-            assert cut.has_custom("beats_embedding")
+            assert cut.has_custom("audio_codebook_indexes")
+            # assert cut.has_custom("beats_embedding")
 
 def load_codebook_indexes(c, field: str = "codebook_indexes"):
     info = getattr(c, field)
@@ -311,8 +335,18 @@ def _collate_custom_field(
         all_arrays = [torch.from_numpy(c.load_custom(field)) if c.has_custom(field) else dummy for c in cuts]
         return torch.stack(all_arrays)
             
-        
-if __name__=="__main__":
+def _test_filter_cuts():
+    batch = torch.load("zipformer_audio_encoder/exp-96M-zipformer-lh-large-giga-xl-emo-1-as-full-music4all-w2v2-mask-p-0.5-len-10-channel-mask-p-0.25-len-15-multi-mvq-hubert-large-cb16-1.0-dasheng-as-cb8-0.2-shar-md600/batch-bdd640fb-0667-1ad1-1c80-317fa3b1799d.pt")
+    cuts = batch["supervisions"]["cut"]
+    cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+    cuts = CutSet.from_cuts(cuts_pre_mixed)
+    
+    print(f"Length before filtering: {len(cuts)}")
+    filter_cuts = filter_cuts_by_duration(cuts, 2000)
+    print(f"Length after filtering: {len(filter_cuts)}")
+    assert type(cuts) == type(filter_cuts)
+    
+def _test():
     from functools import partial
     from utils import _add_dummy_embeddings_and_taskIDs
     from lhotse import load_manifest
@@ -340,4 +374,31 @@ if __name__=="__main__":
     beats_embed = _collate_custom_field(cuts, "beats_embedding", dummy=dummy_audio_logits, temporal_array=False)
     
     print(beats_embed)
+    
+def _test2():
+    from lhotse.dataset.input_strategies import OnTheFlyFeatures
+    from lhotse import Fbank, FbankConfig
+    input_strategy = OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128)))
+    
+    dataset = MultiTaskKDDataset(
+        return_cuts=True,
+        input_strategy=input_strategy,
+        num_cb_speech=16,
+        num_cb_audio=8,
+    )
+    bad_batch = torch.load("zipformer_audio_encoder/exp-316M-zipformer-lh-large-giga-xl-emo-1-as-full-music4all-vgg-bbc-freesound-w2v2-mask-p-0.65-len-10-channel-mask-p-0.25-len-20-multi-mvq-hubert-large-cb16-1.0-dasheng-as-cb8-0.3-shar-md400/batch-bdd640fb-0667-1ad1-1c80-317fa3b1799d.pt")
+    sup = bad_batch["supervisions"]
+    cuts = CutSet.from_cuts(sup["cut"])
+    import pdb; pdb.set_trace()
+    batch = dataset.__getitem__(cuts)
+    print(batch)
+    
+
+if __name__=="__main__":
+    # _test_filter_cuts()
+    _test2()
+    
+    
+    
+    
 
