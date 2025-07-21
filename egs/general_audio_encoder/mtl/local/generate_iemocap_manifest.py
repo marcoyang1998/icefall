@@ -3,17 +3,17 @@ import csv
 import os
 
 import torch
-import torchaudio
 import logging
 import glob
 from lhotse import CutSet
 from lhotse.cut import MonoCut
 from lhotse.audio import Recording
 from lhotse.supervision import SupervisionSegment
-from argparse import ArgumentParser
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
+
+EMOTIONS = ["ang", "hap", "neu", "exc", "sad"]
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -34,9 +34,9 @@ def get_parser():
     )
     
     parser.add_argument(
-        "--fbank-dir",
+        "--manifest-dir",
         type=str,
-        default="data_s3/iemocap",
+        default="data/iemocap",
     )
     
     return parser
@@ -47,7 +47,8 @@ def main():
     
     dataset_dir = args.iemocap_dataset
     session_id = args.session_id
-    fbank_dir = args.fbank_dir
+    manifest_dir = args.manifest_dir
+    os.makedirs(manifest_dir, exist_ok=True)
     
     wav_folder = f"{dataset_dir}/Session{session_id}/dialog/wav"
     label_folder = f"{dataset_dir}/Session{session_id}/dialog/EmoEvaluation"
@@ -83,6 +84,10 @@ def main():
     for i, (cut_id, info) in enumerate(dataset.items()):
         audio_file, timestamp, emotion = info
         recording = Recording.from_file(audio_file, cut_id)
+        if emotion not in EMOTIONS:
+            continue
+        if emotion == "exc":
+            emotion = "hap"
         assert recording.sampling_rate == 16000
         cut = MonoCut(
             id=cut_id,
@@ -106,9 +111,10 @@ def main():
         if i % 100 == 0 and i:
             logging.info(f"Processed {i} cuts until now.")
     
+    logging.info(f"After filtering, a total of {len(new_cuts)} valid samples.")
     cuts = CutSet.from_cuts(new_cuts)
 
-    manifest_output_dir = fbank_dir + "/" + f"iemocap_cuts_session{session_id}.jsonl.gz"
+    manifest_output_dir = manifest_dir + "/" + f"iemocap_cuts_session{session_id}.jsonl.gz"
 
     logging.info(f"Storing the manifest to {manifest_output_dir}")
     cuts.to_jsonl(manifest_output_dir)
