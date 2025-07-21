@@ -290,7 +290,7 @@ class MultiTaskDataModule:
         group.add_argument(
             "--at-KD",
             type=str2bool,
-            default=True,
+            default=False,
             help="If load the logits instead of ground truth of audio events"
         )
         
@@ -387,21 +387,15 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
-            "--use-msp-podcast",
-            type=str2bool,
-            default=False,
-        )
-        
-        group.add_argument(
-            "--repeat-msp-podcast",
-            type=int,
-            default=1,
-        )
-        
-        group.add_argument(
             "--use-emotion-dataset",
             type=str2bool,
             default=False,
+        )
+        
+        group.add_argument(
+            "--repeat-emo",
+            type=int,
+            default=1,
         )
         
         group.add_argument(
@@ -415,6 +409,42 @@ class MultiTaskDataModule:
             type=str,
             default="balanced",
             choices=["balanced", "unbalanced", "full"]
+        )
+        
+        group.add_argument(
+            "--use-music4all",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--repeat-music4all",
+            type=int,
+            default=1,
+        )
+        
+        group.add_argument(
+            "--use-vggsound",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--repeat-vggsound",
+            type=int,
+            default=1,
+        )
+        
+        group.add_argument(
+            "--use-bbceffect",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--use-freesound",
+            type=str2bool,
+            default=False,
         )
         
         group.add_argument(
@@ -918,6 +948,36 @@ class MultiTaskDataModule:
         return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_test.jsonl.gz")
     
     @lru_cache()
+    def fisher_cuts(self) -> CutSet:
+        logging.info("About to get Fisher cuts")
+        # part1: 1016 hrs, 1055801 cuts
+        # part2: 1025 hrs, 1057637 cuts
+        parts = ["part1", "part2"]
+        if self.args.use_shar:
+            all_cuts = []
+            for part in parts:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.shar_dir)}/fisher/{part}",
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                    seed="randomized",
+                ).repeat()
+                all_cuts.append(cuts)
+            return CutSet.mux(
+                *all_cuts,
+                weights=[1016, 1025],
+                stop_early=False,
+            )
+        else:
+            part1_cuts = load_manifest_lazy(
+                self.args.manifest_dir / "fisher_cuts_part1.jsonl.gz"
+            )
+            part2_cuts = load_manifest_lazy(
+                self.args.manifest_dir / "fisher_cuts_part2.jsonl.gz"
+            )
+            return part1_cuts + part2_cuts
+    
+    @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
         libriheavy_list = ["small", "medium", "large"]
@@ -1156,7 +1216,7 @@ class MultiTaskDataModule:
 
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
-        logging.info("About to get test-other cuts")
+        logging.info("About to get audioset eval cuts")
         if self.args.use_shar:
             logging.info(f"Use share for audioset eval cuts")
             cuts = CutSet.from_shar(
@@ -1164,9 +1224,10 @@ class MultiTaskDataModule:
                 shuffle_shards=False,
             )
             return cuts
-        return load_manifest_lazy(
-            self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
-        )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
+            )
         
     @lru_cache()
     def audioset_sampling_weights(self):
@@ -1187,6 +1248,117 @@ class MultiTaskDataModule:
         logging.info(f"Get the sampling weight for {len(weights)} cuts")
         return weights
 
+    @lru_cache()
+    def music4all_cuts(self) -> CutSet:
+        logging.info("About to get music4all cuts")
+        if self.args.use_shar:
+            logging.info(f"Use share for music4all cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/music4all/all",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "music4all_cuts_all.jsonl.gz"
+            )
+    
+    @lru_cache()
+    def vggsound_train_cuts(self) -> CutSet:
+        logging.info("About to get vgg sound training cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for vggsound")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/vggsound/train",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "vggsound_cuts_train.jsonl.gz"
+            )
+    
+    @lru_cache()
+    def vggsound_test_cuts(self) -> CutSet:
+        logging.info("About to get vgg sound test cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for vggsound")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/vggsound/test",
+                shuffle_shards=False,
+            )
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "vggsound_cuts_test.jsonl.gz"
+            )
+        
+    @lru_cache()
+    def bbc_soundeffect_train_cuts(self) -> CutSet:
+        logging.info("About to get BBC sound effect training cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for BBC cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/bbc_soundeffect/train_10s",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "bbc_soundeffect_cuts_train_10s.jsonl.gz"
+            )
+        
+    @lru_cache()
+    def bbc_soundeffect_test_cuts(self) -> CutSet:
+        logging.info("About to get BBC sound effect test cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for BBC cuts")
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/bbc_soundeffect/test_10s",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "bbc_soundeffect_cuts_test_10s.jsonl.gz"
+            )
+            
+    @lru_cache()
+    def freesound_train_cuts(self) -> CutSet:
+        logging.info("About to get freesound training cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for freesound cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/freesound/train_10s",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "freesound_cuts_train_10s.jsonl.gz"
+            )
+        
+    @lru_cache()
+    def freesound_test_cuts(self) -> CutSet:
+        logging.info("About to get freesound test cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for freesound cuts")
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/freesound/test_10s",
+                shuffle_shards=False,
+            )
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "freesound_cuts_test_10s.jsonl.gz"
+            )
+    
     @lru_cache()
     def voxceleb_cuts(self) -> CutSet:
         # this should be used in KD
@@ -1291,10 +1463,8 @@ class MultiTaskDataModule:
             return load_manifest_lazy(
                 self.args.manifest_dir / "msp_podcast_cuts_Development.jsonl.gz"
             )
-        
 
-
-if __name__=="__main__":
+def _test():
     parser = argparse.ArgumentParser()
     MultiTaskDataModule.add_arguments(parser)
     
@@ -1339,4 +1509,58 @@ if __name__=="__main__":
         assert num2 <= args.at_num_samples
         print(f"Number of cuts from task1: {num1}")
         print(f"Number of cuts from task2: {num2}")
-        
+     
+     
+       
+def _test_bucketing_sampler():
+    parser = argparse.ArgumentParser()
+    MultiTaskDataModule.add_arguments(parser)
+    
+    args = parser.parse_args()
+    args.use_shar = False
+    args.on_the_fly_feats = True
+    args.max_duration = 600
+    args.audioset_subset = "full"
+    args.manifest_dir = Path("data/vq_dasheng_large_layer_-1_normalize_0_cb_8")
+    
+    mtl_datamodule = MultiTaskDataModule(args)
+    
+    from functools import partial
+    from utils import _add_dummy_embeddings_and_taskIDs
+    from lhotse import CutSet
+    
+    cuts_audioset = mtl_datamodule.audioset_cuts()
+    cuts_audioset = cuts_audioset.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
+    cuts_music4all = mtl_datamodule.music4all_cuts()
+    cuts_music4all = cuts_music4all.map(partial(_add_dummy_embeddings_and_taskIDs, 3))
+    
+    cuts_train = CutSet.mux(
+        *[cuts_audioset, cuts_music4all],
+        weights=[1904746,109269],
+        stop_early=False
+    )
+    
+    train_dl = mtl_datamodule.train_dataloaders(
+        cuts_train=cuts_train,
+        sampling_weight=[100]
+    )
+    count = {
+        "audioset": 0,
+        "music": 0,
+    }
+    
+    for batch_idx, batch in enumerate(train_dl):
+        # import pdb; pdb.set_trace()
+        task_ids = batch["task_ids"]
+        num_as_cuts = (task_ids == 2).sum()
+        num_music_cuts = (task_ids == 3).sum()
+        count["audioset"] += num_as_cuts
+        count["music"] += num_music_cuts
+        print(count)
+        if batch_idx > 1000:
+            break
+    
+    
+
+if __name__=="__main__":
+    _test_bucketing_sampler()
