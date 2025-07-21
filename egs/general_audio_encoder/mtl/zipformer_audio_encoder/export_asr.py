@@ -98,15 +98,13 @@ import argparse
 import logging
 import math
 import os
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import sentencepiece as spm
 import torch
 import torch.nn as nn
 
-from train_multi_KD3_shar import add_model_arguments, get_model, get_params
+from finetune_mtl import add_model_arguments, get_model, get_params
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -169,6 +167,18 @@ def get_parser():
         default="zipformer/exp",
         help="The experiment dir",
     )
+    
+    parser.add_argument(
+        "--context-size",
+        type=int,
+        default=2,
+    )
+    
+    parser.add_argument(
+        "--bpe-model",
+        type=str,
+        default="data/lang_bpe_500/bpe.model"
+    )
 
     add_model_arguments(parser)
 
@@ -190,6 +200,13 @@ def main():
 
     logging.info(f"Device: {device}")
     logging.info(params)
+    
+    sp = spm.SentencePieceProcessor()
+    sp.load(params.bpe_model)
+
+    # <blk> is defined in local/train_bpe_model.py
+    params.blank_id = sp.piece_to_id("<blk>")
+    params.vocab_size = sp.get_piece_size()
 
     logging.info("About to create model")
     model = get_model(params)
