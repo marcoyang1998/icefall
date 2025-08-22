@@ -3,6 +3,7 @@ import csv
 import glob
 import logging
 import os
+import re
 from tqdm import tqdm
 
 import pandas as pd
@@ -47,6 +48,19 @@ def parse_metadata(meta_file: str):
     df = df[["sid", "text_tn", "begin_time", "end_time"]]
     return df
     
+def normalize_text(
+    utt: str,
+    punct_pattern=re.compile(r"<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>"),
+    whitespace_pattern=re.compile(r"\s\s+"),
+) -> str:
+    return whitespace_pattern.sub(" ", punct_pattern.sub("", utt))
+    
+def has_no_oov(
+    sup: SupervisionSegment,
+    oov_pattern=re.compile(r"<(SIL|MUSIC|NOISE|OTHER)>"),
+) -> bool:
+    return oov_pattern.search(sup.text) is None    
+
 def main():
     parser = get_parser()
     args = parser.parse_args()
@@ -70,7 +84,7 @@ def main():
     all_cuts = []
     num_cuts = 0
     for meta_file in tqdm(meta_files):
-        chunk_folder = meta_file.replace("_metadata.csv", "")
+        chunk_folder = meta_file.replace("_metadata.csv", "").split("/")[-1]
         meta_info = parse_metadata(meta_file)
         for _, row in meta_info.iterrows():
             audio_id = row["sid"]
@@ -90,15 +104,21 @@ def main():
                 channel=0,
                 recording=recording,
             )
+            
+            text = normalize_text(row["text_tn"]) # the normalized text
             supervision = SupervisionSegment(
                 id=id,
                 recording_id=cut.recording.id,
                 start=0.0,
                 channel=0,
                 duration=cut.duration,
-                text=row["transcript"],
+                text=text,
                 language="en",
             )
+            if has_no_oov(supervision):
+                logging.info(f"Skipping {audio_id} due to OOV in text: {text}")
+                continue
+                
             cut.supervisions = [supervision]
             
             all_cuts.append(cut)
