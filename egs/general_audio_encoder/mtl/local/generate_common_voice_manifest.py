@@ -39,6 +39,12 @@ def get_parser():
         default="dev"
     )
     
+    parser.add_argument(
+        "--langauage",
+        type=str,
+        default="en",
+    )
+    
     return parser
 
 def parse_tsv(tsv_file: str):
@@ -61,12 +67,13 @@ def main():
     dataset_dir = args.dataset_dir
     manifest_dir = args.manifest_dir
     subset = args.subset
+    language = args.langauage
     
     os.makedirs(manifest_dir, exist_ok=True)
     
-    tsv_file = f"{dataset_dir}/transcript/en/{subset}.tsv"
+    tsv_file = f"{dataset_dir}/transcript/{language}/{subset}.tsv"
     meta_info = parse_tsv(tsv_file)
-    audio_root = f"{dataset_dir}/audio/en/{subset}"
+    audio_root = f"{dataset_dir}/audio/{language}/{subset}"
     audio_mapping = generate_audio_mapping(audio_root=audio_root)
     
     cuts = []
@@ -102,7 +109,7 @@ def main():
             channel=0,
             duration=cut.duration,
             text=row["sentence"],
-            language="en",
+            language=language,
             gender=row["gender"],
         )
         cut.supervisions = [supervision]
@@ -116,7 +123,7 @@ def main():
     cuts = CutSet.from_cuts(cuts)
     cuts = cuts.resample(16000)
     
-    manifest_output_dir = manifest_dir + "/" + f"commonvoice_en_cuts_{subset}.jsonl.gz"
+    manifest_output_dir = manifest_dir + "/" + f"commonvoice_{language}_cuts_{subset}.jsonl.gz"
 
     logging.info(f"Storing the manifest to {manifest_output_dir}")
     cuts.to_jsonl(manifest_output_dir)

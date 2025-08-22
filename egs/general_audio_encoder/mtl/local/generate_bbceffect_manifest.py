@@ -97,7 +97,7 @@ def main():
             )
             if truncate:
                 # truncate the cut into windows
-                cuts = cut.cut_into_windows(10)
+                cuts = cut.cut_into_windows(window_size)
                 meta_file = audio_file.replace(".flac", ".json")
                 text = parse_meta(meta_file)
                 for window_cut in cuts:
