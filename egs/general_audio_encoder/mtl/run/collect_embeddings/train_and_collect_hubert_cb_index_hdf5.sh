@@ -60,9 +60,9 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
             --max-duration 200
     done
 
-    for subset in dev-clean dev-other; do
+    for subset in dev-clean dev-other test-clean test-other; do
         python hubert/extract_mvq_hdf5.py \
-            --num-jobs 2 \
+            --num-jobs 1 \
             --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \
             --hubert-version $model_version \
@@ -289,7 +289,7 @@ fi
 
 if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
     log "Stage 8: Collect MVQ tokens on vox1 test training sets"
-    python hubert/extract_mvq.py \
+    python hubert/extract_mvq_hdf5.py \
         --num-jobs 1 \
         --input-manifest data/fbank_voxceleb/vox1_cuts_test.jsonl.gz \
         --target-manifest-file $vq_dir/vox1_test_cuts.jsonl.gz \
@@ -309,7 +309,7 @@ if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
     log "Stage 9: Collect MVQ tokens on msp-podcast"
 
     for subset in Train Test1 Test2 Development; do
-        python hubert/extract_mvq.py \
+        python hubert/extract_mvq_hdf5.py \
             --num-jobs 2 \
             --input-manifest data/msp_podcast_manifest/msp_podcast_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/msp_podcast_cuts_${subset}.jsonl.gz \
@@ -329,7 +329,7 @@ if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
     log "Stage 10: Collect MVQ tokens on iemocap all"
 
     for subset in all; do
-        python hubert/extract_mvq.py \
+        python hubert/extract_mvq_hdf5.py \
             --num-jobs 1 \
             --input-manifest data/iemocap_manifest/iemocap_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/iemocap_cuts_${subset}.jsonl.gz \
@@ -349,7 +349,7 @@ if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
     log "Stage 11: Collect MVQ tokens on MELD"
 
     for subset in train dev test; do
-        python hubert/extract_mvq.py \
+        python hubert/extract_mvq_hdf5.py \
             --num-jobs 1 \
             --input-manifest data/meld_manifest/meld_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/meld_cuts_${subset}.jsonl.gz \
@@ -369,7 +369,7 @@ if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
     log "Stage 12: Collect MVQ tokens on MEAD"
 
     for subset in all; do
-        python hubert/extract_mvq.py \
+        python hubert/extract_mvq_hdf5.py \
             --num-jobs 1 \
             --input-manifest data/mead_manifest/mead_cuts_${subset}.jsonl.gz \
             --target-manifest-file $vq_dir/mead_cuts_${subset}.jsonl.gz \
@@ -385,11 +385,217 @@ if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
     done
 fi
 
+if [ $stage -le 13 ] && [ $stop_stage -ge 13 ]; then
+    log "Stage 13: Collect MVQ tokens on Fisher"
+
+    for subset in part1 part2; do
+        python hubert/extract_mvq_hdf5.py \
+            --num-jobs 8 \
+            --input-manifest data/fisher_manifest/fisher_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/fisher_cuts_${subset}.jsonl.gz \
+            --hubert-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-fisher-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 14 ] && [ $stop_stage -ge 14 ]; then
+    log "Stage 14: Collect MVQ tokens on voxpopuli"
+
+    # for lang in en de fr es pl it ro hu; do
+    for lang in "cs" "nl" "fi" "hr" "sk" "sl" "et" "lt"; do
+        for subset in train; do
+            python hubert/extract_mvq_hdf5.py \
+                --num-jobs 4 \
+                --input-manifest data_hdf5/voxpopuli_manifest_trimmed/voxpopuli-asr-${lang}_cuts_${subset}.jsonl.gz \
+                --target-manifest-file $vq_dir/voxpopuli-asr-${lang}_cuts_${subset}.jsonl.gz \
+                --hubert-version $model_version \
+                --embedding-dim $model_dim \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-voxpopuli-${lang}-${subset} \
+                --embedding-dir $vq_dir \
+                --embedding-layer $embedding_layer \
+                --quantizer-path $quantizer_path \
+                --normalize $normalize \
+                --max-duration 200
+        done
+
+        for subset in dev test; do
+            python hubert/extract_mvq_hdf5.py \
+                --num-jobs 1 \
+                --input-manifest data_hdf5/voxpopuli_manifest_trimmed/voxpopuli-asr-${lang}_cuts_${subset}.jsonl.gz \
+                --target-manifest-file $vq_dir/voxpopuli-asr-${lang}_cuts_${subset}.jsonl.gz \
+                --hubert-version $model_version \
+                --embedding-dim $model_dim \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-voxpopuli-${lang}-${subset} \
+                --embedding-dir $vq_dir \
+                --embedding-layer $embedding_layer \
+                --quantizer-path $quantizer_path \
+                --normalize $normalize \
+                --max-duration 200
+        done
+    done
+fi
+
+if [ $stage -le 15 ] && [ $stop_stage -ge 15 ]; then
+    log "Stage 15: Collect MVQ tokens on voxpopuli"
+    for lang in "dutch" "german" "spanish" "french" "italian" "polish" "portuguese"; do
+        for subset in train; do
+            python hubert/extract_mvq_hdf5.py \
+                --num-jobs 8 \
+                --input-manifest data/mls_manifest/mls-${lang}_${subset}.jsonl.gz \
+                --target-manifest-file $vq_dir/mls-asr-${lang}_${subset}.jsonl.gz \
+                --hubert-version $model_version \
+                --embedding-dim $model_dim \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-mls-${lang}-${subset} \
+                --embedding-dir $vq_dir \
+                --embedding-layer $embedding_layer \
+                --quantizer-path $quantizer_path \
+                --normalize $normalize \
+                --max-duration 200
+        done
+
+        for subset in dev test; do
+            python hubert/extract_mvq_hdf5.py \
+                --num-jobs 2 \
+                --input-manifest data/mls_manifest/mls-${lang}_${subset}.jsonl.gz \
+                --target-manifest-file $vq_dir/mls-${lang}_${subset}.jsonl.gz \
+                --hubert-version $model_version \
+                --embedding-dim $model_dim \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-mls-${lang}-${subset} \
+                --embedding-dir $vq_dir \
+                --embedding-layer $embedding_layer \
+                --quantizer-path $quantizer_path \
+                --normalize $normalize \
+                --max-duration 200
+        done
+    done
+fi
+
+if [ $stage -le 16 ] && [ $stop_stage -ge 16 ]; then
+    log "Stage 16: Collect MVQ tokens on spgispeech"
+    for subset in train; do
+        python hubert/extract_mvq_hdf5.py \
+            --num-jobs 8 \
+            --input-manifest data/spgispeech_manifest/spgispeech_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/spgispeech_cuts_${subset}.jsonl.gz \
+            --hubert-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-spgispeech-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+
+    for subset in dev test; do
+        python hubert/extract_mvq_hdf5.py \
+            --num-jobs 4 \
+            --input-manifest data/spgispeech_manifest/spgispeech_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/spgispeech_cuts_${subset}.jsonl.gz \
+            --hubert-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-spgispeech-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 17 ] && [ $stop_stage -ge 17 ]; then
+    log "Stage 17: Collect MVQ tokens on common voice 17 english"
+    for subset in train; do
+        python hubert/extract_mvq_hdf5.py \
+            --num-jobs 8 \
+            --input-manifest data/cv17_manifest/commonvoice_en_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/commonvoice_en_cuts_${subset}.jsonl.gz \
+            --hubert-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-cv17-en-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+
+    for subset in dev test; do
+        python hubert/extract_mvq_hdf5.py \
+            --num-jobs 2 \
+            --input-manifest data/cv17_manifest/commonvoice_en_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/commonvoice_en_cuts_${subset}.jsonl.gz \
+            --hubert-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-cv17-en-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 18 ] && [ $stop_stage -ge 18 ]; then
+    log "Stage 18: Collect MVQ tokens on voxpopuli unlabelled english"
+    for subset in en; do
+        num_splits=8
+        split_dir=$vq_dir/voxpopuli_${subset}_split
+        mkdir -p $split_dir
+
+        if [ ! -f $split_dir/.split_completed ]; then
+            lhotse split $num_splits --no-pad data/voxpopuli_en_manifest/voxpopuli_cuts_${subset}.jsonl.gz $split_dir
+            touch $split_dir/.split_completed
+        fi
+
+        # for i in $(seq 4 1 $(($num_splits-1))); do
+        # for i in $(seq 0 1 3); do
+        for i in 7; do
+            log "Start encoding libriheavy small split ${i}"
+            if [ ! -f $split_dir/voxpopuli_cuts_${subset}.${i}.processed.jsonl.gz ]; then
+                python hubert/extract_mvq_hdf5.py \
+                    --num-jobs 8 \
+                    --input-manifest $split_dir/voxpopuli_cuts_${subset}.${i}.jsonl.gz \
+                    --target-manifest-file $split_dir/voxpopuli_cuts_${subset}.${i}.processed.jsonl.gz \
+                    --hubert-version $model_version \
+                    --embedding-dim $model_dim \
+                    --num-codebooks $num_codebooks \
+                    --manifest-name codebook-indexes-voxpopuli-en-${subset}-split-${i} \
+                    --embedding-dir $split_dir \
+                    --embedding-layer $embedding_layer \
+                    --quantizer-path $quantizer_path \
+                    --normalize $normalize \
+                    --max-duration 200
+            fi
+        done
+        if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+            log "Combining the processed cuts of voxpopuli en"
+            pieces=$(find $split_dir -name "voxpopuli_cuts_${subset}.*.processed.jsonl.gz")
+            lhotse combine $pieces $vq_dir/voxpopuli_cuts_${subset}.jsonl.gz
+        fi
+    done
+fi
+
 
 # if [ $stage -le 30 ] && [ $stop_stage -ge 30 ]; then
 #     log "Stage 30: Collect MVQ tokens on LibriSpeech training sets"
 #     for subset in small; do
-#         python hubert/extract_mvq.py \
+#         python hubert/extract_mvq_hdf5.py \
 #             --num-jobs 1 \
 #             --input-manifest data/fbank_libriheavy/libriheavy_cuts_${subset}.jsonl.gz \
 #             --target-manifest-file $vq_dir/libriheavy_cuts_${subset}.jsonl.gz \
@@ -407,7 +613,7 @@ fi
 
 # if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
 #     for subset in dev-clean dev-other; do
-#         python hubert/extract_mvq.py \
+#         python hubert/extract_mvq_hdf5.py \
 #             --num-jobs 1 \
 #             --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
 #             --target-manifest-file $vq_dir/librispeech_cuts_${subset}.jsonl.gz \

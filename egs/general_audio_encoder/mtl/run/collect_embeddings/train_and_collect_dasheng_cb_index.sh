@@ -148,3 +148,97 @@ if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
         --quantizer-path $quantizer_path \
         --max-duration 200
 fi
+
+if [ $stage -le 7 ] && [ $stop_stage -ge 7 ]; then
+    log "Stage 7: Collect MVQ tokens on music4all"
+    python dasheng/extract_mvq.py \
+        --num-jobs 8 \
+        --model-version $model_version \
+        --input-manifest data/music4all_manifest/music4all_cuts_all.jsonl.gz \
+        --target-manifest-file $vq_dir/music4all_cuts_all.jsonl.gz \
+        --embedding-dim 1536 \
+        --num-codebooks $num_codebooks \
+        --manifest-name codebook-indexes-music4all-all \
+        --embedding-dir $vq_dir \
+        --embedding-layer ${embedding_layer} \
+        --quantizer-path $quantizer_path \
+        --max-duration 200
+fi
+
+if [ $stage -le 8 ] && [ $stop_stage -ge 8 ]; then
+    log "Stage 8: Collect MVQ tokens on BBC dataset"
+    for subset in train test; do
+        python dasheng/extract_mvq.py \
+            --num-jobs 8 \
+            --model-version $model_version \
+            --input-manifest data/bbc_soundeffect_manifest/bbc_soundeffect_cuts_${subset}_10s.jsonl.gz \
+            --target-manifest-file $vq_dir/bbc_soundeffect_cuts_${subset}_10s.jsonl.gz \
+            --embedding-dim 1536 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-bbc-soundeffect-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --normalize $normalize \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 9 ] && [ $stop_stage -ge 9 ]; then
+    log "Stage 9: Collect MVQ tokens on VGGsound"
+    for subset in train test; do
+        python dasheng/extract_mvq.py \
+            --num-jobs 4 \
+            --model-version $model_version \
+            --input-manifest data/vggsound_manifest/vggsound_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/vggsound_cuts_${subset}.jsonl.gz \
+            --embedding-dim 1536 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-vggsound-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --normalize $normalize \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 10 ] && [ $stop_stage -ge 10 ]; then
+    log "Stage 10: Collect MVQ tokens on freesound"
+    for subset in train_10s test_10s; do
+        python dasheng/extract_mvq.py \
+            --num-jobs 8 \
+            --model-version $model_version \
+            --input-manifest data/freesound_manifest/freesound_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/freesound_cuts_${subset}.jsonl.gz \
+            --embedding-dim 1536 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-freesound-${subset} \
+            --embedding-dir $vq_dir \
+            --embedding-layer $embedding_layer \
+            --normalize $normalize \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
+    log "Stage 11: Collect MVQ tokens on MTG"
+    for subset in 10s; do
+        embedding_dir=$vq_dir/mtg_wav
+        mkdir -p $embedding_dir
+        python dasheng/extract_mvq.py \
+            --num-jobs 8 \
+            --model-version $model_version \
+            --input-manifest data/mtg_manifest_wav/mtg_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/mtg_wav_cuts_${subset}.jsonl.gz \
+            --embedding-dim 1536 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-mtg-wav-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --normalize $normalize \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
