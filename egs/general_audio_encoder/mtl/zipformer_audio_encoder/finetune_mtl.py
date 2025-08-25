@@ -385,6 +385,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=False,
         help="If True, use CTC head.",
     )
+    
+    # normalization
+    parser.add_argument(
+        "--normalize-fbank",
+        type=str2bool,
+        default=False,
+        help="If perform normalization to the input fbank features"
+    )
 
 
 def get_parser():
@@ -812,6 +820,8 @@ def get_model(params: AttributeDict) -> nn.Module:
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
     post_encoder_downsample = get_encoder_downsample_module(params)
+    if params.output_downsampling_factor == 1:
+        params.subsampling_factor = 2
 
     if params.use_transducer:
         decoder = get_decoder_model(params)
@@ -825,6 +835,9 @@ def get_model(params: AttributeDict) -> nn.Module:
         attention_decoder = get_attention_decoder_model(params)
     else:
         attention_decoder = None
+        
+    if params.normalize_fbank:
+        logging.info("Normalizing the input fbank features")
 
     model = MultiTaskModel(
         encoder_embed=encoder_embed,
@@ -840,6 +853,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         use_ctc=params.use_ctc,
         use_attention_decoder=params.use_attention_decoder,
         num_events=params.num_events,
+        normalize_fbank=params.normalize_fbank,
     )
     return model
 

@@ -40,6 +40,7 @@ class AsrModel(nn.Module):
         use_transducer: bool = True,
         use_ctc: bool = False,
         use_attention_decoder: bool = False, 
+        normalize_fbank: bool = False,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -71,6 +72,8 @@ class AsrModel(nn.Module):
             Whether use transducer head. Default: True.
           use_ctc:
             Whether use CTC head. Default: False.
+          normalize_fbank:
+            If true, the input fbank features is normalized to zero mean and unit variance
         """
         super().__init__()
 
@@ -108,6 +111,8 @@ class AsrModel(nn.Module):
             )
         self.use_attention_decoder = use_attention_decoder
         self.attention_decoder = attention_decoder
+        
+        self.normalize_fbank = normalize_fbank
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor, freeze_encoder: bool=False,
@@ -375,6 +380,7 @@ class MultiTaskModel(nn.Module):
         use_ctc: bool = False,
         use_attention_decoder: bool = False,
         num_events: int = 527,
+        normalize_fbank: bool = False,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -406,6 +412,8 @@ class MultiTaskModel(nn.Module):
             Whether use transducer head. Default: True.
           use_ctc:
             Whether use CTC head. Default: False.
+          normalize_fbank:
+            If true, the input fbank features is normalized to zero mean and unit variance utterance-wise
         """
         super().__init__()
 
@@ -450,6 +458,8 @@ class MultiTaskModel(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(encoder_dim, num_events),
         ) # 527 classes
+        
+        self.normalize_fbank = normalize_fbank
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor, freeze_encoder: bool=False,
@@ -469,6 +479,11 @@ class MultiTaskModel(nn.Module):
             Encoder output lengths, of shape (N,).
         """
         # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
+        
+        # normalise fbank (utterance level)
+        if self.normalize_fbank:
+            x = self._normalize_fbank(x, x_lens)
+        
         with torch.set_grad_enabled((not freeze_encoder) and self.training):
             x, x_lens = self.encoder_embed(x, x_lens)
             src_key_padding_mask = make_pad_mask(x_lens)
@@ -744,3 +759,79 @@ class MultiTaskModel(nn.Module):
         at_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
 
         return at_loss
+    
+    def forward_audio_tagging_linear_softmax(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+        target: torch.Tensor = None,
+        return_logits: bool = False,
+    ):
+        # target: (N, num_events)
+        frame_logits = self.audio_tagging_proj(encoder_out)
+
+        # --- Linear Softmax Pooling (Corrected Version) 开始 ---
+
+        # 2. 将Logits转换为帧级别的概率 (激活值)
+        # (N, T, num_classes)
+        frame_probabilities = torch.sigmoid(frame_logits)
+        
+        # 3. 处理padding，将填充部分的概率设为0
+        padding_mask = make_pad_mask(encoder_out_lens, max_len=frame_probabilities.size(1)) # (N, T)
+        expanded_padding_mask = padding_mask.unsqueeze(-1).expand_as(frame_probabilities)
+        frame_probabilities[expanded_padding_mask] = 0.0
+
+        # 4. 计算线性归一化权重 (不使用exp)
+        # 沿时间维度求和，用于归一化
+        # 添加一个小的epsilon防止除以零
+        sum_over_time = torch.sum(frame_probabilities, dim=1, keepdim=True) + 1e-7
+        
+        # 权重就是归一化后的概率
+        # (N, T, num_classes)
+        linear_weights = frame_probabilities / sum_over_time
+
+        # 5. 使用线性权重对原始的帧级别概率进行加权求和
+        # (N, T, num_classes) * (N, T, num_classes) -> (N, T, num_classes)
+        # 然后在时间维度上求和 -> (N, num_classes)
+        clip_probabilities = torch.sum(linear_weights * frame_probabilities, dim=1)
+        
+        # --- Linear Softmax Pooling 结束 ---
+
+        if return_logits: # 实际上返回的是概率
+            return clip_probabilities
+        
+        # 关键修改：由于我们现在得到的是概率(probabilities)，
+        # 损失函数需要使用 F.binary_cross_entropy，而不是 F.binary_cross_entropy_with_logits
+        at_loss = F.binary_cross_entropy(clip_probabilities, target, reduction="none")
+
+        return at_loss
+    
+    @staticmethod
+    def _normalize_fbank(x: torch.Tensor, x_lens: torch.Tensor, eps: float=1e-9):
+        """
+        x: (B, T, D) fbank 特征，已 padding 到同一 T
+        x_lens: (B,) 每条样本的有效帧数 (int)
+        """
+        device = x.device
+        B, T, D = x.shape
+
+        # mask: (B, T, 1)
+        mask = torch.arange(T, device=device).unsqueeze(0) < x_lens.unsqueeze(1)
+        mask = mask.unsqueeze(-1)  # (B, T, 1), bool
+
+        lengths = x_lens.view(B, 1, 1).to(x.dtype)  # (B, 1, 1)
+
+        # 均值
+        sum_feats = (x * mask).sum(dim=1, keepdim=True)  # (B, 1, D)
+        mean = sum_feats / lengths
+
+        # 方差
+        sum_sq = ((x - mean) * mask).pow(2).sum(dim=1, keepdim=True)
+        std = torch.sqrt(sum_sq / lengths + eps)
+
+        # 归一化
+        x_norm = (x - mean) / (std + eps)
+        # set masking positions to value 0
+        x_norm = x_norm * mask
+
+        return x_norm
