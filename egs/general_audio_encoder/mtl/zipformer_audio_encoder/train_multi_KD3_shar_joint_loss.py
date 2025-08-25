@@ -341,6 +341,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
     )
     
+    parser.add_argument(
+        "--audio-sample-loss-scale",
+        type=float,
+        default=1.0,
+        help="Scale down the loss computed from the audio data"
+    )
+    
 
 
 def get_parser():
@@ -969,7 +976,10 @@ def compute_loss(
                 mask = task_ids == 1 # ASR=1
                 mvq_loss = (mvq_loss * mask).sum()
             else:
-                mvq_loss = mvq_loss.sum()
+                loss_mask = torch.ones(len(task_ids)).to(device)
+                loss_mask[task_ids == 2] = params.audio_sample_loss_scale
+                mvq_loss = (mvq_loss * loss_mask).sum()
+                
             loss += mvq_loss
             
         # AT loss

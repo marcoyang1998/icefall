@@ -1,4 +1,5 @@
 data
+data_hdf5
 data-shar
 data-shar-*
 test*.py
@@ -12,8 +13,11 @@ figures
 run/train*.sh
 run/decode*.sh
 run/finetune*.sh
+zipformer_audio_encoder_finetune
+zipformer_compare
 hubert/*.sh
 dasheng/*.sh
 wavlm/*.sh
 whisper/*.sh
 models
+test_*.py
