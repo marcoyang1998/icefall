@@ -1094,11 +1094,26 @@ def train_one_epoch(
             scaler=scaler,
             rank=0,
         )
+    
+    def estimate_cur_epoch(max_duration: float, world_size: int, steps: int, train_hrs: int):
+        estimated_hours = max_duration * world_size * steps / 3600
+        estimated_epochs = estimated_hours // train_hrs
+        return estimated_epochs
 
     shard_count = {}
+    cur_epoch = 0
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
+        if params.use_shar:
+            est_epoch = estimate_cur_epoch(
+                params.max_duration, world_size, params.batch_idx_train, params.train_duration
+            )
+            
+            if est_epoch > cur_epoch:
+                cur_epoch = est_epoch
+                scheduler.step_epoch(cur_epoch) # start from 1
+                logging.info(f"Estimated epoch: {cur_epoch}")
 
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
@@ -1121,7 +1136,7 @@ def train_one_epoch(
             if batch_idx % 200 == 1:
                 shard_epoch = [int(c.shar_epoch) for c in cuts]
                 max_epoch = max(shard_epoch)
-                logging.info(f"Estimated epoch is {max_epoch}")
+                # logging.info(f"Estimated epoch is {max_epoch}")
                 logging.info(count)
                 logging.info(f"All shards source by far: {shard_count}")
         try:
@@ -1501,6 +1516,7 @@ def run(rank, world_size, args):
     
     logging.info(train_cuts)
     logging.info(train_cuts_duration)
+    params.train_duration = sum(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 0.98 or c.duration > 29.9:

@@ -250,7 +250,7 @@ def change_recording(c):
     return c
 
 def remove_short_and_long_utt(c):
-    if c.duration < 1.0 or c.duration > 29.9:
+    if c.duration < 0.5 or c.duration > 31:
         return False
     return True
 
