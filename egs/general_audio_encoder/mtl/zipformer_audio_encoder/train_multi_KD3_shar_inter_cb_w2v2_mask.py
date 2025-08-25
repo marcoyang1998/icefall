@@ -68,7 +68,7 @@ from lhotse import CutSet
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd_w2v2_mask import MultiKDModel
+from model_multi_kd_w2v2_mask_inter_cb import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -332,6 +332,27 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "--num-codebooks",
         type=int,
         default=8,
+    )
+    
+    parser.add_argument(
+        "--intermediate-cb",
+        type=str2bool,
+        default=True,
+        help="If True, compute the codebook loss for the intermediate layer"
+    )
+    
+    parser.add_argument(
+        "--intermediate-block-idx",
+        type=int,
+        default=3,
+        help="The block index of the intermediate codebook loss."
+    )
+    
+    parser.add_argument(
+        "--intermediate-cb-loss-scale",
+        type=float,
+        default=0.1,
+        help="The scale for the intermediate codebook loss."
     )
     
     parser.add_argument(
@@ -799,6 +820,12 @@ def get_model(params: AttributeDict) -> nn.Module:
     if params.normalize_fbank:
         logging.info("Normalizing the input fbank features")
     
+    if params.intermediate_cb:
+        assert params.intermediate_block_idx >= 0, "intermediate_block_idx should be non-negative"
+        assert params.intermediate_block_idx < len(_to_int_tuple(params.num_encoder_layers))
+        assert params.intermediate_block_idx != len(_to_int_tuple(params.num_encoder_layers)) -1, "Don't use the last block for intermediate codebook loss"
+        logging.info(f"Using intermediate codebook loss at block {params.intermediate_block_idx}")
+    
     model = MultiKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
@@ -818,6 +845,8 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_channel_length=params.mask_channel_length,
         loss_only_mask=params.loss_only_mask,
         normalize_fbank=params.normalize_fbank,
+        intermediate_cb=params.intermediate_cb,
+        intermediate_block_idx=params.intermediate_block_idx,
     )
     return model
 
@@ -1035,7 +1064,7 @@ def compute_loss(
         at_targets = None
     
     with torch.set_grad_enabled(is_training):
-        mvq_loss, audio_tagging_loss = model(
+        mvq_loss, audio_tagging_loss, inter_mvq_loss = model(
             x=feature,
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
@@ -1056,6 +1085,14 @@ def compute_loss(
                 mvq_loss = mvq_loss.sum()
             loss += mvq_loss
             
+        if params.intermediate_cb:
+            if params.mvq_loss_by_task:
+                mask = task_ids == 1 # ASR=1
+                inter_mvq_loss = (inter_mvq_loss * mask).sum()
+            else:
+                inter_mvq_loss = inter_mvq_loss.sum()
+            loss += params.intermediate_cb_loss_scale * inter_mvq_loss
+            
         # AT loss
         if params.do_audio_tagging:
             mask = task_ids == 2 # AT=2
@@ -1074,6 +1111,8 @@ def compute_loss(
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
+        if params.intermediate_cb:
+            info["inter_mvq_loss"] = inter_mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
