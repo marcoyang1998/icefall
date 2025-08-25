@@ -29,7 +29,7 @@ features_mask_size=27
 
 # finetune args
 do_finetune=1
-finetune_ckpt=zipformer_audio_encoder/exp-as-full-96M-zipformer-non-streaming-whisper-libri-as-mvq-cb16-dasheng-large-cb16-scale-0.2,1.0-out-ds-2-mask-ratio-1.0-musan-1-frames-mask-192-features-mask-40/iter-300000-avg-4.pt
+finetune_ckpt=zipformer_audio_encoder/exp-96M-zipformer-lr-epochs-2.0-as-full-music4all-vggsound-bbc-freesound-w2v2-mask-prob-0.65-mask-len-10-channel-mask-prob-0.25-len-20-dasheng-mvq-cb8-with-musan-shar/iter-300000-avg-4.pt
 
 freeze_encoder=0
 freeze_encoder_steps=2000
@@ -40,14 +40,16 @@ encoder_lr_scale=0.05
 md=1000
 
 exp_dir=zipformer_audio_encoder_finetune/exp-finetune-as-${audioset_subset}\
--lr-${lr}-causal-${causal}-musan-${enable_musan}-mixup-${mixup_prob}-frames-mask-${frames_mask_size}-features-mask-${features_mask_size}\
--freeze-encoder-${freeze_encoder}-freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
--from-AS-full-multi-mvq-whisper-0.2-dasheng-1.0-with-muasn-larger-mask-300k
+-lr-${lr}-musan-${enable_musan}-mixup-${mixup_prob}\
+-freeze-${freeze_encoder_steps}-step-encoder-lr-scale-${encoder_lr_scale}\
+-from-dasheng-mvq-cb8-as-music-vgg-bbc-freesound\
+-w2v2-mask-p-0.65-l-10-cha-p-0.25-l-20-with-musan-300k
 
+echo $exp_dir
 # exp_dir=zipformer_audio_encoder_finetune/exp-debug
 
-# export CUDA_VISIBLE_DEVICES="2,3"
-torchrun --nproc_per_node=2 --master_port=19130 \
+# export CUDA_VISIBLE_DEVICES="0,1"
+torchrun --nproc_per_node=2 --master_port=19220 \
   zipformer_audio_encoder/finetune_at.py \
     --num-epochs 30 \
     --start-epoch 1 \
@@ -73,7 +75,33 @@ torchrun --nproc_per_node=2 --master_port=19130 \
     --encoder-dim 192,256,448,768,448,192 \
     --encoder-unmasked-dim 192,192,256,256,256,192 \
     --on-the-fly-feats 1 \
-    --num-workers 2 \
+    --num-workers 6 \
     --max-duration $md
+
+do_mvq=0
+num_codebooks=0
+delta=3
+frame_rate_ratio=2
+
+for epoch in $(seq 14 1 24); do
+    for avg in $(seq $(( epoch - 8)) 1 $(( epoch - 3))); do
+        python zipformer_audio_encoder/inference_audio_tagging.py \
+            --epoch $epoch \
+            --avg $avg \
+            --use-averaged-model 1 \
+            --at-KD 0 \
+            --do-mvq $do_mvq \
+            --num-codebooks $num_codebooks --teacher-frame-ratio $frame_rate_ratio \
+            --exp-dir $exp_dir \
+            --num-encoder-layers 2,2,3,4,3,2 \
+            --feedforward-dim 512,768,1024,1536,1024,768 \
+            --encoder-dim 192,256,448,768,448,192 \
+            --encoder-unmasked-dim 192,192,256,256,256,192 \
+            --manifest-dir data/fbank_as_ced_mAP50 \
+            --on-the-fly-feats 1 \
+            --causal 0 \
+            --max-duration 1000
+    done
+done
 
 echo "Done"
