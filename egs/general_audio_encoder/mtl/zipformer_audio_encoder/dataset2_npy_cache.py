@@ -229,10 +229,6 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # throughout the epoch. It regularly closes open file handles to
         # reset the internal HDF5 caches.
         self.hdf5_fix = Hdf5MemoryIssueFix(reset_interval=100)
-        
-        self.batch_mixing = batch_mixing
-        self.min_snr = min_snr
-        self.max_snr = max_snr
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """

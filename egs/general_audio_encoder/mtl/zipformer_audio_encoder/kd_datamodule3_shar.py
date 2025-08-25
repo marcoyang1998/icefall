@@ -47,6 +47,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
+from augmentations import BatchMixing
 from dataset2_npy_cache import MultiTaskKDDataset
 from icefall.utils import str2bool
 
@@ -145,6 +146,31 @@ class MultiTaskDataModule:
             default=30,
             help="The number of buckets for the DynamicBucketingSampler"
             "(you might want to increase it for larger datasets).",
+        )
+        group.add_argument(
+            "--sync-buckets",
+            type=str2bool,
+            default=True,
+        )
+        group.add_argument(
+            "--use-custom-duration-bins",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
+            "--duration-bins",
+            type=str,
+            default="None"
+        )
+        group.add_argument(
+            "--duration-bins-weights",
+            type=str,
+            default="None",
+        )
+        group.add_argument(
+            "--merge-buckets",
+            type=str2bool,
+            default=False,
         )
         group.add_argument(
             "--zip-sampler",
@@ -268,6 +294,57 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--batch-mixing",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--batch-mixing-mode",
+            type=str,
+            default="batch",
+            choices=["batch", "musan"],
+        )
+        
+        group.add_argument(
+            "--mixing-prob",
+            type=float,
+            default=0.5,
+            help="""The mixing probability, applicable to both musan and in-batch mixing.
+            In musan, it means the noise mixing prob. In batch mixing, it means the augmentation 
+            prob, consisting of both in-batch mixing and noise mixing.
+            """
+        )
+        
+        group.add_argument(
+            "--p-noise",
+            type=float,
+            default=0.0,
+            help="The probability of mixing noise from non speech noise. Only applicable to in-batch mixing"
+        )
+        
+        group.add_argument(
+            "--min-snr",
+            type=float,
+            default=10,
+            help="The minimum SNR used in noise mixing."
+        )
+        
+        group.add_argument(
+            "--min-noise-snr",
+            type=float,
+            default=-5,
+            help="The minimum SNR used in noise mixing from non-speech noise. Only used in BatchMixing"
+        )
+        
+        group.add_argument(
+            "--max-snr",
+            type=float,
+            default=20,
+            help="The minimum SNR used in noise mixing."
+        )
+        
+        group.add_argument(
             "--time-mask-ratio",
             type=float,
             default=1.0,
@@ -325,6 +402,18 @@ class MultiTaskDataModule:
             type=str,
             default="m",
             choices=["xs", "s", "m", "l", "xl"]
+        )
+        
+        group.add_argument(
+            "--use-fisher",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--use-voxpopuli",
+            type=str2bool,
+            default=False,
         )
         
         group.add_argument(
@@ -448,6 +537,12 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--use-mtg",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
             "--at-weighted-sampler",
             type=str2bool,
             default=False,
@@ -504,14 +599,36 @@ class MultiTaskDataModule:
             )
         
         if self.args.enable_musan:
-            logging.info("Enable MUSAN")
+            assert not self.args.batch_mixing, "Do not use musan and in-batch mixing together!"
+            logging.info(f"Enable MUSAN with minimum SNR={self.args.min_snr}, max SNR={self.args.max_snr}, mixing prob: {self.args.mixing_prob}")
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
-                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
+                CutMix(
+                    cuts=cuts_musan, p=self.args.mixing_prob, snr=(self.args.min_snr, self.args.max_snr), 
+                    preserve_id=True, pad_to_longest=False
+                )
             )
         else:
             logging.info("Disable MUSAN")
+            
+        if self.args.batch_mixing:
+            assert not self.args.enable_musan, "Do not use musan and in-batch mixing together!"
+            if self.args.p_noise > 0.0:
+                noise_cuts = load_manifest("data/musan/audioset_non_human.jsonl.gz").drop_features()
+                logging.info(f"Get the noise cuts for batch mixing as well")
+            else:
+                noise_cuts = None
+            t = BatchMixing(
+                min_snr=self.args.min_snr, 
+                max_snr=self.args.max_snr,
+                p=self.args.mixing_prob,
+                min_noise_snr=self.args.min_noise_snr,
+                p_noise=self.args.p_noise,
+                noise_cuts=noise_cuts,
+            )
+            transforms.append(t)
+            logging.info(f"Performing batch mixing: {t}")
 
         if self.args.concatenate_cuts:
             logging.info(
@@ -560,16 +677,8 @@ class MultiTaskDataModule:
             logging.info("Disable SpecAugment")
 
         logging.info("About to create train dataset")
-        train = MultiTaskKDDataset(
-            input_strategy=eval(self.args.input_strategy)(),
-            cut_transforms=transforms,
-            input_transforms=input_transforms,
-            return_cuts=self.args.return_cuts,
-            target_frame_rate=self.args.target_frame_rate,
-            at_KD=self.args.at_KD,
-            sv_KD=self.args.sv_KD,
-        )
 
+        assert self.args.on_the_fly_feats
         if self.args.on_the_fly_feats:
             # NOTE: the PerturbSpeed transform should be added only if we
             # remove it from data prep stage.
@@ -595,14 +704,34 @@ class MultiTaskDataModule:
             logging.info("Using DynamicBucketingSampler.")
             assert self.args.zip_sampler == False, "Cannot use ZipSampler when using Dynamic Bucketing sampler"
             assert isinstance(cuts_train, CutSet), "DynamicBucketSampler only supports one training cuts"
+            logging.info(f"Sync buckets: {self.args.sync_buckets}")
+            
+            if self.args.use_custom_duration_bins:
+                assert self.args.merge_buckets == False, "Cannot use merge buckets when using custom duration bins"
+                assert self.args.duration_bins != "None", "If use_custom_duration_bins, duration_bins should not be None"
+                duration_bins = list(map(float, self.args.duration_bins.split(",")))
+                if self.args.duration_bins_weights != "None":
+                    duration_bins_weights = list(map(float, self.args.duration_bins_weights.split(",")))
+                    assert len(duration_bins_weights) == len(duration_bins) + 1, "The length of duration_bins_weights should be len(duration_bins) + 1"
+                else:
+                    duration_bins_weights = [1.0] * (len(duration_bins) + 1)
+                logging.info(f"Using custom duration bins: {duration_bins}, weights: {duration_bins_weights}")
+            else:
+                duration_bins = None
+                duration_bins_weights = None
+            
             train_sampler = DynamicBucketingSampler(
                 cuts_train,
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
-                buffer_size=self.args.num_buckets * 1500,
-                shuffle_buffer_size=self.args.num_buckets * 1500,
+                buffer_size=self.args.num_buckets * 5000,
+                shuffle_buffer_size=self.args.num_buckets * 5000,
                 drop_last=self.args.drop_last,
+                sync_buckets=self.args.sync_buckets,
+                duration_bins=duration_bins,
+                duration_bins_weights=duration_bins_weights,
+                merge_buckets=self.args.merge_buckets,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
@@ -977,6 +1106,20 @@ class MultiTaskDataModule:
             )
             return part1_cuts + part2_cuts
     
+    def voxpopuli_unlabelled_cuts(self) -> CutSet:
+        if self.args.use_shar:
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/voxpopuli/en_v2/",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            cuts_train = load_manifest_lazy(
+                self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+            )
+            return cuts_train
+    
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
         logging.info(f"About to get libriheavy {self.args.libriheavy_subset} subset cuts")
@@ -1209,9 +1352,7 @@ class MultiTaskDataModule:
                     seed="randomized",
                 ).repeat()
             else:
-                cuts = load_manifest_lazy(
-                    self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
-                )
+                cuts = load_manifest_lazy(self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz")
         return cuts.drop_features()
 
     @lru_cache()
@@ -1225,9 +1366,7 @@ class MultiTaskDataModule:
             )
             return cuts
         else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
-            )
+            return load_manifest_lazy(self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz")
         
     @lru_cache()
     def audioset_sampling_weights(self):
@@ -1295,6 +1434,24 @@ class MultiTaskDataModule:
         else:
             return load_manifest_lazy(
                 self.args.manifest_dir / "vggsound_cuts_test.jsonl.gz"
+            )
+            
+    @lru_cache()
+    def mtg_cuts(self) -> CutSet:
+        # 1028645 cuts, 2811:31:17 hrs
+        logging.info("About to get MTG cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for MTG cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/mtg_wav",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "mtg_wav_cuts_10s.jsonl.gz"
             )
         
     @lru_cache()
