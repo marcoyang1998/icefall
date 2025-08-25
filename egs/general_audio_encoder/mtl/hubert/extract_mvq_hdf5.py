@@ -1,19 +1,20 @@
 
 import argparse
 import os
+import io
 import logging
 from pathlib import Path
-from typing import List
 
-from icefall.utils import AttributeDict, setup_logger
-from teachers import WhisperTeacher
+from icefall.utils import AttributeDict, setup_logger, str2bool
+from model import HubertModel
 
 import torch
 import torch.multiprocessing as mp
-import torchaudio
 from torch.utils.data import DataLoader
 
+import lhotse
 from lhotse import load_manifest, CutSet
+from lhotse.audio.utils import get_audio_duration_mismatch_tolerance
 from lhotse.cut import MonoCut
 from lhotse.dataset import SimpleCutSampler, UnsupervisedWaveformDataset, DynamicBucketingSampler
 from lhotse.features.io import LilcomChunkyWriter, NumpyHdf5Writer
@@ -21,9 +22,9 @@ from lhotse.utils import fastcopy
 import multi_quantization as quantization
 import numpy as np
 
-import whisper
 from typing import Union, Optional
 
+lhotse.set_caching_enabled(True)
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -71,7 +72,7 @@ def get_parser():
     parser.add_argument(
         "--embedding-dir",
         type=str,
-        default="data/vq_whisper"
+        default="data/vq_hubert"
     )
 
     parser.add_argument(
@@ -91,57 +92,68 @@ def get_parser():
         "--target-manifest-file",
         type=str,
         required=True,
-        help="Where to store the manifest augmented with whisper features"
+        help="Where to store the manifest augmented with hubert features"
     )
     
-    # whisper related args
     parser.add_argument(
-        "--whisper-version",
-        type=str,
-        default="turbo"
+        "--normalize",
+        type=str2bool,
+        default=False,
+        help="If True, compute the channel-wise mean and std on the training se for nomalization."
     )
-
+    
+    # hubert related args
     parser.add_argument(
-        "--n-mels",
-        type=int,
-        default=128,
+        "--hubert-version",
+        type=str,
+        default="xlarge"
     )
     
     return parser
 
+def normalize_data(data, mean, std):
+    return (data - mean) / std
+
 @torch.no_grad()
 def extract_embeddings(
     rank: int,
-    manifest: List[CutSet],
+    manifest: str,
     params: AttributeDict,
 ):
-    setup_logger(f"data/vq_whisper/log/log-whisper-cb-indexes")
+    setup_logger(f"data/vq_hubert_client/log/log-hubert-cb-indexes")
     if params.num_jobs > 1:
         manifest = manifest[rank]
-        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.jsonl.gz"
-        embedding_path = params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}'
+        output_manifest = params.embedding_dir / f"hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}.jsonl.gz"
+        embedding_path = params.embedding_dir / f'hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}-{rank}'
     else:
-        output_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
-        embedding_path =  params.embedding_dir / f'whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}'
+        output_manifest = params.embedding_dir / f"hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
+        embedding_path =  params.embedding_dir / f'hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}'
     
     device = torch.device("cuda", rank)
     
-    # currently only use the encoder of whisper
+    # currently only use the encoder of hubert
     logging.info(params)
-    model = whisper.load_model(params.whisper_version, device)
-    model = model.encoder
+    model = HubertModel(model_version=params.hubert_version)
     model.eval()
-    logging.info(f"Number of whisper encoder params: {sum(p.numel() for p in model.parameters())}")
-    logging.info(f"Successfully loaded Whisper model.")
-    
-    whisper_model = WhisperTeacher(model=model, n_mels=params.n_mels)
+    model.to(device)
+    logging.info(f"Number of hubert params: {sum(p.numel() for p in model.parameters())}")
+    logging.info(f"Successfully loaded hubert model.")
     
     quantizer = quantization.Quantizer(
         dim=params.embedding_dim,
         num_codebooks=params.num_codebooks,
         codebook_size=256,
     )
-    quantizer.load_state_dict(torch.load(params.quantizer_path))
+    state_dict = torch.load(params.quantizer_path)
+    if "quantizer" not in state_dict:
+        # with out normalization stats
+        assert not params.normalize, "No normalization stats is found!"
+        state_dict = {"quantizer": state_dict}
+    
+    if params.normalize:
+        mu = state_dict["mean"].to(device)
+        std = state_dict["std"].to(device)
+    quantizer.load_state_dict(state_dict["quantizer"])
     quantizer.to(device)
     
     dataset = UnsupervisedWaveformDataset(
@@ -159,25 +171,24 @@ def extract_embeddings(
         dataset,
         sampler=sampler,
         batch_size=None,
-        num_workers=1,
+        num_workers=8,
         persistent_workers=False,
     )
     
     new_cuts = []
     num_cuts = 0
     
+    logging.info(f"Writing hubert indexes")
     with NumpyHdf5Writer(embedding_path) as writer:
-        logging.info(f"Writing Whisper indexes to {embedding_path}")
         for i, batch in enumerate(dl):
             cuts = batch["cuts"]
-            audio = batch["audio"]
-            audio_lens = batch["audio_lens"]
             
-            embeddings, embedding_lens = whisper_model.get_embeddings(
-                audio, 
-                audio_lens,
+            embeddings, embedding_lens = model.get_embeddings(
+                batch,
                 layer_idx=params.embedding_layer # which layer's embedding to be stored
             )
+            if params.normalize:
+                embeddings = normalize_data(embeddings, mu, std)
             
             # codebook_indexes = quantizer.encode(embeddings) # [N, T, C]
             N,T,C = embeddings.shape
@@ -193,7 +204,7 @@ def extract_embeddings(
             assert np.min(codebook_indexes) >= 0
             assert np.max(codebook_indexes) < 256
             
-            for idx, cut in enumerate(cuts):    
+            for idx, cut in enumerate(cuts):
                 cb_index = writer.store_array(
                     key=cut.id,
                     value=codebook_indexes[idx][: embedding_lens[idx]],
@@ -209,9 +220,8 @@ def extract_embeddings(
                 num_cuts += 1
                 if num_cuts and num_cuts % 100 == 0:
                     logging.info(f"Cuts processed until now: {num_cuts}")
-                    # torch.cuda.empty_cache()
                 
-    logging.info(f"Finished extracting Whisper codebook indexes, processed a total of {num_cuts} cuts.")
+    logging.info(f"Finished extracting hubert codebook indexes, processed a total of {num_cuts} cuts.")
                 
     CutSet.from_cuts(new_cuts).to_jsonl(output_manifest)
     logging.info(f"Saved manifest to {output_manifest}")
@@ -236,12 +246,21 @@ def join_manifests(
     logging.info(f"Saved the joined manifest to {output_dir}")
     
 def remove_short_and_long_utt(c):
-    if c.duration < 1.0 or c.duration > 29.9:
+    if c.duration < 0.7 or c.duration > 30.1:
         return False
     return True
 
 def remove_sp(c):
     if "sp0.9" in c.id or "sp1.1" in c.id:
+        return False
+    return True
+
+def remove_overlength(c):
+    # fisher
+    if c.start + c.duration > c.recording.duration:
+        return False
+    # Voxpopuli exception
+    if c.id == "20180116-1600-SPECIAL-UNKN2_en_47":
         return False
     return True
 
@@ -260,10 +279,11 @@ if __name__=="__main__":
     cuts = load_manifest(params.input_manifest)
     cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
     cuts = cuts.filter(remove_sp) # remove speed perturb
+    cuts = cuts.filter(remove_overlength) # remove overlength
     print(f"Finished loading manifest")
     print(cuts)
     
-    embedding_manifest = params.embedding_dir / f"whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
+    embedding_manifest = params.embedding_dir / f"hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
     
     if not embedding_manifest.exists():
         if nj == 1:
@@ -276,7 +296,7 @@ if __name__=="__main__":
             splitted_cuts = cuts.split(num_splits=nj)
             logging.info(f"Finished splitting manifest")
             mp.spawn(extract_embeddings, args=(splitted_cuts, params), nprocs=nj, join=True)
-            manifests =  f"{str(params.embedding_dir)}/whisper-{params.whisper_version}-layer-{params.embedding_layer}-{params.manifest_name}-*.jsonl.gz"
+            manifests =  f"{str(params.embedding_dir)}/hubert-{params.hubert_version}-layer-{params.embedding_layer}-{params.manifest_name}-*.jsonl.gz"
             os.system(f"lhotse combine {manifests} {embedding_manifest}")
     else:
         logging.info(f"Skip embedding extraction: the manifest is already generated.")

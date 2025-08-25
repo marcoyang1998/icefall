@@ -1,5 +1,6 @@
 import math
-from typing import Callable, Dict, List, Union
+from threading import Lock
+from typing import Callable, Dict, List, Optional, Union
 
 import torch
 from torch.utils.data.dataloader import DataLoader, default_collate
@@ -11,6 +12,121 @@ from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
 from lhotse.dataset.collation import collate_custom_field
 from lhotse.utils import compute_num_frames, ifnone
 from lhotse.workarounds import Hdf5MemoryIssueFix
+
+class CodebookCache:
+    """
+    Cache of 'bytes' objects with audio data.
+    It is used to cache the "command" type audio inputs.
+
+    By default it is disabled, to enable call `set_caching_enabled(True)`
+    or `AudioCache.enable()`.
+
+    The cache size is limited to max 100 elements and 500MB of audio.
+
+    A global dict `__cache_dict` (static member variable of class AudioCache)
+    is holding the codebooks as np.array.
+    The key is the supervision ID, we avoid using cut.id because the cut IDs could be ruined by repeat
+
+    Thread-safety is ensured by a threading.Lock guard.
+    """
+
+    __enabled: bool = False
+
+    max_cache_memory: int = 500 * 1e6  # 500 MB
+    max_cache_elements: int = 5000  # number audio files
+
+    __cache_dict: Dict[str, np.array] = {}
+    __lock: Lock = Lock()
+
+    @classmethod
+    def enable(cls, enabled=True):
+        cls.__enabled = enabled
+        if not enabled:
+            cls.__clear_cache()
+
+    @classmethod
+    def enabled(cls) -> bool:
+        return cls.__enabled
+
+    @classmethod
+    def try_cache(cls, key: str) -> Optional[bytes]:
+        """
+        Test if 'key' is in the chache. If yes return the bytes array,
+        otherwise return None.
+        """
+
+        if not cls.__enabled:
+            return None
+
+        with cls.__lock:
+            if key in cls.__cache_dict:
+                return cls.__cache_dict[key]
+            else:
+                return None
+
+    @classmethod
+    def add_to_cache(cls, key: str, value: np.array):
+        """
+        Add the new (key,value) pair to cache.
+        Possibly free some elements before adding the new pair.
+        The oldest elements are removed first.
+        """
+
+        if not cls.__enabled:
+            return None
+
+        if value.itemsize * value.size > cls.max_cache_memory:
+            return
+
+        with cls.__lock:
+            # limit cache elements
+            while len(cls.__cache_dict) > cls.max_cache_elements:
+                # remove oldest elements from cache
+                # (dict pairs are sorted according to insertion order)
+                cls.__cache_dict.pop(next(iter(cls.__cache_dict)))
+
+            # limit cache memory
+            while value.itemsize * value.size + CodebookCache.__cache_memory() > cls.max_cache_memory:
+                # remove oldest elements from cache
+                # (dict pairs are sorted according to insertion order)
+                cls.__cache_dict.pop(next(iter(cls.__cache_dict)))
+
+            # store the new (key,value) pair
+            cls.__cache_dict[key] = value
+
+    @classmethod
+    def __cache_memory(cls) -> int:
+        """
+        Return size of CodebookCache values in bytes.
+        (internal, not to be called from outside)
+        """
+        ans = 0
+        for key, value in cls.__cache_dict.items():
+            ans += value.itemsize * value.size
+        return ans
+
+    @classmethod
+    def __clear_cache(cls) -> None:
+        """
+        Clear the cache, remove the data.
+        """
+        with cls.__lock:
+            cls.__cache_dict.clear()
+
+def str2multihot(events: List[str], n_classes=527, id_mapping=None):
+    # generate multi-hot class labels
+    if not isinstance(events, list):
+        events = [events]
+    labels = [list(map(int, event.split(";"))) for event in events]
+    batch_size = len(labels)
+    out = torch.zeros(batch_size, n_classes)
+
+    for i, label in enumerate(labels):
+        if id_mapping is not None:
+            label = [id_mapping[l] for l in label]
+        out[i, label] = 1
+
+    return out, labels
 
 def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     # generate multi-hot class labels
@@ -83,7 +199,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         input_transforms: List[Callable[[torch.Tensor], torch.Tensor]] = None,
         input_strategy: BatchIO = PrecomputedFeatures(),
         at_KD: bool = False,
-        sv_KD: bool = False
+        sv_KD: bool = False,
+        enable_cache: bool = True,
     ):
         """
         IterableDataset constructor.
@@ -116,6 +233,11 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # throughout the epoch. It regularly closes open file handles to
         # reset the internal HDF5 caches.
         self.hdf5_fix = Hdf5MemoryIssueFix(reset_interval=100)
+        
+        self.enable_cache = enable_cache
+        if self.enable_cache:
+            CodebookCache.enable()
+            assert CodebookCache.enabled()
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
@@ -229,11 +351,17 @@ def validate_multi_kd(cuts: CutSet) -> None:
 
 def load_codebook_indexes(c):
     info = c.codebook_indexes
-    if isinstance(info, dict):
-        filename = info["path"]
-        return np.load(filename)
+    cached_cb = CodebookCache.try_cache(c.supervisions[0].id) # we use supervision ID rather than cut id because cuts.repeat() ruins the cut id
+    if cached_cb is not None:
+        return cached_cb
     else:
-        return c.load_custom("codebook_indexes")
+        if isinstance(info, dict):
+            filename = info["path"]
+            cb_indexes = np.load(filename)
+        else:
+            cb_indexes = c.load_custom("codebook_indexes")
+        CodebookCache.add_to_cache(c.supervisions[0].id, cb_indexes)
+        return cb_indexes
        
 def _collate_custom_field(
     cuts: CutSet, 

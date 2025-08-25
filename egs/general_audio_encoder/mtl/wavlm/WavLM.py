@@ -329,7 +329,6 @@ class WavLM(nn.Module):
         output_layer: Optional[int] = None,
         ret_layer_results: bool = False,
     ):
-
         if self.feature_grad_mult > 0:
             features = self.feature_extractor(source)
             if self.feature_grad_mult != 1.0:
@@ -740,3 +739,16 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.final_layer_norm(x)
 
         return x, attn, pos_bias
+
+def _test():
+    pass
+    layer = TransformerSentenceEncoderLayer(
+        activation_fn="glu",
+    )
+    num_params = sum([p.numel() for p in layer.parameters()])
+    print(layer)
+    print(num_params)
+
+
+if __name__=="__main__":
+    _test()
