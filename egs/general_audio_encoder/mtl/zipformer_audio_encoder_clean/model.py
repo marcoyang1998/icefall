@@ -767,8 +767,6 @@ def _test_custom_mask():
         print(f"Current config: mask_prob = {mask_prob}, mask_length = {mask_length}")
         print(f"Averaged masking ratio: {avg_ratio}")
         
-def _test_specaug_feature():
-    pass
 
 if __name__=="__main__":
     _test_w2v2_channel_mask()

@@ -55,6 +55,7 @@ class MultiKDModel(nn.Module):
         mask_channel_selection: str = "static",
         mask_channel_other: float = 0.0,
         loss_only_mask: bool = False,
+        normalize_fbank: bool = False,
     ):
         """A model that performs MVQ KD pre-training .
 
@@ -87,6 +88,8 @@ class MultiKDModel(nn.Module):
             The length of each mask
           mask_selection:
             How to determine the length of the mask, see ``compute_mask_indices''
+          normalize_fbank:
+            If true, the input fbank features is normalized to zero mean and unit variance
         """
         super().__init__()
 
@@ -136,6 +139,7 @@ class MultiKDModel(nn.Module):
         self.mask_channel_other = mask_channel_other
         
         self.loss_only_mask = loss_only_mask
+        self.normalize_fbank = normalize_fbank
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -154,6 +158,10 @@ class MultiKDModel(nn.Module):
           encoder_out_lens:
             Encoder output lengths, of shape (N,).
         """
+        # normalise fbank (utterance level)
+        if self.normalize_fbank:
+            x = self._normalize_fbank(x, x_lens)
+            
         # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
         x, x_lens = self.encoder_embed(x, x_lens)
         # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
@@ -168,6 +176,36 @@ class MultiKDModel(nn.Module):
 
         return encoder_out, encoder_out_lens
 
+    @staticmethod
+    def _normalize_fbank(x: torch.Tensor, x_lens: torch.Tensor, eps: float=1e-9):
+        """
+        x: (B, T, D) fbank 特征，已 padding 到同一 T
+        x_lens: (B,) 每条样本的有效帧数 (int)
+        """
+        device = x.device
+        B, T, D = x.shape
+
+        # mask: (B, T, 1)
+        mask = torch.arange(T, device=device).unsqueeze(0) < x_lens.unsqueeze(1)
+        mask = mask.unsqueeze(-1)  # (B, T, 1), bool
+
+        lengths = x_lens.view(B, 1, 1).to(x.dtype)  # (B, 1, 1)
+
+        # 均值
+        sum_feats = (x * mask).sum(dim=1, keepdim=True)  # (B, 1, D)
+        mean = sum_feats / lengths
+
+        # 方差
+        sum_sq = ((x - mean) * mask).pow(2).sum(dim=1, keepdim=True)
+        std = torch.sqrt(sum_sq / lengths + eps)
+
+        # 归一化
+        x_norm = (x - mean) / (std + eps)
+        # set masking positions to value 0
+        x_norm = x_norm * mask
+
+        return x_norm
+    
     def forward(
         self,
         x: torch.Tensor,
@@ -194,7 +232,7 @@ class MultiKDModel(nn.Module):
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         assert codebook_indexes is not None or at_targets is not None
-
+        
         # apply masking
         if self.training and mask:
             padding_mask = make_pad_mask(x_lens)
@@ -236,7 +274,7 @@ class MultiKDModel(nn.Module):
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
-        reduction: str = "sum"
+        reduction: str = "sum",
     ):
         # align the encoder features with the codebook indexes
         if self.interpolate_teacher:
@@ -560,6 +598,8 @@ def compute_mask_indices(
                 + rng.random()
             )
             num_mask = max(min_masks, num_mask)
+            hard_max = sz // mask_length
+            num_mask = min(hard_max, num_mask) # prevent whole sequence being masked
         else:
             raise ValueError()
 
@@ -632,6 +672,7 @@ def compute_mask_indices(
 
         mask_idc = np.unique(mask_idc[mask_idc < sz])
         if len(mask_idc) >= sz:
+            
             raise ValueError(
                 (
                     f"the entire sequence is masked. "
