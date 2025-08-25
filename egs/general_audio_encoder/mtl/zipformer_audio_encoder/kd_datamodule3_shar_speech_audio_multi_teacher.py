@@ -167,6 +167,26 @@ class MultiTaskDataModule:
             "(you might want to increase it for larger datasets).",
         )
         group.add_argument(
+            "--sync-buckets",
+            type=str2bool,
+            default=True,
+        )
+        group.add_argument(
+            "--use-custom-duration-bins",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
+            "--duration-bins",
+            type=str,
+            default="None"
+        )
+        group.add_argument(
+            "--duration-bins-weights",
+            type=str,
+            default="None",
+        )
+        group.add_argument(
             "--zip-sampler",
             type=str2bool,
             default=False,
@@ -274,6 +294,27 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--mixing-prob",
+            type=float,
+            default=0.5,
+            help="The mixing probability, applicable to both musan and in-batch mixing"
+        )
+        
+        group.add_argument(
+            "--min-snr",
+            type=float,
+            default=10,
+            help="The minimum SNR used in noise mixing."
+        )
+        
+        group.add_argument(
+            "--max-snr",
+            type=float,
+            default=20,
+            help="The minimum SNR used in noise mixing."
+        )
+        
+        group.add_argument(
             "--time-mask-ratio",
             type=float,
             default=1.0,
@@ -325,7 +366,7 @@ class MultiTaskDataModule:
         group.add_argument(
             "--num-cb-audio",
             type=int,
-            default=25,
+            default=8,
             help="Number of codebooks for audio MVQ"
         )
         
@@ -372,7 +413,11 @@ class MultiTaskDataModule:
             type=str2bool,
             default=False,
         )
-        
+        group.add_argument(
+            "--voxpopuli-subset",
+            type=str,
+            default="en_v2",
+        )
         group.add_argument(
             "--use-wenetspeech",
             type=str2bool,
@@ -494,6 +539,12 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--use-mtg",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
             "--at-weighted-sampler",
             type=str2bool,
             default=False,
@@ -533,16 +584,16 @@ class MultiTaskDataModule:
         # properly set world_size and rank
         if self.args.use_shar:
             logging.info(f"Setting world_size=1 and rank=0 because we will be using shar!")
-            # world_size = 1
-            # rank = 0
         
         transforms = []
         if self.args.enable_musan:
-            logging.info("Enable MUSAN")
+            logging.info(f"Enable MUSAN with minimum SNR={self.args.min_snr}, mixing prob: {self.args.mixing_prob}")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz")
+            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
-                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
+                CutMix(
+                    cuts=cuts_musan, p=0.5, snr=(self.args.min_snr, self.args.max_snr), preserve_id=True, pad_to_longest=False
+                )
             )
         else:
             logging.info("Disable MUSAN")
@@ -626,14 +677,35 @@ class MultiTaskDataModule:
             logging.info("Using DynamicBucketingSampler.")
             assert self.args.zip_sampler == False, "Cannot use ZipSampler when using Dynamic Bucketing sampler"
             assert isinstance(cuts_train, CutSet), "DynamicBucketSampler only supports one training cuts"
+            logging.info(f"Sync buckets: {self.args.sync_buckets}")
+            if self.args.use_custom_duration_bins:
+                assert self.args.duration_bins != "None", "If use_custom_duration_bins, duration_bins should not be None"
+                duration_bins = list(map(float, self.args.duration_bins.split(",")))
+                if self.args.duration_bins_weights != "None":
+                    duration_bins_weights = list(map(float, self.args.duration_bins_weights.split(",")))
+                    assert len(duration_bins_weights) == len(duration_bins) + 1, "The length of duration_bins_weights should be len(duration_bins) + 1"
+                else:
+                    duration_bins_weights = [1.0] * (len(duration_bins) + 1)
+                logging.info(f"Using custom duration bins: {duration_bins}, weights: {duration_bins_weights}")
+            else:
+                duration_bins = None
+                duration_bins_weights = None
+            # duration_bins = [2.0, 5.0, 9.9, 10.1, 15, 22]
+            # duration_bins_weights = [1,1,1,2.5,1,1,1]
+            # logging.info(f"Using weighted duration bins: {duration_bins}, weights: {duration_bins_weights}")
+            # logging.info("Ignoring pre-defined num buckets because duration bins is given.")
+            import pdb; pdb.set_trace()
             train_sampler = DynamicBucketingSampler(
                 cuts_train,
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
-                buffer_size=self.args.num_buckets * 1500,
-                shuffle_buffer_size=self.args.num_buckets * 1500,
+                buffer_size=self.args.num_buckets * 50000,
+                shuffle_buffer_size=self.args.num_buckets * 50000,
                 drop_last=self.args.drop_last,
+                sync_buckets=self.args.sync_buckets,
+                duration_bins=duration_bins,
+                duration_bins_weights=duration_bins_weights,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
@@ -1018,7 +1090,7 @@ class MultiTaskDataModule:
             return part1_cuts + part2_cuts
         
     @lru_cache()
-    def voxpopuli_train_cuts(self) -> CutSet:
+    def voxpopuli_asr_train_cuts(self) -> CutSet:
         # languages = ["en", "de", "fr", "es", "pl", "it", "ro", "hu", "cs", "nl", "fi", "hr", "sk", "sl", "et", "lt"]
         VOX_POPULI_LANGUAGES = {
             "en": 514, "de": 270, "fr": 202, "es": 153, "pl": 100, "it": 80, "ro": 77, "hu": 55, "cs": 55,
@@ -1053,7 +1125,7 @@ class MultiTaskDataModule:
         return all_cuts
     
     @lru_cache()
-    def voxpopuli_dev_cuts(self) -> CutSet:
+    def voxpopuli_asr_dev_cuts(self) -> CutSet:
         # languages = ["en", "de", "fr", "es", "pl", "it", "ro", "hu", "cs", "nl", "fi", "hr", "sk", "sl", "et", "lt"]
         VOX_POPULI_LANGUAGES = {
             "en": 514, "de": 270, "fr": 202, "es": 153, "pl": 100, "it": 80, "ro": 77, "hu": 55, "cs": 55,
@@ -1084,6 +1156,21 @@ class MultiTaskDataModule:
         all_cuts = all_cuts.map(fix_supervisions)
         all_cuts = all_cuts.filter(filter_supervisions_start)
         return all_cuts
+    
+    def voxpopuli_unlabelled_cuts(self) -> CutSet:
+        if self.args.use_shar:
+            logging.info(f"Loading the unlabelled voxpopuli data: {self.args.voxpopuli_subset}")
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.speech_shar_dir)}/voxpopuli/{self.args.voxpopuli_subset}/",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            cuts_train = load_manifest_lazy(
+                self.args.manifest_dir / f"voxpopuli_cuts_{self.args.voxpopuli_subset}.jsonl.gz"
+            )
+            return cuts_train
     
     @lru_cache()
     def libriheavy_train_cuts(self) -> CutSet:
@@ -1389,6 +1476,24 @@ class MultiTaskDataModule:
             )
 
     @lru_cache()
+    def mtg_cuts(self) -> CutSet:
+        # 1028645 cuts, 2811:31:17 hrs
+        logging.info("About to get MTG cuts")
+        if self.args.use_shar:
+            logging.info(f"Use shard for MTG cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.audio_shar_dir)}/mtg_wav",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "mtg_wav_cuts_10s.jsonl.gz"
+            )
+            
+    @lru_cache()
     def music4all_cuts(self) -> CutSet:
         logging.info("About to get music4all cuts")
         if self.args.use_shar:
@@ -1583,48 +1688,87 @@ def filter_supervisions_start(c):
     
 
 if __name__=="__main__":
+    formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
+
+    logging.basicConfig(format=formatter, level=logging.INFO)
+    
     parser = argparse.ArgumentParser()
     MultiTaskDataModule.add_arguments(parser)
     
     args = parser.parse_args()
+    args.gigaspeech_subset = "xl"
+    args.libriheavy_subset = "large"
+    args.audioset_subset = "full"
+    args.use_shar = True
+    args.speech_shar_dir = "data-shar/data-shar-hubert-large-layer-21-normalize-cb16-hdf5"
+    args.audio_shar_dir = "data-shar/data-shar-dasheng-as-cb8"
+    args.num_buckets = 20
+    args.on_the_fly_feats = 1
+    args.sync_buckets = False
+    args.num_workers = 0
+    args.at_KD = False
+    args.max_duration = 400
     
     mtl_datamodule = MultiTaskDataModule(args)
     
     from functools import partial
     from utils import _add_dummy_embeddings_and_taskIDs
     from lhotse import CutSet
-    cuts_path = "cuts.json"
-    cuts = CutSet.from_json(cuts_path)
-    asr_cuts = cuts.repeat(200)
+    
+    import pdb; pdb.set_trace()
+    libriheavy_cuts = mtl_datamodule.libriheavy_train_cuts()
+    gigaspeech_cuts = mtl_datamodule.gigaspeech_train_cuts()
+    asr_cuts = [libriheavy_cuts, gigaspeech_cuts]
+    asr_cuts = CutSet.mux(
+        *asr_cuts,
+        weights=[10093746, 8611516],
+        stop_early=False,
+    )
     asr_cuts = asr_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
-    cuts[0].id = cuts[0].id + "_at"
-    at_cuts = cuts.repeat(2000)
-    at_cuts = at_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=0
-    at_cuts = at_cuts.to_eager()
-    sampling_weight = [300,100]
     
-    train_cuts = {
-        "asr_cuts": asr_cuts,
-        "audio_tagging_cuts": at_cuts,
-    }
+    def change_codebook_indexes(c):
+        c.audio_codebook_indexes = c.codebook_indexes
+        del c.codebook_indexes
+        return c
     
+    audio_cuts = mtl_datamodule.audioset_cuts().repeat(4)
+    audio_cuts = audio_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=0
+    audio_cuts = audio_cuts.map(change_codebook_indexes)
+    
+    train_cuts = [asr_cuts, audio_cuts]
+    train_cuts = CutSet.mux(
+        *train_cuts,
+        weights=[2,1],
+        stop_early=False,
+    )
+    
+    import pdb; pdb.set_trace()
     train_dl = mtl_datamodule.train_dataloaders(
         cuts_train=train_cuts,
-        sampling_weight=sampling_weight
     )
     num_epochs = 3
+    import pdb; pdb.set_trace()
     for epoch in range(1, num_epochs+1):
-        train_dl.sampler.set_epoch(epoch-1)
+        # train_dl.sampler.set_epoch(epoch-1)
         num1, num2 = 0, 0
+        duration1, duration2 = 0,0
         for batch_idx, batch in enumerate(train_dl):
             task_ids = batch["task_ids"]
             num1 += sum(task_ids == 1)
             num2 += sum(task_ids == 2)
-            print(f"Epoch {epoch}, batch {batch_idx}: {sum(task_ids == 1)} {sum(task_ids == 2)}")
             cuts = batch["supervisions"]["cut"]
-            if batch_idx == 0:
-                print([c.id for c in cuts])
+            cuts_1 = [c for c in cuts if c.task_id == 1]
+            cuts_2 = [c for c in cuts if c.task_id == 2]
+            duration1 += sum([c.duration for c in cuts_1])
+            duration2 += sum([c.duration for c in cuts_2])
+            logging.info(f"Epoch {epoch}, batch {batch_idx}: {sum(task_ids == 1)}, {sum(task_ids == 2)}")
+            cuts = batch["supervisions"]["cut"]
+            if batch_idx == 200:
+                break
+            # if batch_idx == 0:
+            #     print([c.id for c in cuts])
         assert num2 <= args.at_num_samples
-        print(f"Number of cuts from task1: {num1}")
-        print(f"Number of cuts from task2: {num2}")
+        print(f"Sample stats: {num1}, {num2}; Duration stats: {duration1}, {duration2}")
+        # print(f"Number of cuts from task1: {num1}")
+        # print(f"Number of cuts from task2: {num2}")
         
