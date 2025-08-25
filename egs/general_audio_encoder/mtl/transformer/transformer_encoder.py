@@ -393,6 +393,42 @@ def _test_causal():
     assert torch.all(features[0,:2] == features[1, :2])
     print("Checking causal mask: passed!")
     
+def _test_padding_mask():
+    device = torch.device("cuda")
+    is_causal = True
+    
+    model = LlamaAudioEncoder(
+        encoder_dim=512,
+        num_layers=12,
+        use_flash_attention=True,
+        is_causal=is_causal,
+    )
+    model.eval()
+    model.to(device)
+    
+    x = torch.rand(1,8,512).to(device)
+    x = x.repeat(2,1,1) 
+    x_lens = torch.tensor([8, 8]).to(device)
+    
+    with torch.cuda.amp.autocast(enabled=True):
+        output = model(
+            inputs_embeds=x,
+            input_lens=x_lens,
+        )
+    feat = output.last_hidden_state
+        
+    x_lens = torch.tensor([8,5]).to(device)
+    with torch.cuda.amp.autocast(enabled=True):
+        output2 = model(
+            inputs_embeds=x,
+            input_lens=x_lens,
+        )
+    feat2 = output2.last_hidden_state
+    
+    import pdb; pdb.set_trace()
+    print(feat, feat2)
+    
+    
 def _test_encoder_layer():
     model = LlamaAudioEncoder(
         encoder_dim=768,
@@ -407,7 +443,8 @@ def _test_encoder_layer():
     
 
 if __name__=="__main__":
-    _test_encoder_layer()
+    _test_padding_mask()
+    # _test_encoder_layer()
     # _test_padding_mask()
     # _test_causal()
     # _test()
