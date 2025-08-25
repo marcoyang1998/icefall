@@ -1,17 +1,21 @@
 import math
+import random
 from threading import Lock
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union, Tuple
 
 import torch
 from torch.utils.data.dataloader import DataLoader, default_collate
 import numpy as np
 
 from lhotse import validate
-from lhotse.cut import CutSet, MonoCut
+from lhotse import Fbank, FbankConfig
+from lhotse.cut import CutSet, MonoCut, Cut, MixedCut
 from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
-from lhotse.dataset.collation import collate_custom_field
-from lhotse.utils import compute_num_frames, ifnone
+from lhotse.dataset.collation import collate_custom_field, collate_matrices
+from lhotse.utils import compute_num_frames, ifnone, LOG_EPSILON
 from lhotse.workarounds import Hdf5MemoryIssueFix
+
+from lhotse.cut.set import mix
 
 class CodebookCache:
     """
@@ -187,6 +191,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         at_KD: bool = False,
         sv_KD: bool = False,
         enable_cache: bool = True,
+        token_mixing: bool = False
     ):
         """
         IterableDataset constructor.
@@ -209,6 +214,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.cut_transforms = ifnone(cut_transforms, [])
         self.input_transforms = ifnone(input_transforms, [])
         self.input_strategy = input_strategy
+        self.extractor = Fbank(FbankConfig(num_mel_bins=128))
         
         self.at_KD = at_KD
         self.sv_KD = sv_KD
@@ -226,6 +232,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # throughout the epoch. It regularly closes open file handles to
         # reset the internal HDF5 caches.
         self.hdf5_fix = Hdf5MemoryIssueFix(reset_interval=100)
+        
+        self.token_mixing = token_mixing
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
@@ -249,14 +257,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         # Get a tensor with batched feature matrices, shape (B, T, F)
         # Collation performs auto-padding, if necessary.
-        input_tpl = self.input_strategy(cuts)
-        if len(input_tpl) == 3:
-            # An input strategy with fault tolerant audio reading mode.
-            # "cuts" may be a subset of the original "cuts" variable,
-            # that only has cuts for which we succesfully read the audio.
-            inputs, _, cuts = input_tpl
-        else:
-            inputs, _ = input_tpl
+        inputs, input_lens, mix_ratios = self.load_audio_and_compute_fbank(cuts)
 
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
@@ -282,6 +283,10 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             pad_value=-100,
         )
         
+        # perform token mixing
+        if self.token_mixing:
+            mvq_tokens = self.mix_mvq_tokens(mvq_tokens, cuts, mix_ratios)
+        
         if self.at_KD:
             # at_targets = collate_custom_field(
             #     cuts_pre_mixed, "beats_embedding", pad_value=-100
@@ -293,7 +298,6 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             audio_events = [getattr(c.supervisions[0], "audio_event", "0") for c in cuts_pre_mixed] # the label indices are in CED format
             # at_targets, _ = str2multihot(audio_events) # (N, num_events)
             at_targets = None
-            
             
         sv_targets = None
         
@@ -328,7 +332,182 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             ]
 
         return batch
+    
+    def load_audio_and_compute_fbank(self, cuts: CutSet):
+        audios = []
+        mix_ratios = []
+        for cut in cuts:
+            if isinstance(cut, MixedCut):
+                audio, mix_ratio = _load_mixed_cut_single(cut)
+            else:
+                audio = cut.load_audio()
+                mix_ratio = 0.0
+            audios.append(audio)
+            mix_ratios.append(mix_ratio)
+        
+        inputs, input_lens = compute_feature(audios, cuts, self.extractor)
+        
+        return inputs, input_lens, mix_ratios
+    
+    def load_codebook_indexes(self, cuts: CutSet, field_name: str = "codebook_indexes"):
+        cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+        cuts_pre_mixed = fix_start(cuts_pre_mixed)
+        
+        mvq_tokens, mvq_token_lens = _collate_custom_field(
+            cuts_pre_mixed,
+            field_name,
+            dummy=self.dummy_codebook_indexes,
+            temporal_array=True,
+            target_frame_rate=self.target_frame_rate,
+            pad_value=-100,
+        )
+        if self.mix_codebook_indexes:
+            for i,c in enumerate(cuts):
+                if not isinstance(c, MixedCut):
+                    continue
+                orig_track, mix_track = c.tracks # get the two tracks
+                mixed_in_cb = mix_track.load_custom(field_name) # should be only within the mix region
+                offset = compute_num_frames(mix_track.start, 1 / self.target_frame_rate)
+        return mvq_tokens, mvq_token_lens
+    
+    def mix_mvq_tokens(
+        self,
+        mvq_tokens: torch.Tensor,
+        cuts: CutSet,
+        mix_ratios: List[float],
+        field_name: str = "codebook_indexes"
+    ):
+        # Randomly replace a proportion of the original codebook indexes
+        # with the codebook indexes from the mixed cut. The proportion is determined
+        # by the gain of the mixed audio
+        for i,c in enumerate(cuts):
+            if not isinstance(c, MixedCut):
+                continue
+            orig_track, mix_track = c.tracks # get the two tracks
+            
+            # compute the starting mixing frame
+            offset = int(mix_track.offset * self.target_frame_rate) 
+            mixed_in_cb = torch.from_numpy(mix_track.cut.load_custom(field_name)) # should be only within the mix region
+            mix_length = mixed_in_cb.shape[0]
+            if mix_length + offset >= mvq_tokens.size(1):
+                mix_length = mvq_tokens.size(1) - offset
+                mixed_in_cb = mixed_in_cb[:, :mix_length]
+            cur_cb_slice = mvq_tokens[i, offset:offset + mix_length, :]
+            p = gain2prob(mix_ratios[i])
+            mixed_cb = _mix_tokens_single(cur_cb_slice, mixed_in_cb, p)
+            mvq_tokens[i, offset:offset + mix_length] = mixed_cb
+        return mvq_tokens
 
+def gain2prob(gain: float, alpha: float=2.0):
+    # x**alpha/(1+x**alpha), x is gain, alpha is empirically tuned
+    return gain ** alpha / (1 + gain**alpha)
+
+def audio_energy(audio: np.ndarray):
+    return float(np.average(audio**2))
+
+def _load_mixed_cut_single(cut: MixedCut) -> Tuple[np.ndarray, float]:
+    # we only deal with the first channel
+    sample_rate = cut.sampling_rate
+    orig_cut = cut.tracks[0].cut
+    mix_in_cut = cut.tracks[1].cut
+    snr = cut.tracks[1].snr
+    
+    # compute some numbers
+    mix_offset = cut.tracks[1].offset
+    mix_offset_frames = int(sample_rate * mix_offset) # compute the frame shift for mixing
+    
+    # we take the first channel
+    orig_audio = orig_cut.load_audio() 
+    mix_in_audio = mix_in_cut.load_audio()
+    mix_in_frames = mix_in_audio.shape[1]
+    
+    energy_orig = audio_energy(orig_audio[0, mix_offset_frames:mix_offset_frames + mix_in_frames])
+    target_energy = energy_orig * (10.0 ** (-snr / 10))
+    energy_mix_in = audio_energy(mix_in_audio)
+    gain = math.sqrt(target_energy / (energy_mix_in + 1e-8))
+    
+    if mix_in_frames + mix_offset_frames <= orig_audio.shape[1]:
+        orig_audio[0, mix_offset_frames:mix_offset_frames + mix_in_frames] += gain * mix_in_audio[0]
+    else:
+        mix_in_frames = orig_audio.shape[1] - mix_offset_frames
+        orig_audio[0, mix_offset_frames:mix_offset_frames+mix_in_frames] += gain * mix_in_audio[0, :mix_in_frames]
+    
+    return orig_audio, gain
+        
+def mix_audio_with_offset(
+    reference_cut: Cut,
+    mixed_in_cut: Cut,
+    snr: float = 10.0,
+    drop_mixed_in_supervision: bool = True
+):
+    if drop_mixed_in_supervision:
+        mixed_in_cut = mixed_in_cut.drop_supervisions()
+    ref_duration = reference_cut.duration
+    mixed_in_duration = mixed_in_cut.duration
+    
+    mix_duration = random.uniform(0, ref_duration / 2)
+    
+    # randomly truncate the mixed_in_cut to mix_duration if longer
+    if mixed_in_duration > mix_duration:
+        diff = mixed_in_duration - mix_duration
+        truncate_start = random.uniform(0, diff)
+        mixed_in_cut = mixed_in_cut.truncate(offset=truncate_start, duration=mix_duration)
+        
+    actual_mix_duration = min(mixed_in_cut.duration, mix_duration)
+    offset = random.uniform(0, ref_duration - actual_mix_duration - 0.05) # a tolerance of 0.05 for safety
+    mixed_cut = mix(
+        reference_cut=reference_cut,
+        mixed_in_cut=mixed_in_cut,
+        offset=offset,
+        snr=snr,
+        preserve_id="left",
+    )
+    
+    return mixed_cut
+
+def _mix_tokens_single(A: torch.Tensor, B: torch.Tensor, p: float) -> torch.Tensor:
+    """
+    从 A 中随机选出 p% 的位置，用 B 中对应位置的值替换。
+    
+    参数:
+        A (Tensor): 原始张量，形状为 (T, C)
+        B (Tensor): 替换来源张量，形状必须与 A 相同
+        p (float): 替换比例，范围为 0~1
+
+    返回:
+        Tensor: 替换后的新张量
+    """
+    assert A.shape == B.shape, "A and B must have the same shape"
+    assert 0 <= p <= 1, "p must be between 0 and 1"
+    
+    # 创建一个与 A 相同形状的 mask，表示哪些位置需要替换
+    mask = torch.rand_like(A, dtype=torch.float32) < p
+
+    # 创建新的张量：如果 mask 为 True，就用 B 的值，否则用 A 的值
+    return torch.where(mask, B, A)
+
+def compute_feature(audios, cuts, extractor):
+    # compute features given the audios
+    # cuts is only for metadata reading
+    features_single = []
+    for idx, (audio, cut) in enumerate(zip(audios, cuts)):
+        try:
+            features = extractor.extract(audio, cuts[idx].sampling_rate)
+        except:
+            print(
+                f"Error while extracting the features for cut with ID {cut.id} -- details:\n{cut}"
+            )
+            raise
+        features_single.append(torch.from_numpy(features))
+    
+    features_batch = collate_matrices(features_single, padding_value=LOG_EPSILON)
+    
+    feature_lens = torch.tensor(
+        [f.shape[0] for f in features_single], dtype=torch.int64
+    )
+
+    out = (features_batch, feature_lens)
+    return out
 
 def fix_start(cuts):
     # make the start of codebook indexes the same as the cut
@@ -416,12 +595,24 @@ def _collate_custom_field(
     else:
         all_arrays = [torch.from_numpy(c.load_custom(field)) if c.has_custom(field) else dummy for c in cuts]
         return torch.stack(all_arrays)
-            
-        
+
+def _test_mix():
+    from lhotse import load_manifest_lazy
+    manifest = "data/fbank/librispeech_cuts_dev-other.jsonl.gz"
+    cuts = load_manifest_lazy(manifest).drop_features()
+    reference_cut = cuts[0]
+    noise_cuts = [cuts[4], cuts[2]] 
+    
+    for noise_cut in noise_cuts:
+        mixed_cut = mix_audio_with_offset(reference_cut=reference_cut, mixed_in_cut=noise_cut, snr=5)
+    print(mixed_cut)
+
 if __name__=="__main__":
     from functools import partial
     from utils import _add_dummy_embeddings_and_taskIDs
     from lhotse import load_manifest
+    
+    _test_mix()
     
     # enable the cache
     CodebookCache.enable()

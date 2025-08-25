@@ -269,9 +269,16 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
-            "--batch-mixing",
+            "--token-mixing",
             type=str2bool,
             default=True,
+            help="Perform token mixing, it does batch mixing internally. And it also interpolate the tokens",
+        )
+        
+        group.add_argument(
+            "--batch-mixing",
+            type=str2bool,
+            default=False,
         )
         
         group.add_argument(
@@ -545,6 +552,7 @@ class MultiTaskDataModule:
         
         if self.args.enable_musan:
             assert not self.args.batch_mixing, "Do not use musan and in-batch mixing together!"
+            assert not self.args.token_mixing
             logging.info(f"Enable MUSAN with minimum SNR={self.args.min_snr}")
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
@@ -555,6 +563,9 @@ class MultiTaskDataModule:
             )
         else:
             logging.info("Disable MUSAN")
+            
+        if self.args.token_mixing:
+            assert self.args.batch_mixing
             
         if self.args.batch_mixing:
             assert not self.args.enable_musan, "Do not use musan and in-batch mixing together!"
@@ -613,18 +624,6 @@ class MultiTaskDataModule:
             logging.info("Disable SpecAugment")
 
         logging.info("About to create train dataset")
-        # train = MultiTaskKDDataset(
-        #     input_strategy=eval(self.args.input_strategy)(),
-        #     cut_transforms=transforms,
-        #     input_transforms=input_transforms,
-        #     return_cuts=self.args.return_cuts,
-        #     target_frame_rate=self.args.target_frame_rate,
-        #     at_KD=self.args.at_KD,
-        #     sv_KD=self.args.sv_KD,
-        #     batch_mixing=self.args.batch_mixing,
-        #     min_snr=self.args.min_snr,
-        #     max_snr=self.args.max_snr
-        # )
 
         assert self.args.on_the_fly_feats
         if self.args.on_the_fly_feats:
@@ -646,6 +645,7 @@ class MultiTaskDataModule:
                 target_frame_rate=self.args.target_frame_rate,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
+                token_mixing=self.args.token_mixing,
             )
 
         if self.args.bucketing_sampler:
