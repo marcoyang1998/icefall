@@ -45,6 +45,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
+from augmentations import BatchMixingWithTask
 from dataset_speech_audio_mvq import MultiTaskKDDataset
 from icefall.utils import str2bool
 
@@ -141,7 +142,7 @@ class MultiTaskDataModule:
         group.add_argument(
             "--batch-duration-factor",
             type=int,
-            default=4,
+            default=5,
             help="""Used to filter shorter cuts when batching. The ZipSampler can sometime
             produce very large batch, this is a double safety measure to prevent the model 
             from OOM error. This is evaluated as an upperlimit: batch_duration_factor * max_duration
@@ -185,6 +186,11 @@ class MultiTaskDataModule:
             "--duration-bins-weights",
             type=str,
             default="None",
+        )
+        group.add_argument(
+            "--merge-buckets",
+            type=str2bool,
+            default=False,
         )
         group.add_argument(
             "--zip-sampler",
@@ -294,10 +300,33 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--batch-mixing",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--batch-mixing-mode",
+            type=str,
+            default="batch",
+            choices=["batch", "musan"],
+        )
+        
+        group.add_argument(
             "--mixing-prob",
             type=float,
             default=0.5,
-            help="The mixing probability, applicable to both musan and in-batch mixing"
+            help="""The mixing probability, applicable to both musan and in-batch mixing.
+            In musan, it means the noise mixing prob. In batch mixing, it means the augmentation 
+            prob, consisting of both in-batch mixing and noise mixing.
+            """
+        )
+        
+        group.add_argument(
+            "--p-noise",
+            type=float,
+            default=0.0,
+            help="The probability of mixing noise from non speech noise. Only applicable to in-batch mixing"
         )
         
         group.add_argument(
@@ -305,6 +334,13 @@ class MultiTaskDataModule:
             type=float,
             default=10,
             help="The minimum SNR used in noise mixing."
+        )
+        
+        group.add_argument(
+            "--min-noise-snr",
+            type=float,
+            default=-5,
+            help="The minimum SNR used in noise mixing from non-speech noise. Only used in BatchMixing"
         )
         
         group.add_argument(
@@ -565,6 +601,13 @@ class MultiTaskDataModule:
             type=int,
             default=1,
         )
+        
+        group.add_argument(
+            "--audio-duration-factor", 
+            type=float,
+            default=1.0,
+            help="When calculating the sampling weight of audio dataset, this factor is applied to the total duration of all audio data"
+        )
 
     def train_dataloaders(
         self,
@@ -598,6 +641,24 @@ class MultiTaskDataModule:
         else:
             logging.info("Disable MUSAN")
 
+        if self.args.batch_mixing:
+            assert not self.args.enable_musan, "Do not use musan and in-batch mixing together!"
+            if self.args.p_noise > 0.0:
+                noise_cuts = load_manifest("data/musan/audioset_non_human.jsonl.gz").drop_features()
+                logging.info(f"Get the noise cuts for batch mixing.")
+            else:
+                noise_cuts = None
+            t = BatchMixingWithTask(
+                min_snr=self.args.min_snr, 
+                max_snr=self.args.max_snr,
+                p=self.args.mixing_prob,
+                min_noise_snr=self.args.min_noise_snr,
+                p_noise=self.args.p_noise,
+                noise_cuts=noise_cuts,
+            )
+            transforms.append(t)
+            logging.info(f"Performing batch mixing: {t}")
+        
         if self.args.concatenate_cuts:
             logging.info(
                 f"Using cut concatenation with duration factor "
@@ -678,7 +739,9 @@ class MultiTaskDataModule:
             assert self.args.zip_sampler == False, "Cannot use ZipSampler when using Dynamic Bucketing sampler"
             assert isinstance(cuts_train, CutSet), "DynamicBucketSampler only supports one training cuts"
             logging.info(f"Sync buckets: {self.args.sync_buckets}")
+            
             if self.args.use_custom_duration_bins:
+                assert self.args.merge_buckets == False, "Cannot use merge buckets when using custom duration bins"
                 assert self.args.duration_bins != "None", "If use_custom_duration_bins, duration_bins should not be None"
                 duration_bins = list(map(float, self.args.duration_bins.split(",")))
                 if self.args.duration_bins_weights != "None":
@@ -690,22 +753,19 @@ class MultiTaskDataModule:
             else:
                 duration_bins = None
                 duration_bins_weights = None
-            # duration_bins = [2.0, 5.0, 9.9, 10.1, 15, 22]
-            # duration_bins_weights = [1,1,1,2.5,1,1,1]
-            # logging.info(f"Using weighted duration bins: {duration_bins}, weights: {duration_bins_weights}")
-            # logging.info("Ignoring pre-defined num buckets because duration bins is given.")
-            import pdb; pdb.set_trace()
+            
             train_sampler = DynamicBucketingSampler(
                 cuts_train,
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
-                buffer_size=self.args.num_buckets * 50000,
-                shuffle_buffer_size=self.args.num_buckets * 50000,
+                buffer_size=self.args.num_buckets * 10000,
+                shuffle_buffer_size=self.args.num_buckets * 10000,
                 drop_last=self.args.drop_last,
                 sync_buckets=self.args.sync_buckets,
                 duration_bins=duration_bins,
                 duration_bins_weights=duration_bins_weights,
+                merge_buckets=self.args.merge_buckets,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
