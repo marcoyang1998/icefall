@@ -476,17 +476,13 @@ class SVDataModule:
             rank = 0
         
         transforms = []
-        if self.args.enable_rir:
-            def _to_mono(c):
-                return c.with_channels([0])
-            
+        if self.args.enable_rir:            
             import os
             logging.info("Enable RIR")
             rir_cuts = "data/rir/rir_cuts.jsonl.gz"
             if os.path.exists(rir_cuts):
                 logging.info(f"About to get RIR cuts from {rir_cuts}")
                 rir_cuts = load_manifest_lazy(rir_cuts)
-                rir_cuts = rir_cuts.map(_to_mono) # convert to mono channel data
             else:
                 logging.info("Use the fast random RIR generator as no RIR recordings are provided")
                 rir_cuts = None
@@ -595,6 +591,7 @@ class SVDataModule:
                 buffer_size=self.args.num_buckets * 2000,
                 shuffle_buffer_size=self.args.num_buckets * 5000,
                 drop_last=self.args.drop_last,
+                merge_buckets=True,
             )
         elif self.args.zip_sampler:
             logging.info(f"Using ZipSampler to combine multiple samplers")
@@ -1286,6 +1283,12 @@ class SVDataModule:
         else:
             raise ValueError(f"Unsupported voxceleb subset: {self.args.voxceleb_subset}")
         return cuts
+    
+    @lru_cache()
+    def vox1_cuts(self) -> CutSet:
+        return load_manifest_lazy(
+            self.args.manifest_dir / "vox1_cuts_dev.jsonl.gz"
+        )
     
     @lru_cache()
     def voxceleb_cuts_3s(self) -> CutSet:

@@ -29,9 +29,9 @@ export CUDA_VISIBLE_DEVICES="0"
 """
 
 import argparse
-from functools import partial
 import logging
 from pathlib import Path
+import os
 from typing import Dict
 
 import torch
@@ -101,6 +101,13 @@ def get_parser():
         type=str,
         default="zipformer/exp",
         help="The experiment dir",
+    )
+    
+    parser.add_argument(
+        "--do-score-normalization",
+        type=str2bool,
+        default=True,
+        help="Whether to do score normalization with the entire VoxCeleb1 as the imposter set.",
     )
 
     add_model_arguments(parser)
@@ -186,6 +193,39 @@ def decode_dataset(
         
     return embedding_dict
 
+def get_dataset_embedding(
+    dl: torch.utils.data.DataLoader,
+    speakers: list,
+    params: AttributeDict,
+    model: nn.Module,
+):
+    # compute the dataset-wise average speaker embeddings
+    speaker_embed = {spkr: [] for spkr in speakers}
+    
+    num_cuts = 0
+    for batch_idx, batch in enumerate(dl):
+        cuts = batch["supervisions"]["cut"]
+        speaker_ids = [cut.supervisions[0].speaker for cut in cuts]
+        num_cuts += len(cuts)
+        
+        speaker_embeddings = inference_one_batch(
+            params=params,
+            model=model,
+            batch=batch,
+        )
+        
+        for speaker_embedding, spkr in zip(speaker_embeddings, speaker_ids):
+            speaker_embed[spkr].append(speaker_embedding.detach().cpu())
+        
+        if batch_idx % 20 == 1:
+            logging.info(f"Processed {num_cuts} cuts already.")
+    
+    import pdb; pdb.set_trace()
+    logging.info(f"Finish collecting speaker embeddings for the entire dataset")
+    for spkr in speakers:
+        speaker_embed[spkr] = torch.stack(speaker_embed[spkr], dim=0).mean(dim=0)
+    
+    return speaker_embed
 
 @torch.no_grad()
 def main():
@@ -304,17 +344,16 @@ def main():
             )
             
             # import pdb; pdb.set_trace()
-            running_var = model.sv_module.asp.tdnn.norm.norm.state_dict()["running_var"]
-            model.sv_module.asp.tdnn.norm.norm.running_var = torch.where(running_var>0, running_var, 1e-10)
-            running_mean = model.sv_module.asp.tdnn.norm.norm.state_dict()["running_mean"]
-            model.sv_module.asp.tdnn.norm.norm.running_mean = torch.where(running_mean>0, running_mean, 1e-10)
+            # running_var = model.sv_module.asp.tdnn.norm.norm.state_dict()["running_var"]
+            # model.sv_module.asp.tdnn.norm.norm.running_var = torch.where(running_var>0, running_var, 1e-10)
+            # running_mean = model.sv_module.asp.tdnn.norm.norm.state_dict()["running_mean"]
+            # model.sv_module.asp.tdnn.norm.norm.running_mean = torch.where(running_mean>0, running_mean, 1e-10)
             
             # running_var = model.sv_module.asp_bn.norm.state_dict()["running_var"]
             # model.sv_module.asp_bn.norm.running_var = torch.where(running_var>0, running_var, 1e-10)
             # running_mean = model.sv_module.asp_bn.norm.norm.state_dict()["running_mean"]
             # model.sv_module.asp.tdnn.norm.norm.running_mean = torch.where(running_mean>0, running_mean, 1e-10)
                 
-            
     model.to(device)
     model.eval()
     
@@ -328,30 +367,62 @@ def main():
     voxceleb = SVDataModule(args)
 
     voxceleb1_cuts = voxceleb.voxceleb_test_cuts()
-    vox1_dl = voxceleb.test_dataloaders(voxceleb1_cuts)
+    vox1_test_dl = voxceleb.test_dataloaders(voxceleb1_cuts)
 
     test_sets = ["VoxCeleb1-cleaned"]
 
     embedding_dict = decode_dataset(
-        dl=vox1_dl,
+        dl=vox1_test_dl,
         params=params,
         model=model,
     )
+    
+    if params.do_score_normalization:
+        imposter_embed_file = params.res_dir / f"imposter-embedding-{params.suffix}.pt"
+        if os.path.exists(imposter_embed_file):
+            logging.info(f"Loading pre-computed imposter embeddings from {imposter_embed_file}")
+            as_embedding = torch.load(imposter_embed_file)
+        else:
+            params.imposter_subset = "vox1"
+            cuts = voxceleb.vox1_cuts()
+            speakers = cuts.speakers
+            vox1_dev_dl = voxceleb.test_dataloaders(cuts)
+            as_embedding = get_dataset_embedding(
+                dl=vox1_dev_dl,
+                speakers=speakers,
+                params=params,
+                model=model,
+            )
+        
+            torch.save(as_embedding, imposter_embed_file)
+            logging.info(f"Saving imposter embeddings to {imposter_embed_file}")
+        imposter_embeddings = [as_embedding[key] for key in as_embedding]
+        import pdb; pdb.set_trace()
+        imposter_embeddings = torch.cat(imposter_embeddings, dim=0) # (N, D)
+    else:
+        imposter_embeddings = None
 
+    import pdb; pdb.set_trace()
     for test_set in test_sets:
         evaluate_embeddings(
             test_set=test_set,
             embedding_dict=embedding_dict,
+            imposter_embeddings=imposter_embeddings
         )
 
     logging.info("Done")
+    
 
-def evaluate_embeddings(test_set: str, embedding_dict: Dict):
+@torch.no_grad()
+def evaluate_embeddings(
+    test_set: str,
+    embedding_dict: Dict,
+    imposter_embeddings: torch.Tensor,
+    imposter_cohort_size: int = 600,
+):
     # Evaluate the embeddings
     # Iterate over the testing pairs and tune the threshold
     logging.info(f"-----------For testing set: {test_set}------------")
-    fa = 0
-    fr = 0
     testing_pairs = get_test_pairs(test_set) 
     logging.info(f"A total of {len(testing_pairs)} pairs.")
     
@@ -364,6 +435,25 @@ def evaluate_embeddings(test_set: str, embedding_dict: Dict):
         embed2 = embedding_dict[spkr2]
         
         sim, prediction = similarity(embed1, embed2)
+        if imposter_embeddings is not None:
+            # score normalization
+            sim1 = F.cosine_similarity(
+                embed1.unsqueeze(0), imposter_embeddings, dim=-1, eps=1e-6
+            )
+            sim1_topk = sim1.topk(imposter_cohort_size).values
+            sim1_topk_mean = sim1_topk.mean()
+            sim1_topk_std = sim1_topk.std()
+            score1 = (sim - sim1_topk_mean) / sim1_topk_std
+            
+            sim2 = F.cosine_similarity(
+                embed2.unsqueeze(0), imposter_embeddings, dim=-1, eps=1e-6
+            )
+            sim2_topk = sim2.topk(imposter_cohort_size).values
+            sim2_topk_mean = sim2_topk.mean()
+            sim2_topk_std = sim2_topk.std()
+            score2 = (sim - sim2_topk_mean) / sim2_topk_std
+
+            sim = 0.5 * (score1 + score2)
         scores.append(sim.item())
         labels.append(int(label))
     

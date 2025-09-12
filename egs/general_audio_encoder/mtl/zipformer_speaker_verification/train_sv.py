@@ -58,12 +58,10 @@ import copy
 import logging
 import warnings
 from pathlib import Path
-from functools import partial
 import random
 from shutil import copyfile
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import k2
 import optim
 import sentencepiece as spm
 import torch
@@ -81,7 +79,7 @@ from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-from zipformer2 import Zipformer2, SimpleDownsample
+from zipformer_layer_wise import Zipformer2, SimpleDownsample
 
 from icefall import diagnostics
 from icefall.checkpoint import load_checkpoint, remove_checkpoints
@@ -106,8 +104,6 @@ from icefall.utils import (
 from utils import (
     compare_model,
     MetricsTracker,
-    _add_task_id,
-    map_zh,
     setup_distributed,   
 )
 
@@ -337,6 +333,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     
     # SV related
     parser.add_argument(
+        "--num-speakers",
+        type=int,
+        default=5994,
+    )
+    
+    parser.add_argument(
         "--num-channels",
         type=int,
         default=512,
@@ -349,6 +351,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--use-weighted-sum",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
         "--use-aam",
         type=str2bool,
         default=True,
@@ -358,6 +366,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "--margin",
         type=float,
         default=0.2,
+    )
+    
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=15,
+        help="The scale used in AAMsoftmax or AMsoftmax"
     )
 
 
@@ -449,6 +464,12 @@ def get_parser():
         "--opt",
         type=str,
         default="scaledadam"
+    )
+    
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-4,
     )
     
     parser.add_argument(
@@ -615,6 +636,13 @@ def get_parser():
         default=True,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--speed-perturbation",
+        type=str2bool,
+        default=False,
+        help="If apply speed perturbation to training data. Note that this will triple the number of speakers as well",
+    )
 
     add_model_arguments(parser)
     add_finetune_arguments(parser)
@@ -750,22 +778,21 @@ def get_encoder_downsample_module(params: AttributeDict) -> nn.Module:
 
 
 def get_model(params: AttributeDict) -> nn.Module:
-    # assert params.use_transducer or params.use_ctc, (
-    #     f"At least one of them should be True, "
-    #     f"but got params.use_transducer={params.use_transducer}, "
-    #     f"params.use_ctc={params.use_ctc}"
-    # )
-
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
     
+    if params.use_weighted_sum:
+        logging.info("Using weighted sum to combine the outputs of all encoder layers")
     if params.use_aam:
-        logging.info(f"Using AAM with margin {params.margin}")
-        
+        logging.info(f"Using AAM with margin={params.margin}, scale={params.scale}")
+    
     model = SpeakerVerificationModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        use_weighted_sum=params.use_weighted_sum,
+        num_encoder_layers=sum(_to_int_tuple(params.num_encoder_layers)),
+        num_speakers=params.num_speakers,
         num_channels=params.num_channels,
         use_aam=params.use_aam,
         margin=params.margin,
@@ -1209,7 +1236,7 @@ def train_one_epoch(
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
                 if not saved_bad_model:
-                    save_bad_model(suffix="-first-warning")
+                    # save_bad_model(suffix="-first-warning")
                     saved_bad_model = True
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
@@ -1430,9 +1457,33 @@ def run(rank, world_size, args):
         train_cuts = voxceleb.voxceleb_cuts_3s().drop_features()
     else:
         train_cuts = voxceleb.voxceleb_cuts().drop_features()
-    speaker = train_cuts.speakers
     
+    if params.speed_perturbation:
+        logging.info("Using speed perturbation")
+        train_cuts_sp09 = train_cuts.perturb_speed(0.9)
+        def modify_speaker(c):
+            speaker = c.supervisions[0].speaker
+            c.supervisions[0].speaker = f"{speaker}_sp09"
+            return c
+        train_cuts_sp09 = train_cuts_sp09.map(modify_speaker)
+        
+        train_cuts_sp11 = train_cuts.perturb_speed(1.1)
+        def modify_speaker2(c):
+            speaker = c.supervisions[0].speaker
+            c.supervisions[0].speaker = f"{speaker}_sp11"
+            return c
+        train_cuts_sp11 = train_cuts_sp11.map(modify_speaker2)
+        
+        train_cuts = CutSet.mux(
+            *[train_cuts, train_cuts_sp09, train_cuts_sp11],
+            weights=[1.0, 1.0, 1.0],
+            stop_early=False
+        )
+        
+    speaker = train_cuts.speakers
     speaker_dict = {spkr: i for i, spkr in enumerate(speaker)}
+    logging.info(f"Found a total of {len(speaker_dict)} speakers.")
+    assert params.num_speakers == len(speaker_dict), f"Expected {params.num_speakers} speakers, but got {len(speaker_dict)}"
         
     assert len(train_cuts) >= 1, "At least one task should be done!"
     logging.info(train_cuts)

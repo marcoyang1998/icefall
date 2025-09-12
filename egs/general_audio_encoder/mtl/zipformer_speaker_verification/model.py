@@ -18,7 +18,6 @@
 
 from typing import Optional, Tuple
 
-import k2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,17 +27,103 @@ from speechbrain.nnet.losses import AdditiveAngularMargin, LogSoftmaxWrapper
 from icefall.utils import make_pad_mask
 
 
+class AMSoftmaxLoss(nn.Module):
+
+    def __init__(self, hidden_dim, speaker_num, s=15.0, m=0.4, **kwargs):
+        '''
+        AM Softmax Loss
+        '''
+        super(AMSoftmaxLoss, self).__init__()
+        self.s = s
+        self.m = m
+        self.speaker_num = speaker_num
+        self.W = torch.nn.Parameter(torch.randn(hidden_dim, speaker_num), requires_grad=True)
+        nn.init.xavier_normal_(self.W, gain=1)
+
+    def forward(self, x_BxH, labels_B):
+        '''
+        x shape: (B, H)
+        labels shape: (B)
+        '''
+        assert len(x_BxH) == len(labels_B)
+        assert torch.min(labels_B) >= 0
+        assert torch.max(labels_B) < self.speaker_num
+        
+        W = F.normalize(self.W, dim=0)
+
+        x_BxH = F.normalize(x_BxH, dim=1)
+
+        wf = torch.mm(x_BxH, W)
+        numerator = self.s * (torch.diagonal(wf.transpose(0, 1)[labels_B]) - self.m)
+        excl = torch.cat([torch.cat((wf[i, :y], wf[i, y+1:])).unsqueeze(0) for i, y in enumerate(labels_B)], dim=0)
+        denominator = torch.exp(numerator) + torch.sum(torch.exp(self.s * excl), dim=1)
+        L = numerator - torch.log(denominator)
+        return -torch.mean(L)
+
+# this is borrowed from s3prl
+class AAMSoftmaxLoss(nn.Module):
+    def __init__(self, hidden_dim, speaker_num, s=15, m=0.3, easy_margin=False, **kwargs):
+        super(AAMSoftmaxLoss, self).__init__()
+        import math
+
+        self.test_normalize = True
+        
+        self.m = m
+        self.s = s
+        self.speaker_num = speaker_num
+        self.hidden_dim = hidden_dim
+        self.weight = torch.nn.Parameter(torch.FloatTensor(speaker_num, hidden_dim), requires_grad=True)
+        self.ce = nn.CrossEntropyLoss()
+        nn.init.xavier_normal_(self.weight, gain=1)
+
+        self.easy_margin = easy_margin
+        self.cos_m = math.cos(self.m)
+        self.sin_m = math.sin(self.m)
+
+        # make the function cos(theta+m) monotonic decreasing while theta in [0°,180°]
+        self.th = math.cos(math.pi - self.m)
+        self.mm = math.sin(math.pi - self.m) * self.m
+
+    def forward(self, x_BxH, labels_B):
+
+        assert len(x_BxH) == len(labels_B)
+        assert torch.min(labels_B) >= 0
+        assert torch.max(labels_B) < self.speaker_num
+        
+        # cos(theta)
+        cosine = F.linear(F.normalize(x_BxH), F.normalize(self.weight))
+        # cos(theta + m)
+        sine = torch.sqrt((1.0 - torch.mul(cosine, cosine)).clamp(0, 1))
+        phi = cosine * self.cos_m - sine * self.sin_m
+
+        if self.easy_margin:
+            phi = torch.where(cosine > 0, phi, cosine)
+        else:
+            phi = torch.where((cosine - self.th) > 0, phi, cosine - self.mm)
+
+        #one_hot = torch.zeros(cosine.size(), device='cuda' if torch.cuda.is_available() else 'cpu')
+        one_hot = torch.zeros_like(cosine)
+        one_hot.scatter_(1, labels_B.view(-1, 1), 1)
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        output = output * self.s
+
+        loss    = self.ce(output, labels_B)
+        return loss
+
 class SpeakerVerificationModel(nn.Module):
     def __init__(
         self,
         encoder_embed: nn.Module,
         encoder: nn.Module,
         encoder_dim: int,
+        num_encoder_layers: int = 11,
+        use_weighted_sum: bool = False,
         num_channels: int = 512,
         speaker_embed_dim: int = 192,
         num_speakers: int = 5994,
         use_aam: bool = True,
         margin: float = 0.2,
+        scale: float = 30.0,
         normalize_fbank: bool = False,
     ):
         """A joint CTC & Transducer ASR model.
@@ -91,19 +176,28 @@ class SpeakerVerificationModel(nn.Module):
         )
         self.use_aam = use_aam
         if self.use_aam:
-            self.aam = AdditiveAngularMargin(
-                margin=margin,
+            self.classifier = AAMSoftmaxLoss(
+                hidden_dim=speaker_embed_dim,
+                speaker_num=num_speakers, 
+                m=margin,
+                s=scale,
             )
-            self.loss = LogSoftmaxWrapper(self.aam)
-            self.classifier = Classifier(input_size=speaker_embed_dim, out_neurons=num_speakers)
         else:
             self.classifier = nn.Linear(speaker_embed_dim, num_speakers)
+        
+        # layer-wise weights for middle layers
+        self.use_weighted_sum = use_weighted_sum
+        if use_weighted_sum:
+            self.weights = torch.nn.Parameter(torch.ones(num_encoder_layers) / num_encoder_layers, requires_grad=True)
+        else:
+            self.weights = None
+        
         self.normalize_fbank = normalize_fbank
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor, freeze_encoder: bool=False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute encoder outputs.
+        """Compute encoder outputs. Either return the last layer of the weighted-sum of intermediate layers
         Args:
           x:
             A 3-D tensor of shape (N, T, C).
@@ -125,17 +219,18 @@ class SpeakerVerificationModel(nn.Module):
             x, x_lens = self.encoder_embed(x, x_lens)
             src_key_padding_mask = make_pad_mask(x_lens)
             x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-            encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
+            encoder_out, encoder_out_lens, middle_out = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out=True)
             encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         
-        assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
+        # compute weighted sum for intermediate layers
+        if self.use_weighted_sum:
+            middle_out = [out.permute(1, 0, 2) for out in middle_out] # each (N, T, C)
+            middle_out = torch.stack(middle_out, dim=0) # (num_layers, N, T, C)
+            weights = F.softmax(self.weights, dim=0) # (num_layers,)
+            weights = weights.view(-1, 1, 1, 1) # (num_layers, 1, 1, 1)
+            encoder_out = (middle_out * weights).sum(dim=0) # (N, T, C)
         
-        # if an extra downsample is placed after the encoder
-        # if self.encoder_downsample is not None:
-        #     encoder_out = encoder_out.permute(1, 0, 2)
-        #     encoder_out = self.encoder_downsample(encoder_out)
-        #     encoder_out = encoder_out.permute(1, 0, 2)
-        #     encoder_out_lens = (encoder_out_lens + 1 ) // 2
+        assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
         return encoder_out, encoder_out_lens
 
@@ -184,7 +279,7 @@ class SpeakerVerificationModel(nn.Module):
         encoder_out, encoder_out_lens = self.forward_encoder(
             x, 
             x_lens, 
-            freeze_encoder=freeze_encoder
+            freeze_encoder=freeze_encoder,
         )
 
         sv_loss = self.forward_speaker_verification(
@@ -204,8 +299,9 @@ class SpeakerVerificationModel(nn.Module):
             _type_: _description_
         """
         if self.use_aam:
-            logits = self.classifier(embed)
-            loss = self.loss(logits, labels)
+            embed = embed.squeeze(1) # (N, speaker_embed_dim)
+            labels = labels.squeeze(1) # (N)
+            loss = self.classifier(embed, labels)
         else:
             logits = self.classifier(embed) # (N, num_speakers)
             logits = logits.squeeze(1)
@@ -225,7 +321,8 @@ class SpeakerVerificationModel(nn.Module):
             Speaker embeddings of shape (N, speaker_embed_dim).
         """
         encoder_out_lens = encoder_out_lens / encoder_out_lens.max()
-        speaker_embed = self.sv_module(encoder_out, encoder_out_lens)
+        with torch.cuda.amp.autocast(enabled=False):
+            speaker_embed = self.sv_module(encoder_out, encoder_out_lens)
         return speaker_embed
 
     def forward_speaker_verification(self, encoder_out, encoder_out_lens, labels):

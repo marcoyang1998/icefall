@@ -59,7 +59,6 @@ class SpeakerDataset(torch.utils.data.Dataset):
 
         # Get a tensor with batched feature matrices, shape (B, T, F)
         # Collation performs auto-padding, if necessary.
-        # import pdb; pdb.set_trace()
         try:
             input_tpl = self.input_strategy(cuts)
         except:
