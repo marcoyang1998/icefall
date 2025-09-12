@@ -381,6 +381,7 @@ class MultiTaskModel(nn.Module):
         use_attention_decoder: bool = False,
         num_events: int = 527,
         normalize_fbank: bool = False,
+        linear_softmax: bool = False,
     ):
         """A joint CTC & Transducer ASR model.
 
@@ -417,9 +418,9 @@ class MultiTaskModel(nn.Module):
         """
         super().__init__()
 
-        assert (
-            use_transducer or use_ctc
-        ), f"At least one of them should be True, but got use_transducer={use_transducer}, use_ctc={use_ctc}"
+        # assert (
+        #     use_transducer or use_ctc
+        # ), f"At least one of them should be True, but got use_transducer={use_transducer}, use_ctc={use_ctc}"
 
         self.encoder_embed = encoder_embed
         self.encoder = encoder
@@ -460,6 +461,7 @@ class MultiTaskModel(nn.Module):
         ) # 527 classes
         
         self.normalize_fbank = normalize_fbank
+        self.linear_softmax = linear_softmax
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor, freeze_encoder: bool=False,
@@ -734,7 +736,10 @@ class MultiTaskModel(nn.Module):
             attention_decoder_loss = torch.empty(0)
             
         if at_targets is not None:
-            at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
+            if self.linear_softmax:
+                at_loss = self.forward_audio_tagging_linear_softmax(encoder_out, encoder_out_lens, at_targets, return_logits=False)
+            else:
+                at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
             at_loss = None
         
@@ -777,9 +782,10 @@ class MultiTaskModel(nn.Module):
         frame_probabilities = torch.sigmoid(frame_logits)
         
         # 3. 处理padding，将填充部分的概率设为0
-        padding_mask = make_pad_mask(encoder_out_lens, max_len=frame_probabilities.size(1)) # (N, T)
+        padding_mask = make_pad_mask(encoder_out_lens) # (N, T)
         expanded_padding_mask = padding_mask.unsqueeze(-1).expand_as(frame_probabilities)
-        frame_probabilities[expanded_padding_mask] = 0.0
+
+        frame_probabilities = frame_probabilities.masked_fill(expanded_padding_mask, 0.0)
 
         # 4. 计算线性归一化权重 (不使用exp)
         # 沿时间维度求和，用于归一化
@@ -800,9 +806,9 @@ class MultiTaskModel(nn.Module):
         if return_logits: # 实际上返回的是概率
             return clip_probabilities
         
-        # 关键修改：由于我们现在得到的是概率(probabilities)，
-        # 损失函数需要使用 F.binary_cross_entropy，而不是 F.binary_cross_entropy_with_logits
-        at_loss = F.binary_cross_entropy(clip_probabilities, target, reduction="none")
+        # Compute loss, F.binary_cross_entropy does not support amp
+        with torch.cuda.amp.autocast(enabled=False):
+            at_loss = F.binary_cross_entropy(clip_probabilities.float(), target.float(), reduction="none")
 
         return at_loss
     

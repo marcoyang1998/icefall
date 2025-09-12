@@ -43,7 +43,7 @@ try:
     from sklearn.metrics import average_precision_score
 except:
     raise ImportError(f"Please run\n" "pip3 install -U scikit-learn")
-from train_multi_KD3_shar import add_model_arguments, get_model, get_params
+from finetune_at import add_model_arguments, get_model, get_params
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -132,9 +132,14 @@ def inference_one_batch(
 
     encoder_out, encoder_out_lens = model.forward_encoder(feature, feature_lens)
 
-    audio_logits = model.forward_audio_tagging(encoder_out, encoder_out_lens, return_logits=True)
-    # convert to probabilities between 0-1
-    audio_logits = audio_logits.sigmoid().detach().cpu()
+    if params.linear_softmax:
+        audio_logits = model.forward_audio_tagging_linear_softmax(encoder_out, encoder_out_lens, return_logits=True)
+        # the audio logits are already normalised between (0,1)
+        audio_logits = audio_logits.detach().cpu()
+    else:
+        audio_logits = model.forward_audio_tagging(encoder_out, encoder_out_lens, return_logits=True)
+        # convert to probabilities between 0-1
+        audio_logits = audio_logits.sigmoid().detach().cpu()
 
     return audio_logits, label
 

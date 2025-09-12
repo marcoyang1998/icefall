@@ -360,6 +360,12 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--linear-softmax",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
         "--num-events",
         type=int,
         default=527,
@@ -733,6 +739,8 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
 def get_encoder_model(params: AttributeDict) -> nn.Module:
     if params.output_downsampling_factor == 2:
         assert params.post_encoder_downsampling_factor == 1, "CANNOT perform double output downsample!"
+    elif params.output_downsampling_factor == 1:
+        params.subsampling_factor = 2
         
     encoder = Zipformer2(
         output_downsampling_factor=params.output_downsampling_factor,
@@ -803,29 +811,26 @@ def get_attention_decoder_model(params: AttributeDict) -> nn.Module:
 
 
 def get_model(params: AttributeDict) -> nn.Module:
-    # assert params.use_transducer or params.use_ctc, (
-    #     f"At least one of them should be True, "
-    #     f"but got params.use_transducer={params.use_transducer}, "
-    #     f"params.use_ctc={params.use_ctc}"
-    # )
-
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
     post_encoder_downsample = get_encoder_downsample_module(params)
 
-    if params.use_transducer:
+    if params.use_transducer and params.do_asr:
         decoder = get_decoder_model(params)
         joiner = get_joiner_model(params)
     else:
         decoder = None
         joiner = None
         
-    if params.use_attention_decoder:
+    if params.use_attention_decoder and params.do_asr:
         assert params.causal == False
         attention_decoder = get_attention_decoder_model(params)
     else:
         attention_decoder = None
 
+    if params.linear_softmax:
+        logging.info(f"Use linear softmax for audio tagging")
+        
     model = MultiTaskModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
@@ -836,10 +841,11 @@ def get_model(params: AttributeDict) -> nn.Module:
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
         decoder_dim=params.decoder_dim,
         vocab_size=params.vocab_size,
-        use_transducer=params.use_transducer,
-        use_ctc=params.use_ctc,
-        use_attention_decoder=params.use_attention_decoder,
+        use_transducer=params.use_transducer and params.do_asr,
+        use_ctc=params.use_ctc and params.do_asr,
+        use_attention_decoder=params.use_attention_decoder and params.do_asr,
         num_events=params.num_events,
+        linear_softmax=params.linear_softmax,
     )
     return model
 
