@@ -211,7 +211,7 @@ def main():
                 )
             logging.info(f"averaging {filenames}")
             model.to(device)
-            model.load_state_dict(average_checkpoints(filenames, device=device))
+            model.load_state_dict(average_checkpoints(filenames, device=device), strict=False)
         elif params.avg == 1:
             load_checkpoint(f"{params.exp_dir}/epoch-{params.epoch}.pt", model)
         else:
@@ -272,7 +272,29 @@ def main():
                     device=device,
                 ),
             )
+    # import pdb; pdb.set_trace()
+    # import torchaudio
+    # from lhotse import Fbank, FbankConfig
+    
+    # extractor = Fbank(FbankConfig(num_mel_bins=128))
+    
+    # audio_file = "/cpfs02/shared/speechllm/data/LibriSpeech/LibriSpeech/dev-clean/5338/24640/5338-24640-0000.flac"
+    # audio, fs = torchaudio.load(audio_file)
+    # assert fs == 16000
+    # audio_lens = audio.shape[1]
+    # audios = audio.squeeze()
+    # feature = [extractor.extract(audios, sampling_rate=fs)]
+    # feature_lens = [f.size(0) for f in feature]
 
+    # feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True, padding_value=LOG_EPS).to(device)
+    # feature_lens = torch.tensor(feature_lens, device=device)
+    
+    # model.eval()
+    # encoder_out, encoder_out_lens = model.forward_encoder(
+    #     feature,
+    #     feature_lens,
+    # )
+    
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
     if params.iter > 0:

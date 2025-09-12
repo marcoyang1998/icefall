@@ -119,6 +119,59 @@ from utils import (
 
 LRSchedulerType = Union[torch.optim.lr_scheduler._LRScheduler, optim.LRScheduler]
 
+def get_char_dict(char_dict_file: str):
+    """Construct a dictionary mapping from character to ID.
+
+    Args:
+        char_dict_file:
+          The file containing the character list. Each line contains
+          a character and its ID, separated by space.
+
+    Returns:
+        A dict mapping from character (str) to ID (int).
+    """
+    char_dict: Dict[str, int] = {}
+    with open(char_dict_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            assert len(parts) == 2, f"Bad line: {line}"
+            char = parts[0]
+            if char == "_":
+                char = " "
+            idx = int(parts[1])
+            char_dict[char] = idx
+    return char_dict
+
+class CharMapper:
+    def __init__(self, char_dict_file: str = "data/chars/chars.txt"):
+        self.mapping = get_char_dict(char_dict_file)
+        self.reverse_mapping = {v: k for k, v in self.mapping.items()}
+        self.unk_id = self.mapping["<unk>"]
+        assert "<unk>" in self.mapping, "<unk> must be in the char dict"
+    
+    @property    
+    def vocab_size(self):
+        return len(self.mapping)
+
+    def char_to_id(self, char: str) -> int:
+        return self.mapping.get(char, self.unk_id)
+
+    def id_to_char(self, id: int) -> str:
+        return self.reverse_mapping.get(id, "<unk>")
+    
+    def encode_string(self, texts: List[str]):
+        out = []
+        for text in texts:
+            out_ids = [self.char_to_id(ch) for ch in text.strip()]
+            out.append(out_ids)
+        return out
+    
+    def decode(self, ids: List[int]) -> str:
+        out = []
+        for id in ids:
+            out.append(self.id_to_char(id))
+        return "".join(out)
+
 
 def get_adjusted_batch_count(params: AttributeDict) -> float:
     # returns the number of batches we would have used so far if we had used the reference
@@ -368,7 +421,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--use-transducer",
         type=str2bool,
-        default=True,
+        default=False,
         help="If True, use Transducer head.",
     )
     
@@ -382,7 +435,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--use-ctc",
         type=str2bool,
-        default=False,
+        default=True,
         help="If True, use CTC head.",
     )
     
@@ -1027,6 +1080,7 @@ def compute_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
     sp: spm.SentencePieceProcessor,
+    char_mapper: CharMapper,
     batch: dict,
     is_training: bool,
 ) -> Tuple[Tensor, MetricsTracker]:
@@ -1070,7 +1124,8 @@ def compute_loss(
     warm_step = params.warm_step
 
     texts = batch["supervisions"]["text"]
-    y = sp.encode(texts, out_type=int)
+    # y = sp.encode(texts, out_type=int)
+    y = char_mapper.encode_string(texts)
     y = k2.RaggedTensor(y)
     
     at_targets = batch["at_targets"] if params.do_audio_tagging else None
@@ -1163,6 +1218,7 @@ def compute_validation_loss(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
     sp: spm.SentencePieceProcessor,
+    char_mapper: CharMapper,
     valid_dl: torch.utils.data.DataLoader,
     world_size: int = 1,
 ) -> MetricsTracker:
@@ -1176,6 +1232,7 @@ def compute_validation_loss(
             params=params,
             model=model,
             sp=sp,
+            char_mapper=char_mapper,
             batch=batch,
             is_training=False,
         )
@@ -1199,6 +1256,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     scheduler: LRSchedulerType,
     sp: spm.SentencePieceProcessor,
+    char_mapper: CharMapper,
     train_dl: torch.utils.data.DataLoader,
     valid_dls: torch.utils.data.DataLoader,
     valid_sets: List[str],
@@ -1287,6 +1345,7 @@ def train_one_epoch(
                     params=params,
                     model=model,
                     sp=sp,
+                    char_mapper=char_mapper,
                     batch=batch,
                     is_training=True,
                 )
@@ -1399,6 +1458,7 @@ def train_one_epoch(
                     params=params,
                     model=model,
                     sp=sp,
+                    char_mapper=char_mapper,
                     valid_dl=valid_dl,
                     world_size=world_size,
                 )
@@ -1457,12 +1517,10 @@ def run(rank, world_size, args):
         device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
+    sp = None
+    char_mapper = CharMapper()
+    params.vocab_size = char_mapper.vocab_size
+    params.blank_id = 0
 
     if not params.use_transducer:
         params.ctc_loss_scale = 1.0
@@ -1830,6 +1888,7 @@ def run(rank, world_size, args):
             optimizer=optimizer,
             scheduler=scheduler,
             sp=sp,
+            char_mapper=char_mapper,
             train_dl=train_dl,
             valid_dls=valid_dls,
             valid_sets=valid_sets,
@@ -1869,6 +1928,7 @@ def display_and_save_batch(
     batch: dict,
     params: AttributeDict,
     sp: spm.SentencePieceProcessor,
+    char_mapper,
 ) -> None:
     """Display the batch statistics and save the batch into disk.
 
