@@ -501,7 +501,7 @@ def get_parser():
     parser.add_argument(
         "--lr-hours",
         type=float,
-        default=20000,
+        default=30000,
         help="""Number of hours trained speech that affects how rapidly the learning rate decreases.
         """,
     )

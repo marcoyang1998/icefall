@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from multi_quantization.prediction import JointCodebookLoss
 
 from model_multi_kd_w2v2_mask import compute_mask_indices, compute_mask_indices_block, index_put
+from zipformer2 import SimpleDownsample
 from icefall.utils import make_pad_mask
 
 
@@ -256,6 +257,12 @@ class MultiKDModel(nn.Module):
         reduction: str = "sum",
     ):
         # align the encoder features with the codebook indexes
+        
+        # check if we need to upsample the targets to match the encoder output length
+        if round(encoder_out.shape[1] / codebook_indexes.shape[1]) > teacher_frame_ratio:
+            upsample_ratio = round(encoder_out.shape[1] / codebook_indexes.shape[1])
+            codebook_indexes = codebook_indexes.repeat_interleave(upsample_ratio, dim=1)
+
         if self.interpolate_teacher:
             codebook_indexes = self.interpolate_codebook_indexes(
                 encoder_out, codebook_indexes
