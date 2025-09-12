@@ -73,6 +73,7 @@ for m in greedy_search modified_beam_search; do
                 --encoder-unmasked-dim 512,512,512,512,512,512,512 \
                 --cnn-module-kernel 31,31,15,15,15,31,31 \
                 --num-heads 8,8,8,8,8,8,8 \
+                --use-ctc $use_ctc --use-transducer $use_transducer \
                 --output-downsampling-factor $output_ds \
                 --post-encoder-downsampling-factor $post_output_ds \
                 --on-the-fly-feats 1 \
