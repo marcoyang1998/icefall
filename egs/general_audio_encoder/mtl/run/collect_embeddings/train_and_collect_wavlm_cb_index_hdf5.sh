@@ -20,12 +20,11 @@ embedding_layer=21
 num_codebooks=16
 normalize=1
 
-vq_dir=data_hdf5/vq_wavlm_${model_version}_layer_${embedding_layer}_normalize_${normalize}_libri_cb_${num_codebooks}
+# vq_dir=data_hdf5/vq_wavlm_${model_version}_layer_${embedding_layer}_normalize_${normalize}_libri_cb_${num_codebooks}
+vq_dir=data_hdf5/vq_wavlm_cb${num_codebooks}_dasheng_cb8_combined
 mkdir -p $vq_dir
 
 quantizer_path=data/quantizer/wavlm-${model_version}-layer-${embedding_layer}-normalize-${normalize}-libri-cb-${num_codebooks}.pt
-
-prefix_folder=/cpfs02/user/housiyuan/xiaoyu/codebook_indexes/wavlm_${model_version}_layer_${embedding_layer}_normalized_giga_cb_${num_codebooks}
 
 if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     log "Stage 1: Train the quantizer"
@@ -501,6 +500,162 @@ if [ $stage -le 16 ] && [ $stop_stage -ge 16 ]; then
             --normalize $normalize \
             --max-duration 200
     done
+fi
+
+if [ $stage -le 17 ] && [ $stop_stage -ge 17 ]; then
+    log "Stage 17: Collect MVQ tokens audioset"
+
+    embedding_dir=$vq_dir/audioset
+    mkdir -p $embedding_dir
+    for subset in balanced eval full; do
+        python wavlm/extract_mvq_hdf5_and_combine.py \
+            --num-jobs 8 \
+            --input-manifest data/vq_dasheng_large_layer_-1_normalize_0_cb_8/audioset_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/audioset_cuts_${subset}.jsonl.gz \
+            --wavlm-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-audioset-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 18 ] && [ $stop_stage -ge 18 ]; then
+    log "Stage 18: Collect MVQ tokens music4all"
+
+    embedding_dir=$vq_dir/music4all
+    mkdir -p $embedding_dir
+    
+    python wavlm/extract_mvq_hdf5_and_combine.py \
+        --num-jobs 8 \
+        --input-manifest data/vq_dasheng_large_layer_-1_normalize_0_cb_8/music4all_cuts_all.jsonl.gz \
+        --target-manifest-file $vq_dir/music4all_cuts_all.jsonl.gz \
+        --wavlm-version $model_version \
+        --embedding-dim $model_dim \
+        --num-codebooks $num_codebooks \
+        --manifest-name codebook-indexes-music4all-all \
+        --embedding-dir $embedding_dir \
+        --embedding-layer $embedding_layer \
+        --quantizer-path $quantizer_path \
+        --normalize $normalize \
+        --max-duration 200
+fi
+
+if [ $stage -le 19 ] && [ $stop_stage -ge 19 ]; then
+    log "Stage 19: Collect MVQ tokens VGGsound"
+
+    embedding_dir=$vq_dir/vggsound
+    mkdir -p $embedding_dir
+    
+    for subset in train test; do
+        python wavlm/extract_mvq_hdf5_and_combine.py \
+            --num-jobs 4 \
+            --input-manifest data/vq_dasheng_large_layer_-1_normalize_0_cb_8/vggsound_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/vggsound_cuts_${subset}.jsonl.gz \
+            --wavlm-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-vggsound-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 20 ] && [ $stop_stage -ge 20 ]; then
+    log "Stage 20: Collect MVQ tokens freesound"
+
+    embedding_dir=$vq_dir/freesound
+    mkdir -p $embedding_dir
+    
+    for subset in train_10s test_10s; do
+        python wavlm/extract_mvq_hdf5_and_combine.py \
+            --num-jobs 8 \
+            --input-manifest data/vq_dasheng_large_layer_-1_normalize_0_cb_8/freesound_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/freesound_cuts_${subset}.jsonl.gz \
+            --wavlm-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-freesound-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 21 ] && [ $stop_stage -ge 21 ]; then
+    log "Stage 21: Collect MVQ tokens on MTG"
+
+    embedding_dir=$vq_dir/mtg_wav
+    mkdir -p $embedding_dir
+    
+    for subset in 10s; do
+        python wavlm/extract_mvq_hdf5_and_combine.py \
+            --num-jobs 8 \
+            --input-manifest data/vq_dasheng_large_layer_-1_normalize_0_cb_8/mtg_wav_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/mtg_wav_cuts_${subset}.jsonl.gz \
+            --wavlm-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-mtg-wav-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 22 ] && [ $stop_stage -ge 22 ]; then
+    log "Stage 22: Collect MVQ tokens on BBC soundeffect"
+
+    embedding_dir=$vq_dir/bbc_soundeffect
+    mkdir -p $embedding_dir
+    
+    for subset in train_10s test_10s; do
+        python wavlm/extract_mvq_hdf5_and_combine.py \
+            --num-jobs 8 \ 
+            --input-manifest data/vq_dasheng_large_layer_-1_normalize_0_cb_8/bbc_soundeffect_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/bbc_soundeffect_cuts_${subset}.jsonl.gz \
+            --wavlm-version $model_version \
+            --embedding-dim $model_dim \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-bbc-soundeffect-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --quantizer-path $quantizer_path \
+            --normalize $normalize \
+            --max-duration 200
+    done
+fi
+
+
+if [ $stage -le 101 ] && [ $stop_stage -ge 101 ]; then
+    log "Stage 101: Collect MVQ tokens voxceleb"
+
+    embedding_dir=$vq_dir/vox1
+    mkdir -p $embedding_dir
+    python wavlm/extract_mvq_hdf5.py \
+        --num-jobs 1 \
+        --input-manifest data/fbank_voxceleb/vox1_cuts_test.jsonl.gz \
+        --target-manifest-file $vq_dir/vox1_cuts_test.jsonl.gz \
+        --wavlm-version $model_version \
+        --embedding-dim $model_dim \
+        --num-codebooks $num_codebooks \
+        --manifest-name codebook-indexes-vox1-test \
+        --embedding-dir $embedding_dir \
+        --embedding-layer $embedding_layer \
+        --quantizer-path $quantizer_path \
+        --normalize $normalize \
+        --max-duration 200
 fi
 
 

@@ -242,3 +242,197 @@ if [ $stage -le 11 ] && [ $stop_stage -ge 11 ]; then
             --max-duration 200
     done
 fi
+
+
+if [ $stage -le 12 ] && [ $stop_stage -ge 12 ]; then
+    log "Stage 12: Collect MVQ tokens on gigaspeech"
+    for subset in dev xs s; do
+        embedding_dir=$vq_dir/giga_${subset}
+        mkdir -p $embedding_dir
+        python dasheng/extract_mvq.py \
+            --num-jobs 4 \
+            --model-version $model_version \
+            --input-manifest data/gigaspeech_manifest/gigaspeech_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/gigaspeech_cuts_${subset}.jsonl.gz \
+            --embedding-dim 1536 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-giga-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --normalize $normalize \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+
+    for subset in m l xl; do
+        embedding_dir=$vq_dir/giga_${subset}
+        mkdir -p $embedding_dir
+        python dasheng/extract_mvq.py \
+            --num-jobs 8 \
+            --model-version $model_version \
+            --input-manifest data/gigaspeech_manifest/gigaspeech_cuts_${subset}.jsonl.gz \
+            --target-manifest-file $vq_dir/gigaspeech_cuts_${subset}.jsonl.gz \
+            --embedding-dim 1536 \
+            --num-codebooks $num_codebooks \
+            --manifest-name codebook-indexes-giga-${subset} \
+            --embedding-dir $embedding_dir \
+            --embedding-layer $embedding_layer \
+            --normalize $normalize \
+            --quantizer-path $quantizer_path \
+            --max-duration 200
+    done
+fi
+
+if [ $stage -le 13 ] && [ $stop_stage -ge 13 ]; then
+    log "Stage 13: Collect MVQ tokens on libriheavy"
+    
+    subset=small
+    num_splits=4
+    split_dir=$vq_dir/libriheavy_${subset}_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split $num_splits --no-pad data/fbank_libriheavy_split/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+
+    for i in $(seq 0 1 $(($num_splits-1))); do
+        if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
+            python dasheng/extract_mvq.py \
+                --num-jobs 8 \
+                --model-version $model_version \
+                --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
+                --embedding-dim 1536 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-lh-${subset}-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer $embedding_layer \
+                --normalize $normalize \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+        log "Combining the processed cuts of libriheavy $subset"
+        pieces=$(find $split_dir -name "libriheavy_cuts_${subset}.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/libriheavy_cuts_${subset}.jsonl.gz
+    fi
+fi
+
+if [ $stage -le 14 ] && [ $stop_stage -ge 14 ]; then
+    log "Stage 14: Collect MVQ tokens on libriheavy"
+    
+    subset=medium
+    num_splits=5
+    split_dir=$vq_dir/libriheavy_${subset}_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split $num_splits --no-pad data/fbank_libriheavy_split/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+
+    for i in $(seq 0 1 $(($num_splits-1))); do
+        if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
+            python dasheng/extract_mvq.py \
+                --num-jobs 8 \
+                --model-version $model_version \
+                --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
+                --embedding-dim 1536 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-lh-${subset}-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer $embedding_layer \
+                --normalize $normalize \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+        log "Combining the processed cuts of libriheavy $subset"
+        pieces=$(find $split_dir -name "libriheavy_cuts_${subset}.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/libriheavy_cuts_${subset}.jsonl.gz
+    fi
+fi
+
+
+if [ $stage -le 15 ] && [ $stop_stage -ge 15 ]; then
+    log "Stage 15: Collect MVQ tokens on libriheavy"
+    
+    subset=large
+    num_splits=20
+    split_dir=$vq_dir/libriheavy_${subset}_split
+    mkdir -p $split_dir
+
+    if [ ! -f $split_dir/.split_completed ]; then
+        lhotse split $num_splits --no-pad data/fbank_libriheavy_split/libriheavy_cuts_${subset}.jsonl.gz $split_dir
+        touch $split_dir/.split_completed
+    fi
+
+    # for i in $(seq 0 1 6); do
+    for i in $(seq 7 1 $(($num_splits-1))); do
+        if [ ! -f $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz ]; then
+            python dasheng/extract_mvq.py \
+                --num-jobs 8 \
+                --model-version $model_version \
+                --input-manifest $split_dir/libriheavy_cuts_${subset}.${i}.jsonl.gz \
+                --target-manifest-file $split_dir/libriheavy_cuts_${subset}.${i}.processed.jsonl.gz \
+                --embedding-dim 1536 \
+                --num-codebooks $num_codebooks \
+                --manifest-name codebook-indexes-lh-${subset}-split-${i} \
+                --embedding-dir $split_dir \
+                --embedding-layer $embedding_layer \
+                --normalize $normalize \
+                --quantizer-path $quantizer_path \
+                --max-duration 200
+        fi
+    done
+
+    if [ ! -f $vq_dir/libriheavy_cuts_${subset}.jsonl.gz ]; then
+        log "Combining the processed cuts of libriheavy $subset"
+        pieces=$(find $split_dir -name "libriheavy_cuts_${subset}.*.processed.jsonl.gz")
+        lhotse combine $pieces $vq_dir/libriheavy_cuts_${subset}.jsonl.gz
+    fi
+fi
+
+if [ $stage -le 16 ] && [ $stop_stage -ge 16 ]; then
+    log "Stage 7: Collect MVQ tokens on voxpopuli unlabelled english"
+    for subset in en; do
+        num_splits=8
+        split_dir=$vq_dir/voxpopuli_${subset}_split
+        mkdir -p $split_dir
+
+        if [ ! -f $split_dir/.split_completed ]; then
+            lhotse split $num_splits --no-pad data/voxpopuli_en_manifest/voxpopuli_cuts_${subset}.jsonl.gz $split_dir
+            touch $split_dir/.split_completed
+        fi
+
+        for i in $(seq 0 1 $(($num_splits-1))); do
+            log "Start encoding voxpopuli unlabelled ${subset} split ${i}"
+            if [ ! -f $split_dir/voxpopuli_cuts_${subset}.${i}.processed.jsonl.gz ]; then
+                python dasheng/extract_mvq.py \
+                    --num-jobs 8 \
+                    --model-version $model_version \
+                    --input-manifest $split_dir/voxpopuli_cuts_${subset}.${i}.jsonl.gz \
+                    --target-manifest-file $split_dir/voxpopuli_cuts_${subset}.${i}.processed.jsonl.gz \
+                    --embedding-dim 1536 \
+                    --num-codebooks $num_codebooks \
+                    --manifest-name codebook-indexes-voxpopuli-en-${subset}-split-${i} \
+                    --embedding-dir $split_dir \
+                    --embedding-layer $embedding_layer \
+                    --normalize $normalize \
+                    --quantizer-path $quantizer_path \
+                    --max-duration 200
+            fi
+        done
+        if [ ! -f $vq_dir/voxpopuli_cuts_${subset}.jsonl.gz ]; then
+            log "Combining the processed cuts of voxpopuli en"
+            pieces=$(find $split_dir -name "voxpopuli_cuts_${subset}.*.processed.jsonl.gz")
+            lhotse combine $pieces $vq_dir/voxpopuli_cuts_${subset}.jsonl.gz
+        fi
+    done
+fi
