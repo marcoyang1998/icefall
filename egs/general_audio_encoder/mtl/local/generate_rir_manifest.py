@@ -15,8 +15,14 @@ def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    
+    parser.add_argument(
+        "--dataset-folder",
+        type=str,
+        default="download"
+    )
 
-    parser.add_argument("--csv-file", type=str, default="download/noise_rir/rir.csv")
+    parser.add_argument("--rir-list-file", type=str, default="download/RIRS_NOISES/real_rirs_isotropic_noises/rir_list")
     
     parser.add_argument(
         "--output-folder", type=str, default="data/rir"
@@ -24,30 +30,35 @@ def get_parser():
     
     return parser.parse_args()
 
-def parse_csv(csv_file):
+def parse_txt(txt):
+    # return all the rir wav files in the txt file
     data = []
-    with open(csv_file, "r") as fin:
-        reader = csv.reader(fin, delimiter=",")
-        for i, row in enumerate(reader):
-            if i == 0:
-                continue
-            data.append([row[0], row[2]])
+    with open(txt, 'r') as f:
+        lines = f.readlines()
+        for line in lines:
+            parts = line.strip().split()
+            rir_wav = parts[-1]
+            data.append(rir_wav)
     return data
 
 def create_manifest(args):
-    csv_file = args.csv_file
+    rir_list_file = args.rir_list_file
+    dataset_folder = args.dataset_folder
+    logging.info(f"Creating manifest from {rir_list_file}")
     
-    data = parse_csv(csv_file)
+    data = parse_txt(rir_list_file)
     
     cuts = []
-    for item in data:
-        cut_id, audio_file = item
-        recording = Recording.from_file(audio_file)
+    for wav_file in data:
+        cut_id = wav_file.replace(".wav", "")
+        wav_file = dataset_folder + "/" + wav_file
+        recording = Recording.from_file(wav_file)
+        
         cut = MonoCut(
             id=cut_id,
             start=0.0,
             duration=recording.duration,
-            channel=0,
+            channel=0, # we only keep the first channel
             recording=recording,
         )
         cuts.append(cut)
