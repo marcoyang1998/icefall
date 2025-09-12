@@ -1,6 +1,7 @@
 import argparse
+import math
 
-from model import MultiKDModel
+from model2 import ZipformerModel
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
 from zipformer import Zipformer2
@@ -9,6 +10,8 @@ from lhotse import Fbank, FbankConfig
 import torchaudio
 import torch
 import torch.nn as nn
+
+LOG_EPS = math.log(1e-10)
 
 def str2bool(v):
     """Used in argparse.ArgumentParser.add_argument to indicate
@@ -38,6 +41,13 @@ def get_parser():
         type=str,
         default="2,2,3,4,3,2",
         help="Number of zipformer encoder layers per stack, comma separated.",
+    )
+    
+    parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=1,
+        help="Final output downsampling",
     )
 
     parser.add_argument(
@@ -156,7 +166,7 @@ def _to_int_tuple(s: str):
 
 def get_encoder_embed(params) -> nn.Module:
     encoder_embed = Conv2dSubsampling(
-        in_channels=128,
+        in_channels=128, # fixed to 128-dim fbank features
         out_channels=_to_int_tuple(params.encoder_dim)[0],
         dropout=ScheduledFloat((0.0, 0.3), (20000.0, 0.1)),
     )
@@ -164,7 +174,7 @@ def get_encoder_embed(params) -> nn.Module:
 
 def get_encoder_model(params) -> nn.Module:
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
@@ -188,11 +198,10 @@ def get_model(params) -> nn.Module:
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
 
-    model = MultiKDModel(
+    model = ZipformerModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        num_codebooks=0,
     )
 
     return model
@@ -206,10 +215,13 @@ def main(args):
     model = get_model(args)
     model.to(device)
 
-    model.load_state_dict(
+    load_info = model.load_state_dict(
         torch.load(args.ckpt_path)["model"], strict=False
     )
+    print(load_info)
     model.eval()
+    num_params = sum([p.numel() for p in model.parameters()])
+    print(f"Total parameters: {num_params}")
 
     # fbank extractor
     extractor = Fbank(FbankConfig(num_mel_bins=128))
@@ -222,7 +234,7 @@ def main(args):
     feature = [extractor.extract(audios, sampling_rate=fs)]
     feature_lens = [f.size(0) for f in feature]
 
-    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True).to(device)
+    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True, padding_value=LOG_EPS).to(device)
     feature_lens = torch.tensor(feature_lens, device=device)
 
     # batch inference
@@ -230,13 +242,8 @@ def main(args):
         feature,
         feature_lens,
     )
-    print(encoder_out.shape)
-
-    at_logits = model.forward_audio_tagging(
-        encoder_out, encoder_out_lens, return_logits=True
-    )
-    top5 = at_logits.topk(5)
-    print(f"The topk label are {top5}")
+    print(encoder_out) # (B,T,C)
+    print(encoder_out_lens)
 
 if __name__=="__main__":
     parser = get_parser()

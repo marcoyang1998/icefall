@@ -23,7 +23,7 @@ from typing import List, Optional, Tuple, Union
 import logging
 import torch
 import random
-# from encoder_interface import EncoderInterface
+from encoder_interface import EncoderInterface
 from scaling import (
     Balancer,
     BiasNorm,
@@ -43,7 +43,7 @@ from scaling import (
 from torch import Tensor, nn
 
 
-class Zipformer2(nn.Module):
+class Zipformer2(EncoderInterface):
     """
     Args:
 
@@ -192,9 +192,13 @@ class Zipformer2(nn.Module):
 
         self.encoders = nn.ModuleList(encoders)
 
-        self.downsample_output = SimpleDownsample(
-            max(encoder_dim), downsample=output_downsampling_factor, dropout=dropout
-        )
+        if output_downsampling_factor >= 2:
+            self.downsample_output = SimpleDownsample(
+                max(encoder_dim), downsample=output_downsampling_factor, dropout=dropout
+            )
+        else:
+            self.downsample_output = None
+            
 
     def get_feature_masks(self, x: Tensor) -> Union[List[float], List[Tensor]]:
         """
@@ -345,15 +349,19 @@ class Zipformer2(nn.Module):
         # from different pieces of 'outputs', taking each dimension from the
         # most recent output that has it present.
         x = self._get_full_dim_output(outputs)
-        x = self.downsample_output(x)
-        # class Downsample has this rounding behavior..
-        assert self.output_downsampling_factor == 2, self.output_downsampling_factor
-        if torch.jit.is_scripting() or torch.jit.is_tracing():
-            lengths = (x_lens + 1) // 2
-        else:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+        
+        if self.output_downsampling_factor >= 2:
+            x = self.downsample_output(x)
+            # class Downsample has this rounding behavior..
+            assert self.output_downsampling_factor == 2, self.output_downsampling_factor
+            if torch.jit.is_scripting() or torch.jit.is_tracing():
                 lengths = (x_lens + 1) // 2
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    lengths = (x_lens + 1) // 2
+        else:
+            lengths = x_lens
         if return_middle_out:
             return x, lengths, outputs
         else:
