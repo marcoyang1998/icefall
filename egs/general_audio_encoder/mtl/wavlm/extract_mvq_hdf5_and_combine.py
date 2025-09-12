@@ -214,7 +214,11 @@ def extract_embeddings(
                 )
                 new_cut = fastcopy(
                     cut,
-                    custom={"codebook_indexes": cb_index}
+                    custom={
+                        "wavlm_codebook_indexes": cb_index,
+                        "dasheng_codebook_indexes": cut.codebook_indexes,
+                    },
+                    
                 )
                 new_cuts.append(new_cut)
                 num_cuts += 1
@@ -240,7 +244,8 @@ def join_manifests(
     embedding_cuts = embedding_cuts.sort_like(input_cuts)
     for cut_idx, (ori_cut, embed_cut) in enumerate(zip(input_cuts, embedding_cuts)):
         assert ori_cut.id == embed_cut.id
-        ori_cut.codebook_indexes = embed_cut.codebook_indexes
+        ori_cut.wavlm_codebook_indexes = embed_cut.wavlm_codebook_indexes
+        ori_cut.dasheng_codebook_indexes = embed_cut.dasheng_codebook_indexes
     
     input_cuts.to_jsonl(output_dir)
     logging.info(f"Saved the joined manifest to {output_dir}")
