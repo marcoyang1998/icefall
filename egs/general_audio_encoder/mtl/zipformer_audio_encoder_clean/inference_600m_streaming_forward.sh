@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=./../../../:$PYTHONPATH
-
 model_version=600m_uniform_out_ds1
 causal=1
 left_context_frames=256
