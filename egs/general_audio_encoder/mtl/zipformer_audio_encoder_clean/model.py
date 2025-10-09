@@ -26,9 +26,33 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from multi_quantization.prediction import JointCodebookLoss
 
-from icefall.utils import make_pad_mask
+def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
+    """
+    Args:
+      lengths:
+        A 1-D tensor containing sentence lengths.
+      max_len:
+        The length of masks.
+    Returns:
+      Return a 2-D bool tensor, where masked positions
+      are filled with `True` and non-masked positions are
+      filled with `False`.
+
+    >>> lengths = torch.tensor([1, 3, 2, 5])
+    >>> make_pad_mask(lengths)
+    tensor([[False,  True,  True,  True,  True],
+            [False, False, False,  True,  True],
+            [False, False,  True,  True,  True],
+            [False, False, False, False, False]])
+    """
+    assert lengths.ndim == 1, lengths.ndim
+    max_len = max(max_len, lengths.max())
+    n = lengths.size(0)
+    seq_range = torch.arange(0, max_len, device=lengths.device)
+    expaned_lengths = seq_range.unsqueeze(0).expand(n, max_len)
+
+    return expaned_lengths >= lengths.unsqueeze(-1)
 
 
 class MultiKDModel(nn.Module):
@@ -104,6 +128,7 @@ class MultiKDModel(nn.Module):
         self.distillation_delta = distillation_delta
         
         if num_codebooks > 0:
+            from multi_quantization.prediction import JointCodebookLoss
             self.codebook_loss_net = JointCodebookLoss(
                 predictor_channels=encoder_dim,
                 num_codebooks=num_codebooks * self.teacher_frame_ratio,
