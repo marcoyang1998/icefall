@@ -68,9 +68,9 @@ def setup_distributed():
         backend="nccl",
         init_method="env://",
     )
-    rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(rank)
-    return rank
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank
 
 def add_dummy_text(c):
     if c.supervisions[0].text is None:
