@@ -64,6 +64,13 @@ def get_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    
+    parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=2,
+        help="The outout downsampling factor. Default is 2. If 1, no downsample is performed.",
+    )
 
     parser.add_argument(
         "--num-encoder-layers",
@@ -154,7 +161,7 @@ def get_parser():
     parser.add_argument(
         "--chunk-size",
         type=str,
-        default="16,32,64,-1",
+        default="8,16,32,64,-1",
         help="Chunk sizes (at 50Hz frame rate) will be chosen randomly from this list during training. "
         " Must be just -1 if --causal=False",
     )
@@ -203,7 +210,7 @@ def get_encoder_embed(params) -> nn.Module:
 
 def get_encoder_model(params) -> nn.Module:
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
@@ -465,9 +472,9 @@ def chunk_forward(
 ):
     # Perform chunk by chunk forward for the encoder. Each chunk is conditioned on the current chunk and left context (maintained by the states)
     # At each step, we take a chunk of audio and forward the encoder
-    # For the first chunk, we wait until the accumulated audio duration to reacg (buffer + chunk_duration), the buffer
+    # For the first chunk, we wait until the accumulated audio duration to reach (buffer + chunk_duration), the buffer
     # is necessary for the convolution subsampling module in the encoder.
-    # After the first chunk, we process normal chunk-by-chunk inference when the accumulated audio reaches chunk_duration
+    # After the first chunk, we perform normal chunk-by-chunk inference when the accumulated audio reaches chunk_duration
     # An example of Buffer=2 frames, chunk=5 frames, the latency for the first chunk is 7 frames (as we need to accumulate 7 frames 
     # for decoding), the rest chunks have latency of 5 frames.
     # Each time we feed (5 + 2) frames to the encoder, and then shift 5 frames
@@ -475,7 +482,7 @@ def chunk_forward(
     # Chunk 2:      AAAAAAA
     # Chunk 3:           AAAAAAA
     
-    # NOTE: params.chunk is the chunk_size regarding to the input of the zipformer encoder, so at fbank level, the chunk size
+    # NOTE: params.chunk_size is the chunk_size regarding to the input of the zipformer encoder, so at fbank level, the chunk size
     # is 2 * params.chunk_size
     
     # fbank extractor
@@ -486,7 +493,7 @@ def chunk_forward(
     chunk_size = int(chunk_size)
     chunk_size_samples = int(chunk_size * 2 * 160) # chunk size represented in audio samples of 16kHz sampling rate
     left_context_len = int(left_context_frames)
-    pad_length = 7 + 2 * 3 # buffer required by encoder_embed module 
+    pad_length = 7 + 2 * 3 # buffer required by encoder_embed module (i.e. convolution subsampling)
     pad_length_samples = (7 + 2 * 3) * 160 
     
     # intialize states, to be maintained during chunk-wise forward
@@ -512,7 +519,7 @@ def chunk_forward(
         feature_lens = torch.tensor([feature_lens], device=device) # shape: (1)
         features = features.unsqueeze(0) # shape: (1,T,num_mels)
         
-        # the audio chunk could be shorted than the expected length, for example in the last two chunks
+        # the audio chunk could be shorter than the expected length, for example in the last two chunks
         # pad the chunk so that the input shape is (chunk_size + buffer)
         tail_length = chunk_size * 2 + 7 + 2 * 3 # each prepared chunk should have this length
         if features.size(1) < tail_length:
@@ -550,7 +557,6 @@ def chunk_forward(
             print(f"Audio is exhausted.")
             break
     
-    import pdb; pdb.set_trace()
     encoder_outs = torch.cat(encoder_outs, dim=1) # shape: (1,T,C)
     
     return encoder_outs, encoder_out_lens
@@ -572,7 +578,6 @@ def main(args):
     model.eval()
 
     # load audio
-    import pdb; pdb.set_trace()
     audio, fs = torchaudio.load(args.audio)
     assert fs == 16000
     
@@ -585,12 +590,6 @@ def main(args):
     )
     
     print(encoder_out.shape)
-
-    at_logits = model.forward_audio_tagging(
-        encoder_out, encoder_out_lens, return_logits=True
-    )
-    top5 = at_logits.topk(5)
-    print(f"The topk label are {top5}")
 
 if __name__=="__main__":
     parser = get_parser()
