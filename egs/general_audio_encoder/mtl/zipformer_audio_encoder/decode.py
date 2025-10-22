@@ -753,6 +753,7 @@ def save_wer_results(
         # The following prints out WERs, per-word error statistics and aligned
         # ref/hyp pairs.
         errs_filename = params.res_dir / f"errs-{test_set_name}-{params.suffix}.txt"
+        results = sorted(results)
         with open(errs_filename, "w", encoding="utf8") as fd:
             wer = write_error_stats(
                 fd, f"{test_set_name}-{key}", results, enable_log=True

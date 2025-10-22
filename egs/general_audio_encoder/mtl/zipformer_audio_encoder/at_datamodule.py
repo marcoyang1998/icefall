@@ -531,7 +531,7 @@ class MultiTaskDataModule:
             # transforms = [PerturbSpeed(factors=[0.9, 1.1], p=2/3)] + transforms   # noqa
             # Drop feats to be on the safe side.
             if self.args.enable_mixup:
-                mixup_cuts = load_manifest("data/fbank_as_ced_mAP50/audioset_cuts_balanced.jsonl.gz").drop_features()
+                mixup_cuts = load_manifest(f"{self.args.manifest_dir}/audioset_cuts_balanced.jsonl.gz").drop_features()
             else:
                 mixup_cuts = None
                 
@@ -728,7 +728,7 @@ class MultiTaskDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=2,
+            num_workers=4,
             persistent_workers=False,
         )
 
