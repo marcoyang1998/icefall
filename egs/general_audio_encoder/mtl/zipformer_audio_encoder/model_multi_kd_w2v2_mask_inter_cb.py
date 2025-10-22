@@ -269,7 +269,12 @@ class MultiKDModel(nn.Module):
             
         if codebook_indexes is not None and self.codebook_loss_net is not None:
             codebook_loss = self.forward_codebook_loss(
-                encoder_out, encoder_out_lens, codebook_indexes, self.codebook_loss_net, reduction="none"
+                encoder_out,
+                encoder_out_lens,
+                codebook_indexes,
+                self.codebook_loss_net,
+                teacher_frame_ratio=self.teacher_frame_ratio,
+                reduction="none"
             )
             if self.loss_only_mask and mask_indices is not None:
                 # downsample the mask 
@@ -285,7 +290,12 @@ class MultiKDModel(nn.Module):
             # compute the codebook loss for the intermediate layer
             middle_out = middle_out[self.intermediate_block_idx].permute(1,0,2) # (N,T,C)
             codebook_loss_inter = self.forward_codebook_loss(
-                middle_out, encoder_out_lens, codebook_indexes, self.codebook_loss_net_inter, reduction="none"
+                middle_out,
+                encoder_out_lens,
+                codebook_indexes,
+                self.codebook_loss_net_inter,
+                self.teacher_frame_ratio,
+                reduction="none"
             )
             if self.loss_only_mask and mask_indices is not None:
                 ds_mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
@@ -309,9 +319,16 @@ class MultiKDModel(nn.Module):
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
         codebook_loss_net: nn.Module,
+        teacher_frame_ratio: int,
         reduction: str = "sum",
     ):
         # align the encoder features with the codebook indexes
+        
+        # check if we need to upsample the targets to match the encoder output length
+        if round(encoder_out.shape[1] / codebook_indexes.shape[1]) > teacher_frame_ratio:
+            upsample_ratio = round(encoder_out.shape[1] / codebook_indexes.shape[1])
+            codebook_indexes = codebook_indexes.repeat_interleave(upsample_ratio, dim=1)
+
         if self.interpolate_teacher:
             codebook_indexes = self.interpolate_codebook_indexes(
                 encoder_out, codebook_indexes
