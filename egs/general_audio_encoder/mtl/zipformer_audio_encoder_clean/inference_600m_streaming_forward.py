@@ -403,6 +403,7 @@ def chunk_forward(
     
     # start forward chunk by chunk
     encoder_outs = []
+    features_all = []
     encoder_out_lens = 0
     states = initial_states
     
@@ -415,6 +416,7 @@ def chunk_forward(
         # compute fbank for the current chunk
         audio_chunk = audio[:, num_processed_samples: num_processed_samples + (chunk_size_samples + pad_length_samples)]
         features = extractor.extract(audio_chunk, sampling_rate=16000)
+        features_all.append(features[:2*chunk_size])
         features = features.to(device)
         feature_lens = features.shape[0]
         
@@ -460,8 +462,10 @@ def chunk_forward(
             break
     
     encoder_outs = torch.cat(encoder_outs, dim=1) # shape: (1,T,C)
+    import pdb; pdb.set_trace()
+    features_all = torch.cat(features_all, dim=0)
     
-    return encoder_outs, encoder_out_lens
+    return encoder_outs, encoder_out_lens, features_all
     
 
 
@@ -484,18 +488,16 @@ def main(args):
     audio, fs = torchaudio.load(args.audio)
     assert fs == 16000
     
-    encoder_out, encoder_out_lens = chunk_forward(
+    encoder_out, encoder_out_lens, input_fbank = chunk_forward(
         audio=audio, # shape (1, num_samples)
         model=model,
         feature_dim=128,
         chunk_size=args.chunk_size,
         left_context_frames=args.left_context_frames,
     )
-    
 
     print(encoder_out)
     print(encoder_out.shape)
-    # torch.save(encoder_out, "streaming_forward_encoder_out_no_k2.pt")
 
 if __name__=="__main__":
     parser = get_parser()

@@ -226,7 +226,7 @@ def main(args):
     feature = [extractor.extract(audios, sampling_rate=fs)]
     feature_lens = [f.size(0) for f in feature]
 
-    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True).to(device)
+    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True, padding_value=LOG_EPS).to(device)
     feature_lens = torch.tensor(feature_lens, device=device)
 
     # batch inference
