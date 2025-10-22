@@ -12,17 +12,19 @@ mkdir -p $embedding_dir
 wavlm_version=large
 embedding_layer=21
 
-# for subset in dev-clean dev-other sampled; do
-#     python wavlm/collect_embeddings.py \
-#         --num-jobs 1 \
-#         --input-manifest data/fbank_librispeech/librispeech_cuts_${subset}.jsonl.gz \
-#         --manifest-name embeddings-${subset} \
-#         --target-manifest-file ${manifest_dir}/${model_name}-${model_version}-layer-${embedding_layer}-${subset}.jsonl.gz \
-#         --embedding-dir $embedding_dir \
-#         --embedding-layer $embedding_layer \
-#         --max-duration 200 \
-#         --wavlm-version $wavlm_version
-# done
+for subset in dev-clean dev-other; do
+    python wavlm/collect_embeddings.py \
+        --num-jobs 1 \
+        --input-manifest data/librispeech_manifest/librispeech_cuts_${subset}.jsonl.gz \
+        --manifest-name embeddings-${subset} \
+        --target-manifest-file ${manifest_dir}/${model_name}-${model_version}-layer-${embedding_layer}-${subset}.jsonl.gz \
+        --embedding-dir $embedding_dir \
+        --embedding-layer $embedding_layer \
+        --max-duration 200 \
+        --wavlm-version $wavlm_version
+done
+
+exit
 
 subset=vox1-10-speakers
 python wavlm/collect_embeddings.py \
