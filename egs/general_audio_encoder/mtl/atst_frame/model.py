@@ -13,10 +13,30 @@ class ATST_FrameEncoder(torch.nn.Module):
         self.model = model
         self.embed_dim = 768
 
-    def get_embeddings(self, audio, audio_lens, layer_idx=-1):
-        
-        embed,t = get_timestamp_embedding(audio, self.model) # (N, T, C*num_layers)
-        embed = embed[:,:,-self.embed_dim:] # (N, T, C)
+    def get_embeddings(
+        self,
+        audio,
+        audio_lens,
+        layer_idx: int = -1,
+        concat_all_layers: bool = False,
+    ):
+        """Return the embeddings of ATST Encoder
+
+        Args:
+            audio (torch.tensor): input audio waveform
+            audio_lens (torch.tensor): length of the input waveform
+            layer_idx (int, optional): Which layer to return. If -1, we return the last layer.
+            concat_all_layers (bool, optional): If we return the concatenation of all layers. Defaults to False.
+
+        Returns:
+            _type_: _description_
+        """
+        if concat_all_layers:
+            n_blocks = 12
+        else:
+            n_blocks = 1
+        embed,t = get_timestamp_embedding(audio, self.model, n_blocks=n_blocks) # (N, T, C*num_layers)
+        embed = embed[:,:,-self.embed_dim * n_blocks:] # (N, T, C)
         embed_lens = (audio_lens / 16000 * 25).int() # the frame rate is 25 Hz
         return embed, embed_lens
         

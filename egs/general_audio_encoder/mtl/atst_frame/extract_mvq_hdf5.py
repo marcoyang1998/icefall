@@ -103,6 +103,11 @@ def get_parser():
         default="base"
     )
     
+    parser.add_argument(
+        "--concat-all-layers",
+        type=str2bool,
+        default=False,
+    )
     return parser
 
 def normalize_data(data, mean, std):
@@ -184,6 +189,7 @@ def extract_embeddings(
                 audio=audios,
                 audio_lens=audio_lens,
                 layer_idx=params.embedding_layer,
+                concat_all_layers=params.concat_all_layers,
             )
 
             if params.normalize:
