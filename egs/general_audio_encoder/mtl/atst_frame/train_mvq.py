@@ -10,6 +10,8 @@ import numpy as np
 
 from icefall.utils import setup_logger, str2bool
 
+MODEL_DIM = 768
+
 def get_parser():
     parser = argparse.ArgumentParser()
     

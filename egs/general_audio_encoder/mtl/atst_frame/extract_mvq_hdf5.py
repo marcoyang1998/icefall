@@ -68,13 +68,6 @@ def get_parser():
         type=str,
         default="data/vq_atst_frame"
     )
-
-    parser.add_argument(
-        "--embedding-layer",
-        type=int,
-        default=-1,
-        help="Which layer's representation should be extracted",
-    )
     
     parser.add_argument(
         "--max-duration",
@@ -104,6 +97,13 @@ def get_parser():
     )
     
     parser.add_argument(
+        "--embedding-layer",
+        type=str,
+        default=-1,
+        help="Which layer's representation should be extracted. Indexes are comma separated.",
+    )
+    
+    parser.add_argument(
         "--concat-all-layers",
         type=str2bool,
         default=False,
@@ -128,6 +128,13 @@ def extract_embeddings(
         output_manifest = params.embedding_dir / f"atst_frame-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
         embedding_path =  params.embedding_dir / f'atst_frame-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}'
     
+    if params.concat_all_layers:
+        logging.info(f"Using all layers feature")
+        embedding_layer = None
+    else:
+        embedding_layer = [int(num.strip()) for num in params.embedding_layer.split(",")]
+        logging.info(f"Using embedding from the following layers: {embedding_layer}")
+        
     device = torch.device("cuda", rank)
     
     # currently only use the encoder of atst_frame
@@ -171,7 +178,7 @@ def extract_embeddings(
         dataset,
         sampler=sampler,
         batch_size=None,
-        num_workers=2,
+        num_workers=8,
         persistent_workers=False,
     )
     
@@ -188,7 +195,7 @@ def extract_embeddings(
             embeddings, embedding_lens = model.get_embeddings(
                 audio=audios,
                 audio_lens=audio_lens,
-                layer_idx=params.embedding_layer,
+                layer_idx=embedding_layer,
                 concat_all_layers=params.concat_all_layers,
             )
 
@@ -257,7 +264,7 @@ def change_recording(c):
     return c
 
 def remove_short_and_long_utt(c):
-    if c.duration < 0.5 or c.duration > 31:
+    if c.duration < 0.5 or c.duration > 40:
         return False
     return True
 

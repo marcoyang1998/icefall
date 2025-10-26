@@ -63,13 +63,6 @@ def get_parser():
         type=str,
         default="data/embeddings"
     )
-
-    parser.add_argument(
-        "--embedding-layer",
-        type=int,
-        default=-1,
-        help="Which layer's representation should be extracted. Index starts from 1. ",
-    )
     
     parser.add_argument(
         "--max-duration",
@@ -89,6 +82,13 @@ def get_parser():
         "--model-version",
         type=str,
         default="base"
+    )
+    
+    parser.add_argument(
+        "--embedding-layer",
+        type=str,
+        default="-1",
+        help="Which layer's representation should be extracted. Indexes are comma separated.",
     )
     
     parser.add_argument(
@@ -113,6 +113,13 @@ def extract_embeddings(
     else:
         output_manifest = params.embedding_dir / f"atst_frame-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}.jsonl.gz"
         embedding_path =  params.embedding_dir / f'atst_frame-{params.model_version}-layer-{params.embedding_layer}-{params.manifest_name}'
+    
+    if params.concat_all_layers:
+        logging.info(f"Using all layers feature")
+        embedding_layer = None
+    else:
+        embedding_layer = [int(num.strip()) for num in params.embedding_layer.split(",")]
+        logging.info(f"Using embedding from the following layers: {embedding_layer}")
     
     device = torch.device("cuda", rank)
     
@@ -157,7 +164,7 @@ def extract_embeddings(
             embeddings, embedding_lens = model.get_embeddings(
                 audio=audios,
                 audio_lens=audio_lens,
-                layer_idx=params.embedding_layer,
+                layer_idx=embedding_layer,
                 concat_all_layers=params.concat_all_layers,
             )
             embeddings = embeddings.detach().to("cpu").numpy()

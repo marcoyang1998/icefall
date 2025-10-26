@@ -17,7 +17,7 @@ class ATST_FrameEncoder(torch.nn.Module):
         self,
         audio,
         audio_lens,
-        layer_idx: int = -1,
+        layer_idx: list[int],
         concat_all_layers: bool = False,
     ):
         """Return the embeddings of ATST Encoder
@@ -31,12 +31,16 @@ class ATST_FrameEncoder(torch.nn.Module):
         Returns:
             _type_: _description_
         """
-        if concat_all_layers:
-            n_blocks = 12
-        else:
-            n_blocks = 1
-        embed,t = get_timestamp_embedding(audio, self.model, n_blocks=n_blocks) # (N, T, C*num_layers)
-        embed = embed[:,:,-self.embed_dim * n_blocks:] # (N, T, C)
+        assert isinstance(layer_idx, list), "Expecting a list of layers"
+        
+        # we first return the 12 blocks, then select layers from it
+        embed,t = get_timestamp_embedding(audio, self.model, n_blocks=12) # (N, T, C*12)
+        
+        if not concat_all_layers:
+            chunked_embed = list(embed.chunk(12, dim=-1)) # total 12 layers
+            selected_embeds = [chunked_embed[idx] for idx in layer_idx]
+            embed = torch.concat(selected_embeds, dim=-1) # should be (N,T, C*len(layer_idx) )
+        
         embed_lens = (audio_lens / 16000 * 25).int() # the frame rate is 25 Hz
         return embed, embed_lens
         
