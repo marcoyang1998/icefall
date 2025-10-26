@@ -3,6 +3,7 @@ import csv
 import glob
 import logging
 import os
+from tqdm import tqdm
 
 import pandas as pd
 import torch
@@ -36,11 +37,11 @@ def get_parser():
     parser.add_argument(
         "--subset",
         type=str,
-        default="dev"
+        default="train"
     )
     
     parser.add_argument(
-        "--langauage",
+        "--language",
         type=str,
         default="en",
     )
@@ -54,10 +55,11 @@ def parse_tsv(tsv_file: str):
     return df
 
 def generate_audio_mapping(audio_root: str):
-    audio_files = glob.glob(f"{audio_root}/*/*.mp3")
-    def get_filename(s: str):
-        return s.split("/")[-1]
-    audio_mapping = {get_filename(audio_file): audio_file for audio_file in audio_files}
+    audio_files = glob.glob(f"{audio_root}/*/*.wav")
+    def get_audio_id(s: str):
+        filename = s.split("/")[-1]
+        return filename.split(".")[0]
+    audio_mapping = {get_audio_id(audio_file): audio_file for audio_file in audio_files}
     return audio_mapping
 
 def main():
@@ -67,7 +69,7 @@ def main():
     dataset_dir = args.dataset_dir
     manifest_dir = args.manifest_dir
     subset = args.subset
-    language = args.langauage
+    language = args.language
     
     os.makedirs(manifest_dir, exist_ok=True)
     
@@ -78,17 +80,18 @@ def main():
     
     cuts = []
     num_cuts = 0
-    for _, row in meta_info.iterrows():
+    for _, row in tqdm(meta_info.iterrows()):
         path = row["path"]
-        id = path.replace(".mp3", "")
+        id = path.replace(".mp3", "").replace(".wav", "")
         
-        if path not in audio_mapping:
-            logging.info(f"no file found for {path}")
+        if id not in audio_mapping:
+            logging.info(f"no file found for {id}")
             continue
         else:
-            audio_file = audio_mapping[path]
+            audio_file = audio_mapping[id]
             # we assume you have already converted the mp3 file to wav
-            audio_file = audio_file.replace(".mp3", ".wav") 
+            if audio_file.endswith(".mp3"):
+                audio_file = audio_file.replace(".mp3", ".wav")
         try:
             recording = Recording.from_file(audio_file)
         except AudioLoadingError:

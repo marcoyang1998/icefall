@@ -4,7 +4,6 @@ import glob
 import logging
 import os
 from tqdm import tqdm
-import pandas as pd
 import torch
 from lhotse import CutSet
 from lhotse.cut import MonoCut
@@ -28,16 +27,29 @@ def get_parser():
 
 
 def parse_tsv(tsv_file: str):
-    df = pd.read_csv(tsv_file, sep="\t")
-    df = df[["path", "sentence", "gender"]]
-    return df
+    """以纯 Python 方式解析 TSV 文件，返回 list[dict]，避免 pandas 开销"""
+    rows = []
+    import sys
+    csv.field_size_limit(sys.maxsize)
+    with open(tsv_file, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for r in reader:
+            rows.append({
+                "path": r["path"],
+                "sentence": r["sentence"],
+                "gender": r.get("gender", "unknown")
+            })
+    return rows
 
 
 def generate_audio_mapping(audio_root: str):
+    """生成音频文件名到路径的映射"""
     audio_files = glob.glob(f"{audio_root}/*/*.wav")
+
     def get_audio_id(s: str):
         filename = os.path.basename(s)
         return os.path.splitext(filename)[0]
+
     audio_mapping = {get_audio_id(audio_file): audio_file for audio_file in audio_files}
     return audio_mapping
 
@@ -103,7 +115,7 @@ def main():
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = [
             executor.submit(process_row, row, audio_mapping, language)
-            for _, row in meta_info.iterrows()
+            for row in meta_info
         ]
         for f in tqdm(as_completed(futures), total=len(futures)):
             result = f.result()
