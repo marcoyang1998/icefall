@@ -244,9 +244,14 @@ def join_manifests(
     
     input_cuts.to_jsonl(output_dir)
     logging.info(f"Saved the joined manifest to {output_dir}")
+
+def remove_short_utt(c):
+    if c.duration < 0.5:
+        return False
+    return True
     
 def remove_short_and_long_utt(c):
-    if c.duration < 0.7 or c.duration > 30.1:
+    if c.duration < 0.5 or c.duration > 40.0:
         return False
     return True
 
@@ -264,6 +269,10 @@ def remove_overlength(c):
         return False
     return True
 
+def fix_recording_id(c):
+    c.supervisions[0].id = c.supervisions[0].recording_id
+    return c
+
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
@@ -277,8 +286,10 @@ if __name__=="__main__":
     nj = params.num_jobs
     print(f"Start loading manifest")
     cuts = load_manifest(params.input_manifest)
-    # cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
+    cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
+    # cuts = cuts.filter(remove_short_utt)
     cuts = cuts.filter(remove_sp) # remove speed perturb
+    cuts = cuts.map(fix_recording_id)
     # cuts = cuts.filter(remove_overlength) # remove overlength
     print(f"Finished loading manifest")
     print(cuts)
