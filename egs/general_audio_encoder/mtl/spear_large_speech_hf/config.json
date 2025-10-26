@@ -1,0 +1,22 @@
+{
+  "architectures": [
+    "SpearModel"
+  ],
+  "auto_map": {
+    "AutoConfig": "configuration_spear.SpearConfig",
+    "AutoModel": "modeling_spear.SpearModel"
+  }, 
+  "num_mel_bins": 128,
+  "output_downsampling_factor": 2,
+  "downsampling_factor": "1,2,4,8,4,2,1",
+  "num_encoder_layers": "1,2,2,3,1,1,1",
+  "feedforward_dim": "3072,3072,3072,3072,3072,3072,3072",
+  "encoder_dim": "1024,1024,1024,1024,1024,1024,1024",
+  "encoder_unmasked_dim": "512,512,512,512,512,512,512",
+  "cnn_module_kernel": "31,31,15,15,15,31,31",
+  "num_heads": "8,8,8,8,8,8,8",
+  "pos_dim": 48,
+  "causal": false,
+  "chunk_size": 8,
+  "left_context_frames": 128
+}
