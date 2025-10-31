@@ -1,8 +1,4 @@
-# Copyright    2021-2023  Xiaomi Corp.        (authors: Fangjun Kuang,
-#                                                       Wei Kang,
-#                                                       Zengwei Yao)
-#
-# Copyright    2024 University of Cambridge      (authors: Xiaoyu Yang)
+# Copyright    2025 University of Cambridge      (authors: Xiaoyu Yang)
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
 #
@@ -18,12 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+import logging
+import random
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from multi_quantization.prediction import JointCodebookLoss
+
+from model_multi_kd_w2v2_mask import index_put, compute_mask_indices, compute_mask_indices_block
 
 from icefall.utils import make_pad_mask
 
@@ -51,7 +51,7 @@ class MAELoss(torch.nn.Module):
         
         # compute the MSE loss
         loss = (pred - target)**2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch, normalized by the fbank dim
         return loss
 
 class MultiKDModel(nn.Module):
@@ -62,6 +62,7 @@ class MultiKDModel(nn.Module):
         encoder_dim: int,
         decoder: nn.Module,
         decoder_dim: int,
+        decoder_input_dim: int,
         num_codebooks: int=8,
         distillation_layer: int=9,
         distillation_delta: int=0,
@@ -71,12 +72,19 @@ class MultiKDModel(nn.Module):
         num_events: int = 527,
         mae_loss_norm: str = "sample",
         mae_downsample_factor: int = 4,
+        mask_mode: str = "w2v2",
+        mask_prob: float = 0.65,
+        mask_length: int = 10,
+        mask_selection: str = "static",
+        mask_other: float = 0.0,
+        min_masks: int = 2,
+        mask_channel_prob: float = 0.0,
+        mask_channel_length: int = 10,
+        mask_channel_selection: str = "static",
+        mask_channel_other: float = 0.0,
+        loss_only_mask: bool = False,
     ):
-        """A joint CTC & Transducer ASR model.
-
-        - Connectionist temporal classification: labelling unsegmented sequence data with recurrent neural networks (http://imagine.enpc.fr/~obozinsg/teaching/mva_gm/papers/ctc.pdf)
-        - Sequence Transduction with Recurrent Neural Networks (https://arxiv.org/pdf/1211.3711.pdf)
-        - Pruned RNN-T for fast, memory-efficient ASR training (https://arxiv.org/pdf/2206.13236.pdf)
+        """A model that performs MVQ KD pre-training with additional MAE loss.
 
         Args:
           encoder_embed:
@@ -88,20 +96,25 @@ class MultiKDModel(nn.Module):
             two inputs: `x` of (N, T, encoder_dim) and `x_lens` of shape (N,).
             It returns two tensors: `logits` of shape (N, T, encoder_dim) and
             `logit_lens` of shape (N,).
-          decoder:
-            It is the prediction network in the paper. Its input shape
-            is (N, U) and its output shape is (N, U, decoder_dim).
-            It should contain one attribute: `blank_id`.
-            It is used when use_transducer is True.
-          joiner:
-            It has two inputs with shapes: (N, T, encoder_dim) and (N, U, decoder_dim).
-            Its output shape is (N, T, U, vocab_size). Note that its output contains
-            unnormalized probs, i.e., not processed by log-softmax.
-            It is used when use_transducer is True.
-          use_transducer:
-            Whether use transducer head. Default: True.
-          use_ctc:
-            Whether use CTC head. Default: False.
+          num_codebooks:
+            The number of codebooks used in the target
+          distillation_layer:
+            Use which layer to do MVQ pre-training
+          distillation_delta:
+            How many frames to delay the alignment between the model and the target frames.
+            Should be zero for non-streaming models, and a positive number for streaming models
+          teacher_frame_ratio:
+            The frame rate ratio between the target and the model output
+          mae_loss_norm:
+            The normalization mode of the MAE loss
+          mae_downsample_factor:
+            The ratio between of final output frame rate after the decoder and the encoder input
+          mask_prob:
+            The probability of selecting choosing one frame as the start index
+          mask_length:
+            The length of each mask
+          mask_selection:
+            How to determine the length of the mask, see ``compute_mask_indices''
         """
         super().__init__()
 
@@ -114,7 +127,7 @@ class MultiKDModel(nn.Module):
         
         self.fbank_dim = n_mels
         self.mae_downsample_factor = mae_downsample_factor
-        self.decoder_embed = nn.Linear(encoder_dim, decoder_dim) # projecting encoder_out to decoder dim
+        self.decoder_embed = nn.Linear(encoder_dim, decoder_input_dim) # projecting encoder_out to decoder dim
         self.decoder_pred = nn.Linear(decoder_dim, n_mels * mae_downsample_factor) # we are predicting 4 fbank frames per decoder frame
             
         # mvq distillation
@@ -144,6 +157,24 @@ class MultiKDModel(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(encoder_dim, num_events),
         ) # 527 classes
+        
+        # masking related
+        assert mask_mode in ["w2v2", "block"], f"Unseen mask mode: {mask_mode}"
+        self.mask_mode = mask_mode
+        
+        self.mask_emb = nn.Parameter(torch.FloatTensor(n_mels).normal_()) 
+        self.mask_prob = mask_prob
+        self.mask_length = mask_length
+        self.mask_selection = mask_selection
+        self.mask_other = mask_other
+        self.min_masks = min_masks
+        
+        self.mask_channel_prob = mask_channel_prob
+        self.mask_channel_length = mask_channel_length
+        self.mask_channel_selection = mask_channel_selection
+        self.mask_channel_other = mask_channel_other
+        
+        self.loss_only_mask = loss_only_mask
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -196,7 +227,7 @@ class MultiKDModel(nn.Module):
         return decoder_out, decoder_out_lens
         
     def forward_mae_loss(
-        self, encoder_out: torch.Tensor, encoder_out_lens: torch.Tensor, target: torch.Tensor
+        self, encoder_out: torch.Tensor, encoder_out_lens: torch.Tensor, target: torch.Tensor, reduction: str = "none"
     ) -> torch.Tensor:
         # compute the MAE loss
         decoder_out, decoder_out_lens = self.forward_decoder(
@@ -210,9 +241,11 @@ class MultiKDModel(nn.Module):
         target = self.truncate_target(pred, target)
         loss = self.mae_loss(pred, target) # (N,T)
         
+        # mask the loss on padding positions to zero
         padding_mask = ~ make_pad_mask(decoder_out_lens * self.mae_downsample_factor)
         loss = loss * padding_mask
-        loss = loss.sum(dim=1) # (N,)
+        if reduction == "sum":
+            loss = loss.sum(dim=1) # (N,)
         return loss
         
     @staticmethod
@@ -243,6 +276,7 @@ class MultiKDModel(nn.Module):
         fbank_target: torch.Tensor,
         codebook_indexes: torch.Tensor = None,
         at_targets: torch.Tensor = None,
+        mask: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -255,27 +289,43 @@ class MultiKDModel(nn.Module):
             The original fbank features
           codebook_indexes:
             Codebook indexes of teacher embeddings
+          mask:
+            If we perform w2v2 style of masking over the fbank frames
             
         Returns:
-          Return the transducer losses and CTC loss,
-          in form of (simple_loss, pruned_loss, ctc_loss)
-
-        Note:
-           Regarding am_scale & lm_scale, it will make the loss-function one of
-           the form:
-              lm_scale * lm_probs + am_scale * am_probs +
-              (1-lm_scale-am_scale) * combined_probs
+          Return the codebook loss and the mae loss
         """
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         assert codebook_indexes is not None or at_targets is not None
 
+        # apply masking
+        if self.training and mask:
+            padding_mask = make_pad_mask(x_lens)
+            
+            # apply masking to the fbank features
+            x, mask_indices = self.apply_mask(
+                x.clone(),
+                padding_mask=padding_mask
+            ) # (N,T,C), (N,T)
+        else:
+            mask_indices = None
+        
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
         # Compute codebook loss
         if codebook_indexes is not None and self.codebook_loss_net is not None:
-            codebook_loss = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes)
+            codebook_loss = self.forward_codebook_loss(
+                encoder_out, encoder_out_lens, codebook_indexes, reduction="none"
+            )
+            if self.loss_only_mask and mask_indices is not None:
+                # downsample the mask 
+                mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
+                assert mask_indices.size(1) >= codebook_loss.size(1)
+                mask_indices = mask_indices[:, :codebook_loss.size(1)].float()
+                codebook_loss = codebook_loss * mask_indices
+            codebook_loss = codebook_loss.sum(dim=1) # (B,)    
         else:
             codebook_loss = None
             
@@ -285,7 +335,14 @@ class MultiKDModel(nn.Module):
         else:
             at_loss = None
         
-        mae_loss = self.forward_mae_loss(encoder_out, encoder_out_lens, fbank_target)
+        mae_loss = self.forward_mae_loss(encoder_out, encoder_out_lens, fbank_target, reduction="none") # (N,T)
+        # we only compute the fbank reconstruction loss on masked positions, regardless of loss_only_mask
+        if mask_indices is not None:
+            diff = mask_indices.shape[1] - mae_loss.shape[1]
+            if diff > 0:
+                mask_indices = mask_indices[:, diff//2: diff//2 + mae_loss.shape[1]]
+            mae_loss = mae_loss * mask_indices
+        mae_loss = mae_loss.sum(dim=-1) # (N)
         
         return codebook_loss, at_loss, mae_loss
 
@@ -294,6 +351,7 @@ class MultiKDModel(nn.Module):
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
+        reduction: str = "sum"
     ):
         # align the encoder features with the codebook indexes
         if self.interpolate_teacher:
@@ -320,7 +378,12 @@ class MultiKDModel(nn.Module):
         codebook_loss = codebook_loss.reshape(N,T,-1)
         num_cb = codebook_loss.size(-1)
         # normalize the loss by the number of codebooks
-        codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb
+        if reduction == "sum":
+            codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb # (B,)
+        elif reduction == "none":
+            codebook_loss = codebook_loss.sum(dim=2) / num_cb # (B,T)
+        else:
+            raise NotImplementedError()
         
         return codebook_loss
 
@@ -343,6 +406,105 @@ class MultiKDModel(nn.Module):
         at_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
 
         return at_loss
+    
+    def apply_mask(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply mask according to the mask_mode, return the masked features and the masked positions
+
+        Args:
+            x (torch.Tensor): The input fbank features
+            padding_mask (torch.Tensor, optional): The padding mask
+
+        Returns:
+            The masked fbank feature and the masked_indices, with masked positions as 1
+        """
+        # apply mask to the fbank features, two modes applicable
+        if self.mask_mode == "w2v2":
+            x, masked_indices = self.apply_mask_w2v2(x, padding_mask)
+        elif self.mask_mode == "block":
+            x, masked_indices = self.apply_mask_block(x, padding_mask)
+        else:
+            raise NotImplementedError()
+        
+        if random.random() > 0.97:
+            logging.info(f"Apply {self.mask_mode} masking. A proportion of {masked_indices.sum()/masked_indices.numel():.2f} frames are masked")
+        return x, masked_indices
+    
+    def apply_mask_block(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ):
+        B,T,C = x.shape
+        assert self.mask_prob > 0.0
+
+        mask_indices = compute_mask_indices_block(
+            shape=(B,T),
+            padding_mask=padding_mask,
+            mask_prob=self.mask_prob,
+            mask_length=self.mask_length,
+            min_masks=self.min_masks,
+        ).to(x.device)
+        
+        x = index_put(x, mask_indices.bool(), self.mask_emb)
+
+        return x, mask_indices
+    
+    def apply_mask_w2v2(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ):
+        # this function is modified from fairseq: https://github.com/facebookresearch/fairseq/blob/bedb259bf34a9fc22073c13a1cee23192fa70ef3/fairseq/models/wav2vec/wav2vec2.py#L429
+        # The masked indices have value 1
+        B, T, C = x.shape
+        
+        # we mask channel first, then mask timestamps
+        if self.mask_channel_prob > 0:
+            mask_channel_indices = compute_mask_indices(
+                (B, C),
+                None,
+                self.mask_channel_prob,
+                self.mask_channel_length,
+                self.mask_channel_selection,
+                self.mask_channel_other,
+                no_overlap=False,
+                min_space=1,
+                require_same_masks=False,
+            )
+            mask_channel_indices = (
+                torch.from_numpy(mask_channel_indices)
+                .to(x.device)
+                .unsqueeze(1)
+                .expand(-1, T, -1)
+            )
+            if random.random() > 0.98:
+                logging.info(f"A proportion of {mask_channel_indices.sum()/mask_channel_indices.numel():.2f} feature dims are masked")
+            x[mask_channel_indices] = 0
+
+        if self.mask_prob > 0:
+            mask_indices = compute_mask_indices(
+                (B, T),
+                padding_mask,
+                self.mask_prob,
+                self.mask_length,
+                mask_type=self.mask_selection,
+                mask_other=self.mask_other,
+                min_masks=2, # fixed
+                no_overlap=False,  # False
+                min_space=1,  # 1
+                require_same_masks=False,
+            )
+            mask_indices = torch.from_numpy(mask_indices).to(x.device)
+            x = index_put(x, mask_indices, self.mask_emb)
+            mask_indices = mask_indices.float()
+        else:
+            mask_indices = None
+
+        return x, mask_indices
     
     @staticmethod
     def interpolate_codebook_indexes(middle_layer_output, codebook_indexes):

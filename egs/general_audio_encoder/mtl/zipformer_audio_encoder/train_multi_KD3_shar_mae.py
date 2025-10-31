@@ -66,7 +66,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
-from lhotse.cut import Cut
+from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_multi_kd_mae import MultiKDModel
@@ -82,6 +82,8 @@ from utils import (
     _add_task_id, 
     MetricsTracker, 
     setup_distributed,
+    _save_checkpoint,
+    _save_checkpoint_with_global_batch_idx,
 )
 
 from zipformer2 import Zipformer2
@@ -218,7 +220,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="Embedding dimension in encoder stacks: a single int or comma-separated list.",
     )
     
-    # decoder related arguments
+    # mae decoder related arguments
     parser.add_argument(
         "--num-decoder-layers",
         type=str,
@@ -259,6 +261,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str,
         default="4,4,4,8,4,4",
         help="Number of attention heads in the zipformer encoder layers: a single int or comma-separated list.",
+    )
+    
+    parser.add_argument(
+        "--decoder-cnn-module-kernel",
+        type=str,
+        default="31,31,15,15,15,31",
+        help="Sizes of convolutional kernels in convolution modules in each encoder stack: "
+        "a single int or comma-separated list.",
     )
 
     parser.add_argument(
@@ -383,6 +393,15 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
+        "--mvq-loss-by-task",
+        type=str2bool,
+        default=False,
+        help="If True, only compute MVQ loss on the task from which the sample is drawn."
+        "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
+    )
+    
+    # mae related
+    parser.add_argument(
         "--mae-downsample-factor",
         type=int,
         default=4,
@@ -405,6 +424,58 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="The loss scale for MAE loss"
     )
     
+    # masking related
+    parser.add_argument(
+        "--loss-only-mask",
+        type=str2bool,
+        default=False,
+        help="If True, only compute loss on the masked indices"
+    )
+    
+    parser.add_argument(
+        "--mask-mode",
+        type=str,
+        default="w2v2",
+        choices=["w2v2", "block"],
+        help="The masking mode",
+    )
+    
+    parser.add_argument(
+        "--mask-length", type=int, default=10, help="mask_length"
+    )
+
+    parser.add_argument(
+        "--mask-prob",
+        type=float,
+        default=0.65,
+        help="probability of replacing a token with mask",
+    )
+
+    parser.add_argument(
+        "--mask-selection",
+        type=str,
+        choices=["static", "uniform", "normal", "poisson"],
+        default="static",
+        help="how to choose mask length",
+    )
+
+    parser.add_argument(
+        "--mask-other",
+        type=float,
+        default=0,
+        help="secondary mask argument (used for more complex distributions),see help in compute_mask_indicesh",
+    )
+    
+    parser.add_argument(
+        "--mask-channel-length", type=int, default=15, help="mask_length"
+    )
+    
+    parser.add_argument(
+        "--mask-channel-prob",
+        type=float,
+        default=0.0,
+        help="probability of replacing a channel with mask",
+    )
 
 
 def get_parser():
@@ -502,10 +573,10 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--lr-epochs",
+        "--lr-hours",
         type=float,
-        default=3.5,
-        help="""Number of epochs that affects how rapidly the learning rate decreases.
+        default=30000,
+        help="""Number of hours trained speech that affects how rapidly the learning rate decreases.
         """,
     )
 
@@ -573,17 +644,10 @@ def get_parser():
     
     # TODO: make this applicable to more than two losses
     parser.add_argument(
-        "--speech-mvq-loss-scale",
+        "--mvq-loss-scale",
         type=float,
         default=1.0,
-        help="The scale of whisper mvq losses"
-    )
-
-    parser.add_argument(
-        "--audio-mvq-loss-scale",
-        type=float,
-        default=1.0,
-        help="The scale of dasheng mvq losses"
+        help="The scale of mvq losses"
     )
     
     parser.add_argument(
@@ -807,7 +871,7 @@ def get_decoder(params: AttributeDict) -> nn.Module:
         value_head_dim=_to_int_tuple(params.value_head_dim),
         pos_dim=params.pos_dim,
         num_heads=_to_int_tuple(params.decoder_num_heads),
-        cnn_module_kernel=_to_int_tuple(params.cnn_module_kernel),
+        cnn_module_kernel=_to_int_tuple(params.decoder_cnn_module_kernel),
         causal=False,
     )
     
@@ -818,7 +882,6 @@ def get_decoder(params: AttributeDict) -> nn.Module:
 
 
 def get_model(params: AttributeDict) -> nn.Module:
-
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
     decoder = get_decoder(params)
@@ -834,13 +897,18 @@ def get_model(params: AttributeDict) -> nn.Module:
                 f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
                 "However, the output downsampling factor is 1. This could be wrong!"
             )
+    # the equivalent downsampling factor at the decoder output compared to the 100Hz fbank
     assert params.mae_downsample_factor == params.output_downsampling_factor * 2
+    
+    if params.loss_only_mask:
+        logging.info("Only computing loss on the masked positions")
 
     model = MultiKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         decoder=decoder,
         decoder_dim=max(_to_int_tuple(params.decoder_dim)),
+        decoder_input_dim=_to_int_tuple(params.decoder_dim)[0],
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
         num_codebooks=params.num_codebooks,
         distillation_layer=params.distillation_layer,
@@ -850,6 +918,13 @@ def get_model(params: AttributeDict) -> nn.Module:
         n_mels=params.feature_dim,
         mae_loss_norm=params.mae_loss_norm,
         mae_downsample_factor=params.mae_downsample_factor,
+        mask_prob=params.mask_prob,
+        mask_length=params.mask_length,
+        mask_selection=params.mask_selection,
+        mask_channel_prob=params.mask_channel_prob,
+        mask_channel_length=params.mask_channel_length,
+        mask_other=params.mask_other,
+        loss_only_mask=params.loss_only_mask,
     )
     return model
 
@@ -1073,6 +1148,7 @@ def compute_loss(
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
             fbank_target=feature,
+            mask=is_training,
         )
 
         loss = 0.0
@@ -1081,11 +1157,15 @@ def compute_loss(
         
         # MVQ loss, first is whisper MVQ, second is Dasheng MVQ
         if params.do_mvq:
-            mask = task_ids == 1 # ASR=1
-            mvq_loss = (mvq_loss * mask).sum()
-            loss += mvq_loss
+            if params.mvq_loss_by_task:
+                mask = task_ids == 1 # ASR=1
+                mvq_loss = (mvq_loss * mask).sum()
+                mae_loss = (mae_loss * mask).sum()
+            else:
+                mvq_loss = mvq_loss.sum()
+                mae_loss = mae_loss.sum()
             
-            mae_loss = (mae_loss * mask).sum()
+            loss += mvq_loss * params.mvq_loss_scale
             loss += mae_loss * params.mae_loss_scale
             
         # AT loss
@@ -1211,11 +1291,26 @@ def train_one_epoch(
             scaler=scaler,
             rank=0,
         )
+    
+    def estimate_cur_epoch(max_duration: float, world_size: int, steps: int, train_hrs: int):
+        estimated_hours = max_duration * world_size * steps / 3600
+        estimated_epochs = estimated_hours // train_hrs
+        return estimated_epochs
 
     shard_count = {}
+    shard_durations_count = {}
+    cur_epoch = 0
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
+        if params.use_shar:
+            est_epoch = estimate_cur_epoch(
+                params.max_duration, world_size, params.batch_idx_train, params.train_duration,
+            )
+            if est_epoch > cur_epoch:
+                cur_epoch = est_epoch
+                # scheduler.step_epoch(cur_epoch) # start from 1
+                logging.info(f"Estimated epoch: {cur_epoch}")
 
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
@@ -1223,17 +1318,25 @@ def train_one_epoch(
         supervisions = batch["supervisions"]
         cuts = supervisions["cut"]
         
-        shard_origin = ["/".join(str(c.shard_origin).split("/")[1:3]) for c in cuts]
-        unique_origin = set(shard_origin)
-        count = {orig: 0 for orig in unique_origin}
-        for sh in shard_origin:
-            count[sh] += 1
-               
-        if batch_idx % 200 == 1:
-            shard_epoch = [int(c.shar_epoch) for c in cuts]
-            max_epoch = max(shard_epoch)
-            logging.info(f"Estimated epoch is {max_epoch}")
-            logging.info(count)
+        if params.use_shar:
+            cuts = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+            shard_origin = [str(c.shard_origin).split("/")[2] for c in cuts]
+            durations = [c.duration for c in cuts]
+            unique_origin = set(shard_origin)
+            for ori, dur in zip(shard_origin, durations):
+                if ori in shard_count:
+                    shard_count[ori] += 1
+                    shard_durations_count[ori] += dur / 3600
+                else:
+                    shard_count[ori] = 1
+                    shard_durations_count[ori] = dur / 3600
+            count = {orig: 0 for orig in unique_origin}
+            for sh in shard_origin:
+                count[sh] += 1
+                
+            if batch_idx % 100 == 1:
+                logging.info(f"All shards source by far: {shard_count}")
+                logging.info(f"All shard duration by far: {shard_durations_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1250,6 +1353,10 @@ def train_one_epoch(
             # in the batch and there is no normalization to it so far.
             scaler.scale(loss).backward()
             scheduler.step_batch(params.batch_idx_train)
+            # Use the number of hours of speech to adjust the learning rate
+            scheduler.step_epoch(
+                params.batch_idx_train * params.max_duration * params.world_size / 3600
+            )
 
             scaler.step(optimizer)
             scaler.update()
@@ -1388,7 +1495,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1400,7 +1509,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1427,7 +1536,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1439,7 +1548,7 @@ def run(rank, world_size, args):
         clipping_scale=2.0,
     )
 
-    scheduler = Eden(optimizer, params.lr_batches, params.lr_epochs, warmup_batches=params.warmup_batches)
+    scheduler = Eden(optimizer, params.lr_batches, params.lr_hours, warmup_batches=params.warmup_batches)
 
     if checkpoints and "optimizer" in checkpoints:
         logging.info("Loading optimizer state dict")
@@ -1568,9 +1677,9 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(english_cuts_len)
         asr_training_cuts_duration.append(english_cut_durations)
     
-    # combine the asr data into a BIG cut
-    if len(asr_training_cuts) >= 1:
-        assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+    # If asr cuts are ever used
+    if len(asr_training_cuts) >= 1:    
+        # combine the asr data into a BIG cut
         if len(asr_training_cuts) > 1:
             asr_training_cuts = CutSet.mux(
                 *asr_training_cuts,
@@ -1579,19 +1688,13 @@ def run(rank, world_size, args):
             )
         else:
             asr_training_cuts = asr_training_cuts[0]
-    else:
-        asr_training_cuts = CutSet()
-    train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
+    
+        train_cuts["cuts_asr"] = asr_training_cuts
+        train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # general audio data
     if params.do_audio_tagging:
         assert params.use_audioset, "If we do audio tagging, we must use audioset"
-        
-    def change_codebook_indexes(c):
-        c.audio_codebook_indexes = c.codebook_indexes
-        del c.codebook_indexes
-        return c
         
     if params.use_audioset:
         logging.info(f"Getting audioset cuts")
@@ -1611,8 +1714,17 @@ def run(rank, world_size, args):
             "balanced": 50,
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download3/" # use local
+            )
+            c.recording.sources[0].source = source
+            return c
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
-        audioset_cuts = audioset_cuts.map(change_codebook_indexes)
+        audioset_cuts = audioset_cuts.map(change_source)
+        logging.info(audioset_cuts[0])
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         train_cuts["cuts_audioset"] = audioset_cuts
         train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
@@ -1621,6 +1733,7 @@ def run(rank, world_size, args):
     
     logging.info(train_cuts)
     logging.info(train_cuts_duration)
+    params.train_duration = sum(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 0.98 or c.duration > 29.0:
@@ -1697,7 +1810,7 @@ def run(rank, world_size, args):
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
-        as_eval_cuts = as_eval_cuts.map(change_codebook_indexes)
+        as_eval_cuts = as_eval_cuts.map(change_source)
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
@@ -1710,7 +1823,6 @@ def run(rank, world_size, args):
         scaler.load_state_dict(checkpoints["grad_scaler"])
 
     for epoch in range(params.start_epoch, params.num_epochs + 1):
-        scheduler.step_epoch(epoch - 1)
         fix_random_seed(params.seed + epoch - 1)
         if not params.use_shar:
             train_dl.sampler.set_epoch(epoch - 1)
@@ -1737,7 +1849,7 @@ def run(rank, world_size, args):
         )
 
         if params.print_diagnostics:
-            diagnostic.print_diagnostics()
+            diagnostics.print_diagnostics()
             break
 
         if params.batch_idx_train > params.max_iters:
