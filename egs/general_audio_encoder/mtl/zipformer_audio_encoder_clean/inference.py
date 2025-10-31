@@ -1,4 +1,5 @@
 import argparse
+import math
 
 from model import MultiKDModel
 from scaling import ScheduledFloat
@@ -38,6 +39,13 @@ def get_parser():
         type=str,
         default="2,2,3,4,3,2",
         help="Number of zipformer encoder layers per stack, comma separated.",
+    )
+    
+    parser.add_argument(
+        "--output-downsampling-factor",
+        type=int,
+        default=2,
+        help="Output downsampling factor",
     )
 
     parser.add_argument(
@@ -164,7 +172,7 @@ def get_encoder_embed(params) -> nn.Module:
 
 def get_encoder_model(params) -> nn.Module:
     encoder = Zipformer2(
-        output_downsampling_factor=2,
+        output_downsampling_factor=params.output_downsampling_factor,
         downsampling_factor=_to_int_tuple(params.downsampling_factor),
         num_encoder_layers=_to_int_tuple(params.num_encoder_layers),
         encoder_dim=_to_int_tuple(params.encoder_dim),
@@ -222,7 +230,7 @@ def main(args):
     feature = [extractor.extract(audios, sampling_rate=fs)]
     feature_lens = [f.size(0) for f in feature]
 
-    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True).to(device)
+    feature = torch.nn.utils.rnn.pad_sequence(feature, batch_first=True, padding_value=math.log(1e-10)).to(device)
     feature_lens = torch.tensor(feature_lens, device=device)
 
     # batch inference
@@ -230,7 +238,7 @@ def main(args):
         feature,
         feature_lens,
     )
-    print(encoder_out.shape)
+    print(encoder_out)
 
 if __name__=="__main__":
     parser = get_parser()

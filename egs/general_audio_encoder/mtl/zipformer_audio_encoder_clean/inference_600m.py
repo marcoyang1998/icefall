@@ -157,6 +157,9 @@ def get_encoder_model(params) -> nn.Module:
 
 def get_params(args):
     params = ZipformerConfig()
+    
+    # streaming related params
+    params.causal = args.causal
     params.chunk_size = args.chunk_size
     params.left_context_frames = args.left_context_frames
     
