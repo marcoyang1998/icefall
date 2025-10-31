@@ -66,8 +66,8 @@ import torch.nn as nn
 from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut
-from lhotse.dataset.sampling.base import CutSampler
 from lhotse.dataset import SpecAugment
+from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
 from model_multi_kd_co_training import MultiKDModel
 from optim import Eden, ScaledAdam
@@ -78,7 +78,13 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import _add_task_id, MetricsTracker, setup_distributed
+from utils import (
+    _add_task_id,
+    MetricsTracker,
+    setup_distributed,
+    _save_checkpoint,
+    _save_checkpoint_with_global_batch_idx,
+)
 
 from zipformer2 import Zipformer2
 
@@ -256,7 +262,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=str2bool,
         default=False,
         help="If do speaker verification"
-    ) 
+    )
     
     parser.add_argument(
         "--use-co-training",
@@ -269,6 +275,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.2,
     )
+    
     
     parser.add_argument(
         "--distillation-layer",
@@ -303,12 +310,57 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         default=8,
     )
     
+    # masking related
     parser.add_argument(
-        "--mvq-loss-by-task",
+        "--loss-only-mask",
         type=str2bool,
-        default=True,
-        help="If True, only compute MVQ loss on the task from which the sample is drawn."
-        "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
+        default=False,
+        help="If True, only compute loss on the masked indices"
+    )
+    
+    parser.add_argument(
+        "--mask-mode",
+        type=str,
+        default="w2v2",
+        choices=["w2v2", "block"],
+        help="The masking mode",
+    )
+    
+    parser.add_argument(
+        "--mask-length", type=int, default=10, help="mask_length"
+    )
+
+    parser.add_argument(
+        "--mask-prob",
+        type=float,
+        default=0.65,
+        help="probability of replacing a token with mask",
+    )
+
+    parser.add_argument(
+        "--mask-selection",
+        type=str,
+        choices=["static", "uniform", "normal", "poisson"],
+        default="static",
+        help="how to choose mask length",
+    )
+
+    parser.add_argument(
+        "--mask-other",
+        type=float,
+        default=0,
+        help="secondary mask argument (used for more complex distributions),see help in compute_mask_indicesh",
+    )
+    
+    parser.add_argument(
+        "--mask-channel-length", type=int, default=15, help="mask_length"
+    )
+    
+    parser.add_argument(
+        "--mask-channel-prob",
+        type=float,
+        default=0.0,
+        help="probability of replacing a channel with mask",
     )
     
 
@@ -678,7 +730,7 @@ def get_encoder_model(params: AttributeDict) -> nn.Module:
     return encoder
 
 
-def get_model(params: AttributeDict) -> MultiKDModel:
+def get_model(params: AttributeDict) -> nn.Module:
 
     encoder_embed = get_encoder_embed(params)
     encoder = get_encoder_model(params)
@@ -694,6 +746,10 @@ def get_model(params: AttributeDict) -> MultiKDModel:
                 f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
                 "However, the output downsampling factor is 1. This could be wrong!"
             )
+    
+    assert params.enable_spec_aug == False, "Should not use specaug when using w2v2 style masking"
+    if params.loss_only_mask:
+        logging.info("Only computing loss on the masked positions")
 
     model = MultiKDModel(
         encoder_embed=encoder_embed,
@@ -704,6 +760,14 @@ def get_model(params: AttributeDict) -> MultiKDModel:
         distillation_delta=params.distillation_delta,
         interpolate_teacher=params.interpolate_teacher,
         teacher_frame_ratio=params.teacher_frame_ratio,
+        mask_mode=params.mask_mode,
+        mask_prob=params.mask_prob,
+        mask_length=params.mask_length,
+        mask_selection=params.mask_selection,
+        mask_other=params.mask_other,
+        mask_channel_prob=params.mask_channel_prob,
+        mask_channel_length=params.mask_channel_length,
+        loss_only_mask=params.loss_only_mask,
     )
     return model
 
@@ -889,12 +953,6 @@ def compute_loss(
     # mvq tokens
     mvq_tokens = batch["cb_indexes"].to(device)
     
-    # audio tagging label
-    if params.do_audio_tagging:
-        at_targets = batch["at_targets"].to(device) # the label indices are in CED format
-    else:
-        at_targets = None
-    
     # potentially perform specaug for co-training
     use_co_training = params.use_co_training and is_training
     use_spec_aug = use_co_training and is_training
@@ -913,7 +971,13 @@ def compute_loss(
         
     if use_co_training:
         task_ids = task_ids.repeat(2)
-        
+    
+    # audio tagging label
+    if params.do_audio_tagging:
+        at_targets = batch["at_targets"].to(device) # the label indices are in CED format
+    else:
+        at_targets = None
+    
     with torch.set_grad_enabled(is_training):
         mvq_loss, audio_tagging_loss, co_training_loss = model(
             x=feature,
@@ -927,17 +991,15 @@ def compute_loss(
         )
 
         loss = 0.0
+
         # task_id=1: ASR data
         # task_id=2: AT data
 
         # MVQ loss 
         if params.do_mvq:
-            if params.mvq_loss_by_task:
-                mask = task_ids == 1 # ASR=1
-                mvq_loss = (mvq_loss * mask).sum()
-            else:
-                mvq_loss = mvq_loss.sum()
-            loss += mvq_loss
+            # mask = task_ids == 1 # ASR=1
+            mvq_loss = mvq_loss.sum()
+            loss += mvq_loss # compute loss on all samples
             
             # co-training loss is computed on all data
             if use_co_training:
@@ -1068,12 +1130,27 @@ def train_one_epoch(
             scaler=scaler,
             rank=0,
         )
+        
+    def estimate_cur_epoch(max_duration: float, world_size: int, steps: int, train_hrs: int):
+        estimated_hours = max_duration * world_size * steps / 3600
+        estimated_epochs = estimated_hours // train_hrs
+        return estimated_epochs
 
     shard_count = {}
+    cur_epoch = 0
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
 
+        if params.use_shar:
+            est_epoch = estimate_cur_epoch(
+                params.max_duration, world_size, params.batch_idx_train, params.train_duration
+            )
+            if est_epoch > cur_epoch:
+                cur_epoch = est_epoch
+                scheduler.step_epoch(cur_epoch) # start from 1
+                logging.info(f"Estimated epoch: {cur_epoch}")
+        
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
     
@@ -1093,11 +1170,7 @@ def train_one_epoch(
                 count[sh] += 1
                 
             if batch_idx % 200 == 1:
-                shard_epoch = [int(c.shar_epoch) for c in cuts]
-                max_epoch = max(shard_epoch)
-                logging.info(f"Estimated epoch is {max_epoch}")
                 logging.info(count)
-                logging.info(f"All shards source by far: {shard_count}")
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -1169,12 +1242,11 @@ def train_one_epoch(
             if cur_grad_scale < 8.0 or (cur_grad_scale < 32.0 and batch_idx % 400 == 0):
                 scaler.update(cur_grad_scale * 2.0)
             if cur_grad_scale < 0.01:
-                # if not saved_bad_model:
-                #     save_bad_model(suffix="-first-warning")
-                #     saved_bad_model = True
+                if not saved_bad_model:
+                    save_bad_model(suffix="-first-warning")
                 logging.warning(f"Grad scale is small: {cur_grad_scale}")
             if cur_grad_scale < 1.0e-05:
-                save_bad_model()
+                # save_bad_model()
                 raise RuntimeError(
                     f"grad_scale is too small, exiting: {cur_grad_scale}"
                 )
@@ -1252,7 +1324,9 @@ def run(rank, world_size, args):
 
     fix_random_seed(params.seed)
     if world_size > 1:
-        rank = setup_distributed()
+        local_rank = setup_distributed()
+    else:
+        local_rank = rank
 
     setup_logger(f"{params.exp_dir}/log/log-train")
     logging.info("Training started")
@@ -1264,7 +1338,7 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = torch.device("cuda", local_rank)
     logging.info(f"Device: {device}")
 
     sp = None
@@ -1281,7 +1355,7 @@ def run(rank, world_size, args):
     if params.use_co_training:
         assert params.enable_spec_aug == False, "When performing co-training, we apply specaugment inside the forward function of the model"
         specaug = get_spec_augment(params)
-        logging.info("We will perform spec augment for co-training")
+        logging.info("We will put specaug (if used) inside the model for co-training")
     else:
         specaug = None
 
@@ -1441,21 +1515,22 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(chinese_cut_durations)
     
     # combine the asr data into a BIG cut
-    assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
-    if len(asr_training_cuts) > 1:
-        asr_training_cuts = CutSet.mux(
-            *asr_training_cuts,
-            weights=asr_training_cuts_lens,
-            stop_early=False,
-        )
-    else:
-        asr_training_cuts = asr_training_cuts[0]
+    if len(asr_training_cuts) >= 1:
+        # assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
+        if len(asr_training_cuts) > 1:
+            asr_training_cuts = CutSet.mux(
+                *asr_training_cuts,
+                weights=asr_training_cuts_lens,
+                stop_early=False,
+            )
+        else:
+            asr_training_cuts = asr_training_cuts[0]
     
-    train_cuts["cuts_asr"] = asr_training_cuts
-    train_cuts_duration.append(sum(asr_training_cuts_duration))
+        train_cuts["cuts_asr"] = asr_training_cuts
+        train_cuts_duration.append(sum(asr_training_cuts_duration))
     
     # audio data
-    if params.use_audioset and params.do_audio_tagging:
+    if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
             audioset_cuts = librispeech.audioset_cuts().repeat(
@@ -1482,6 +1557,7 @@ def run(rank, world_size, args):
     
     logging.info(train_cuts)
     logging.info(train_cuts_duration)
+    params.train_duration = sum(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
         if c.duration < 0.98 or c.duration > 29.9:
@@ -1584,10 +1660,10 @@ def run(rank, world_size, args):
             params=params,
             model=model,
             model_avg=model_avg,
-            specaug=specaug,
             optimizer=optimizer,
             scheduler=scheduler,
             sp=sp,
+            specaug=specaug,
             train_dl=train_dl,
             valid_sets=valid_sets,
             valid_dls=valid_dls,

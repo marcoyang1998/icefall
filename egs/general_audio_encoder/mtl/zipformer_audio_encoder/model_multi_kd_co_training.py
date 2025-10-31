@@ -18,6 +18,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import random
 from typing import Optional, Tuple
 
 import torch
@@ -26,6 +28,7 @@ import torch.nn.functional as F
 from lhotse.dataset import SpecAugment
 from multi_quantization2 import JointCodebookLoss
 
+from model_multi_kd_w2v2_mask import compute_mask_indices, compute_mask_indices_block, index_put
 from icefall.utils import make_pad_mask
 
 
@@ -35,18 +38,26 @@ class MultiKDModel(nn.Module):
         encoder_embed: nn.Module,
         encoder: nn.Module,
         encoder_dim: int,
+        n_mels: int = 128,
         num_codebooks: int=8,
         distillation_layer: int=9,
         distillation_delta: int=0,
         teacher_frame_ratio: int = 2,
         interpolate_teacher: bool = False,
         num_events: int = 527,
+        mask_mode: str = "w2v2",
+        mask_prob: float = 0.65,
+        mask_length: int = 10,
+        mask_selection: str = "static",
+        mask_other: float = 0.0,
+        min_masks: int = 2,
+        mask_channel_prob: float = 0.0,
+        mask_channel_length: int = 10,
+        mask_channel_selection: str = "static",
+        mask_channel_other: float = 0.0,
+        loss_only_mask: bool = False,
     ):
-        """A joint CTC & Transducer ASR model.
-
-        - Connectionist temporal classification: labelling unsegmented sequence data with recurrent neural networks (http://imagine.enpc.fr/~obozinsg/teaching/mva_gm/papers/ctc.pdf)
-        - Sequence Transduction with Recurrent Neural Networks (https://arxiv.org/pdf/1211.3711.pdf)
-        - Pruned RNN-T for fast, memory-efficient ASR training (https://arxiv.org/pdf/2206.13236.pdf)
+        """A model that performs MVQ KD pre-training .
 
         Args:
           encoder_embed:
@@ -58,20 +69,25 @@ class MultiKDModel(nn.Module):
             two inputs: `x` of (N, T, encoder_dim) and `x_lens` of shape (N,).
             It returns two tensors: `logits` of shape (N, T, encoder_dim) and
             `logit_lens` of shape (N,).
-          decoder:
-            It is the prediction network in the paper. Its input shape
-            is (N, U) and its output shape is (N, U, decoder_dim).
-            It should contain one attribute: `blank_id`.
-            It is used when use_transducer is True.
-          joiner:
-            It has two inputs with shapes: (N, T, encoder_dim) and (N, U, decoder_dim).
-            Its output shape is (N, T, U, vocab_size). Note that its output contains
-            unnormalized probs, i.e., not processed by log-softmax.
-            It is used when use_transducer is True.
-          use_transducer:
-            Whether use transducer head. Default: True.
-          use_ctc:
-            Whether use CTC head. Default: False.
+          num_codebooks:
+            The number of codebooks used in the target
+          distillation_layer:
+            Use which layer to do MVQ pre-training
+          distillation_delta:
+            How many frames to delay the alignment between the model and the target frames.
+            Should be zero for non-streaming models, and a positive number for streaming models
+          teacher_frame_ratio:
+            The frame rate ratio between the target and the model output
+          mask_mode:
+            The masking mode.
+                w2v2: the wav2vec2 style of masking, allows overlap
+                custom: no overlap, therefore bigger masking ratio 
+          mask_prob:
+            The probability of selecting choosing one frame as the start index
+          mask_length:
+            The length of each mask
+          mask_selection:
+            How to determine the length of the mask, see ``compute_mask_indices''
         """
         super().__init__()
 
@@ -104,6 +120,24 @@ class MultiKDModel(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(encoder_dim, num_events),
         ) # 527 classes
+        
+        # masking related
+        assert mask_mode in ["w2v2", "block"], f"Unseen mask mode: {mask_mode}"
+        self.mask_mode = mask_mode
+        
+        self.mask_emb = nn.Parameter(torch.FloatTensor(n_mels).normal_()) 
+        self.mask_prob = mask_prob
+        self.mask_length = mask_length
+        self.mask_selection = mask_selection
+        self.mask_other = mask_other
+        self.min_masks = min_masks
+        
+        self.mask_channel_prob = mask_channel_prob
+        self.mask_channel_length = mask_channel_length
+        self.mask_channel_selection = mask_channel_selection
+        self.mask_channel_other = mask_channel_other
+        
+        self.loss_only_mask = loss_only_mask
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -146,6 +180,7 @@ class MultiKDModel(nn.Module):
         use_spec_aug: bool = False,
         spec_augment: Optional[SpecAugment] = None,
         supervision_segments: Optional[torch.Tensor] = None,
+        mask: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -172,29 +207,38 @@ class MultiKDModel(nn.Module):
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         assert codebook_indexes is not None or at_targets is not None
-
+        
         # create a another copy of augmented input
         if use_co_training:
-            if use_spec_aug:
-                assert spec_augment is not None
-                # Apply time warping before input duplicating
-                assert supervision_segments is not None
-                # Independently apply frequency masking and time masking to the two copies
-                x = spec_augment(x.repeat(2, 1, 1))
-            else:
-                x = x.repeat(2, 1, 1)
+            x = x.repeat(2, 1, 1)
             
             x_lens = x_lens.repeat(2)
             if codebook_indexes is not None:
                 codebook_indexes = codebook_indexes.repeat(2,1,1)
             if at_targets is not None:
                 at_targets = at_targets.repeat(2,1)
+            
+        # first repeat, than apply masking
+        if self.training and mask:
+            padding_mask = make_pad_mask(x_lens)
+            
+            # apply masking to the fbank features
+            x, mask_indices = self.apply_mask(
+                x.clone(),
+                padding_mask=padding_mask
+            ) # (N,T,C), (N,T)
+        else:
+            mask_indices = None
         
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
         if codebook_indexes is not None and self.codebook_loss_net is not None:
-            codebook_loss, logprobs = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes)
+            codebook_loss, logprobs = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes, reduction="none")
+            if self.loss_only_mask and mask_indices is not None:
+                ds_mask_indices = self.downsample_mask_indices(mask_indices, encoder_out_lens)
+                codebook_loss = codebook_loss * ds_mask_indices
+            codebook_loss = codebook_loss.sum(dim=1) # (B,)
             if use_co_training:
                 codebook_loss *= 0.5
         else:
@@ -209,7 +253,8 @@ class MultiKDModel(nn.Module):
             at_loss = None
         
         if use_co_training:
-            co_training_loss = self.forward_co_training_loss(logprobs, encoder_out_lens)
+            ds_mask_indices = self.downsample_mask_indices(mask_indices, encoder_out_lens)
+            co_training_loss = self.forward_co_training_loss(logprobs, encoder_out_lens, mask_indices=None)
             co_training_loss *= 0.5
         else:
             co_training_loss = None
@@ -220,7 +265,13 @@ class MultiKDModel(nn.Module):
         self,
         logits: torch.Tensor,
         encoder_out_lens: torch.Tensor,
+        mask_indices: torch.Tensor = None,
     ):
+        """Compute the co-training loss
+        logits: The encoder output logits
+        encoder_out_lens: the valid output length of the encoder features
+        mask_indices: optional
+        """
         logits = logits.log_softmax(dim=-1)
         exchanged_targets = logits.detach().chunk(2, dim=0) # split into two halves
         exchanged_targets = torch.cat(
@@ -249,6 +300,7 @@ class MultiKDModel(nn.Module):
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
+        reduction: str = "sum",
     ):
         # align the encoder features with the codebook indexes
         if self.interpolate_teacher:
@@ -273,9 +325,14 @@ class MultiKDModel(nn.Module):
         N,T,_ = encoder_out.shape
         codebook_loss, logprobs = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
-        num_cb = codebook_loss.size(-1) * (2 / self.teacher_frame_ratio) # TODO: ugly way to keep the value comparable, need to change
+        num_cb = codebook_loss.size(-1)
         # normalize the loss by the number of codebooks
-        codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb
+        if reduction == "sum":
+            codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb # (B,)
+        elif reduction == "none":
+            codebook_loss = codebook_loss.sum(dim=2) / num_cb # (B,T)
+        else:
+            raise NotImplementedError()
         
         return codebook_loss, logprobs
 
@@ -299,8 +356,123 @@ class MultiKDModel(nn.Module):
 
         return at_loss
     
+    def apply_mask(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply mask according to the mask_mode, return the masked features and the masked positions
+
+        Args:
+            x (torch.Tensor): The input fbank features
+            padding_mask (torch.Tensor, optional): The padding mask
+
+        Returns:
+            The masked fbank feature and the masked_indices, with masked positions as 1
+        """
+        # apply mask to the fbank features, two modes applicable
+        if self.mask_mode == "w2v2":
+            x, masked_indices = self.apply_mask_w2v2(x, padding_mask)
+        elif self.mask_mode == "block":
+            x, masked_indices = self.apply_mask_block(x, padding_mask)
+        else:
+            raise NotImplementedError()
+        
+        if random.random() > 0.97:
+            logging.info(f"Apply {self.mask_mode} masking. A proportion of {masked_indices.sum()/masked_indices.numel():.2f} frames are masked")
+        return x, masked_indices
+    
+    def apply_mask_block(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ):
+        B,T,C = x.shape
+        assert self.mask_prob > 0.0
+
+        mask_indices = compute_mask_indices_block(
+            shape=(B,T),
+            padding_mask=padding_mask,
+            mask_prob=self.mask_prob,
+            mask_length=self.mask_length,
+            min_masks=self.min_masks,
+        ).to(x.device)
+        
+        x = index_put(x, mask_indices.bool(), self.mask_emb)
+
+        return x, mask_indices
+    
+    def apply_mask_w2v2(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ):
+        # this function is modified from fairseq: https://github.com/facebookresearch/fairseq/blob/bedb259bf34a9fc22073c13a1cee23192fa70ef3/fairseq/models/wav2vec/wav2vec2.py#L429
+        # The masked indices have value 1
+        B, T, C = x.shape
+        
+        # we mask channel first, then mask timestamps
+        if self.mask_channel_prob > 0:
+            mask_channel_indices = compute_mask_indices(
+                (B, C),
+                None,
+                self.mask_channel_prob,
+                self.mask_channel_length,
+                self.mask_channel_selection,
+                self.mask_channel_other,
+                no_overlap=False,
+                min_space=1,
+                require_same_masks=False,
+            )
+            mask_channel_indices = (
+                torch.from_numpy(mask_channel_indices)
+                .to(x.device)
+                .unsqueeze(1)
+                .expand(-1, T, -1)
+            )
+            if random.random() > 0.98:
+                logging.info(f"A proportion of {mask_channel_indices.sum()/mask_channel_indices.numel():.2f} feature dims are masked")
+            x[mask_channel_indices] = 0
+
+        if self.mask_prob > 0:
+            mask_indices = compute_mask_indices(
+                (B, T),
+                padding_mask,
+                self.mask_prob,
+                self.mask_length,
+                mask_type=self.mask_selection,
+                mask_other=self.mask_other,
+                min_masks=2, # fixed
+                no_overlap=False,  # False
+                min_space=1,  # 1
+                require_same_masks=False,
+            )
+            mask_indices = torch.from_numpy(mask_indices).to(x.device)
+            x = index_put(x, mask_indices, self.mask_emb)
+            mask_indices = mask_indices.float()
+        else:
+            mask_indices = None
+
+        return x, mask_indices
+    
+    def downsample_mask_indices(
+        self, mask_indices: torch.Tensor, encoder_out_lens: torch.Tensor
+    ):
+        # mask_indices: (N,T)
+        # encoder_out_lens: (N,)
+        # we assume that the encoder_embed is the Conv2dSubsampling
+        ds_factor = 2 * self.encoder.output_downsampling_factor
+        mask_indices = nn.functional.avg_pool1d(mask_indices[:, 2:-2], ds_factor) >= 0.5 # because we don't use padding
+        diff = mask_indices.shape[1] - encoder_out_lens.max()
+        assert diff >= 0, f"{mask_indices.shape[1]}, {encoder_out_lens.max()}"
+        if diff >= 2:
+            logging.info(f"Big difference between the downsample mask and the actual output length: {diff}")
+        mask_indices = mask_indices[:, diff:] # trunc
+        
+        return mask_indices
+    
     @staticmethod
-    def interpolate_codebook_indexes(middle_layer_output, codebook_indexes):
+    def interpolate_codebook_indexes(middle_layer_output: torch.Tensor, codebook_indexes: torch.Tensor):
         # This function addresses the case where the teacher has a lower frame rate
         # than the student model
         t_expected = middle_layer_output.shape[1]
@@ -349,129 +521,3 @@ class MultiKDModel(nn.Module):
         codebook_indexes = codebook_indexes.reshape(N, t_expected, C * ratio)
         assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
         return codebook_indexes
-    
-class AudioTaggingModel(nn.Module):
-    def __init__(
-        self,
-        encoder_embed: nn.Module,
-        encoder: nn.Module,
-        encoder_dim: int = 384,
-        num_events: int = 527,
-    ):
-        """An audio tagging model
-
-        Args:
-          encoder_embed:
-            It is a Convolutional 2D subsampling module. It converts
-            an input of shape (N, T, idim) to an output of of shape
-            (N, T', odim), where T' = (T-3)//2-2 = (T-7)//2.
-          encoder:
-            It is the transcription network in the paper. Its accepts
-            two inputs: `x` of (N, T, encoder_dim) and `x_lens` of shape (N,).
-            It returns two tensors: `logits` of shape (N, T, encoder_dim) and
-            `logit_lens` of shape (N,).
-          encoder_dim:
-            Dimension of the encoder.
-          num_event:
-            The number of classes.
-        """
-        super().__init__()
-
-        self.encoder_embed = encoder_embed
-        self.encoder = encoder
-        self.encoder_dim = encoder_dim
-
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(encoder_dim, num_events),
-        )
-
-        # for multi-class classification
-        self.criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
-
-    def forward_encoder(
-        self, x: torch.Tensor, x_lens: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute encoder outputs.
-        Args:
-          x:
-            A 3-D tensor of shape (N, T, C).
-          x_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-
-        Returns:
-          encoder_out:
-            Encoder output, of shape (N, T, C).
-          encoder_out_lens:
-            Encoder output lengths, of shape (N,).
-        """
-        # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
-        x, x_lens = self.encoder_embed(x, x_lens)
-        # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
-
-        src_key_padding_mask = make_pad_mask(x_lens)
-        x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
-
-        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
-
-        encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
-        assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
-
-        return encoder_out, encoder_out_lens
-
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        x_lens: torch.Tensor,
-        target: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Args:
-          x:
-            A 3-D tensor of shape (N, T, C).
-          x_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-          target:
-            The ground truth label of audio events, could be many hot
-        Returns:
-          Return the binary crossentropy loss
-        """
-        assert x.ndim == 3, x.shape
-        assert x_lens.ndim == 1, x_lens.shape
-
-        # Compute encoder outputs
-        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
-
-        # Forward the speaker module
-        logits = self.forward_audio_tagging(
-            encoder_out=encoder_out, encoder_out_lens=encoder_out_lens
-        )  # (N, num_classes)
-
-        loss = self.criterion(logits, target)
-
-        return loss
-
-    def forward_audio_tagging(self, encoder_out, encoder_out_lens):
-        """
-        Args:
-          encoder_out:
-            A 3-D tensor of shape (N, T, C).
-          encoder_out_lens:
-            A 1-D tensor of shape (N,). It contains the number of frames in `x`
-            before padding.
-
-        Returns:
-          A 3-D tensor of shape (N, num_classes).
-        """
-        logits = self.classifier(encoder_out)  # (N, T, num_classes)
-        padding_mask = make_pad_mask(encoder_out_lens)
-        logits[padding_mask] = 0
-        logits = logits.sum(dim=1)  # mask the padding frames
-        logits = logits / (~padding_mask).sum(dim=1).unsqueeze(-1).expand_as(
-            logits
-        )  # normalize the logits
-
-        return logits
