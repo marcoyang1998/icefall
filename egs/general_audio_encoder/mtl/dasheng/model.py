@@ -23,7 +23,7 @@ import torch.nn as nn
 
 PRETRAINED_CHECKPOINTS = {
     'dasheng_base':
-    'https://zenodo.org/records/11511780/files/dasheng_base.pt?download=1',
+    'download/models/dasheng_base.pt',
     'dasheng_06B':
     'download/models/dasheng_06b.pt',
     'dasheng_12B':
@@ -70,7 +70,10 @@ class DashengEncoder(nn.Module):
         self.model = get_encoder_model(model_version)
         
     def get_embeddings(self, audio, audio_lens, layer_idx=-1):
-        x = self.model(audio, layer_idx=layer_idx) # (B,T,C)
+        try:
+            x = self.model(audio, layer_idx=layer_idx) # (B,T,C)
+        except TypeError:
+            x = self.model(audio)
         x_lens = (audio_lens / 16000 * 25).int() # the frame rate is 25 Hz
         
         return x, x_lens

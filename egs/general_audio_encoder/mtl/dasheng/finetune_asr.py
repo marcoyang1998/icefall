@@ -185,12 +185,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
-        "--encoder-dim",
-        type=int,
-        default=768,
-    )
-    
-    parser.add_argument(
         "--post-norm",
         type=str2bool,
         default=False,
@@ -559,6 +553,14 @@ def get_model(params: AttributeDict) -> nn.Module:
     )
 
     encoder = get_encoder_model(params)
+    if params.model_version == "base":
+        params.encoder_dim = 768
+    elif params.model_version == "medium":
+        params.encoder_dim = 1280
+    elif params.model_version == "large":
+        params.encoder_dim = 1536
+    else:
+        raise ValueError(f"Unknown model version: {params.model_version}")
 
     if params.use_transducer:
         decoder = get_decoder_model(params)
