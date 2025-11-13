@@ -16,8 +16,15 @@ run/finetune*.sh
 zipformer_audio_encoder_finetune
 zipformer_compare
 hubert/*.sh
-dasheng/*.sh
 wavlm/*.sh
 whisper/*.sh
 models
+my-spear-model/
 test_*.py
+download2/
+download3/
+mount*.sh
+hubert/embeddings/
+submit*.sh
+test*.sh
+debug*.sh
