@@ -19,6 +19,7 @@
 # limitations under the License.
 
 from typing import Optional, Tuple
+import warnings
 
 import torch
 import torch.nn as nn
@@ -27,6 +28,7 @@ from multi_quantization.prediction import JointCodebookLoss
 
 from icefall.utils import make_pad_mask
 
+from model_multi_kd_multi_teacher import SimpleDownsample
 
 class MultiKDModel(nn.Module):
     def __init__(
@@ -38,7 +40,9 @@ class MultiKDModel(nn.Module):
         distillation_delta: int=0,
         teacher_frame_ratio: int = 2,
         interpolate_teacher: bool = False,
-        num_events: int = 527
+        num_events: int = 527,
+        output_downsampling_factor: int = 1,
+        loss_only_mask: bool = False,
     ):
         """A MVQ pretrained encoder
 
@@ -88,10 +92,20 @@ class MultiKDModel(nn.Module):
         else:
             self.codebook_loss_net = None
         
+        self.output_downsampling_factor = output_downsampling_factor
+        if self.output_downsampling_factor > 1:
+            self.downsample_output = SimpleDownsample(
+                encoder_dim, downsample=self.output_downsampling_factor,
+            )
+        else:
+            self.downsample_output = None
+        
         self.audio_tagging_proj = nn.Sequential(
             nn.Dropout(0.1),
             nn.Linear(encoder_dim, num_events),
         ) # 527 classes
+        
+        self.loss_only_mask = loss_only_mask
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
@@ -113,6 +127,14 @@ class MultiKDModel(nn.Module):
         src_key_padding_mask = make_pad_mask(x_lens)
         encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask) # (N,T,C)
 
+        if self.output_downsampling_factor >= 2:
+            encoder_out = encoder_out.transpose(0,1)  # (T,N,C)
+            encoder_out = self.downsample_output(encoder_out)
+            encoder_out = encoder_out.transpose(0,1)  # (N,T,C)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                encoder_out_lens = (encoder_out_lens + 1) // 2
+        
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
         return encoder_out, encoder_out_lens
@@ -152,7 +174,16 @@ class MultiKDModel(nn.Module):
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
         if codebook_indexes is not None and self.codebook_loss_net is not None:
-            codebook_loss = self.forward_codebook_loss(encoder_out, encoder_out_lens, codebook_indexes)
+            codebook_loss = self.forward_codebook_loss(
+                encoder_out, encoder_out_lens, codebook_indexes, reduction="none"
+            )
+            if self.loss_only_mask and mask_indices is not None:
+                # downsample the mask 
+                mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
+                assert mask_indices.size(1) >= codebook_loss.size(1)
+                mask_indices = mask_indices[:, :codebook_loss.size(1)].float()
+                codebook_loss = codebook_loss * mask_indices
+            codebook_loss = codebook_loss.sum(dim=1) # (B,)    
         else:
             codebook_loss = None
         
@@ -168,6 +199,7 @@ class MultiKDModel(nn.Module):
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
+        reduction: str = "sum",
     ):
         # align the encoder features with the codebook indexes
         if self.interpolate_teacher:
@@ -194,7 +226,12 @@ class MultiKDModel(nn.Module):
         codebook_loss = codebook_loss.reshape(N,T,-1)
         num_cb = codebook_loss.size(-1) # TODO: ugly way to keep the value comparable, need to change
         # normalize the loss by the number of codebooks
-        codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb
+        if reduction == "sum":
+            codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb # (B,)
+        elif reduction == "none":
+            codebook_loss = codebook_loss.sum(dim=2) / num_cb # (B,T)
+        else:
+            raise NotImplementedError()
         
         return codebook_loss
 

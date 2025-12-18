@@ -44,6 +44,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
+from augmentations import BatchMixing
 from dataset_waveform import MultiTaskKDDataset
 from icefall.utils import str2bool
 
@@ -144,6 +145,16 @@ class MultiTaskDataModule:
             "(you might want to increase it for larger datasets).",
         )
         group.add_argument(
+            "--sync-buckets",
+            type=str2bool,
+            default=True,
+        )
+        group.add_argument(
+            "--merge-buckets",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
             "--zip-sampler",
             type=str2bool,
             default=False,
@@ -209,6 +220,57 @@ class MultiTaskDataModule:
             default=2,
             help="The number of training dataloader workers that "
             "collect the batches.",
+        )
+        
+        group.add_argument(
+            "--batch-mixing",
+            type=str2bool,
+            default=False,
+        )
+        
+        group.add_argument(
+            "--batch-mixing-mode",
+            type=str,
+            default="batch",
+            choices=["batch", "musan"],
+        )
+        
+        group.add_argument(
+            "--mixing-prob",
+            type=float,
+            default=0.5,
+            help="""The mixing probability, applicable to both musan and in-batch mixing.
+            In musan, it means the noise mixing prob. In batch mixing, it means the augmentation 
+            prob, consisting of both in-batch mixing and noise mixing.
+            """
+        )
+        
+        group.add_argument(
+            "--p-noise",
+            type=float,
+            default=0.0,
+            help="The probability of mixing noise from non speech noise. Only applicable to in-batch mixing"
+        )
+        
+        group.add_argument(
+            "--min-snr",
+            type=float,
+            default=10,
+            help="The minimum SNR used in noise mixing."
+        )
+        
+        group.add_argument(
+            "--min-noise-snr",
+            type=float,
+            default=-5,
+            help="The minimum SNR used in noise mixing from non-speech noise. Only used in BatchMixing"
+        )
+        
+        group.add_argument(
+            "--max-snr",
+            type=float,
+            default=20,
+            help="The minimum SNR used in noise mixing."
         )
 
         group.add_argument(
@@ -281,7 +343,7 @@ class MultiTaskDataModule:
         group.add_argument(
             "--at-KD",
             type=str2bool,
-            default=True,
+            default=False,
             help="If load the logits instead of ground truth of audio events"
         )
         
@@ -358,6 +420,21 @@ class MultiTaskDataModule:
         
         group.add_argument(
             "--use-extra-english-dataset",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
+            "--use-voxpopuli",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
+            "--voxpopuli-subset",
+            type=str,
+            default="en_v2",
+        )
+        group.add_argument(
+            "--use-commonvoice",
             type=str2bool,
             default=False,
         )
@@ -447,14 +524,36 @@ class MultiTaskDataModule:
             )
         
         if self.args.enable_musan:
-            logging.info("Enable MUSAN")
+            assert not self.args.batch_mixing, "Do not use musan and in-batch mixing together!"
+            logging.info(f"Enable MUSAN with minimum SNR={self.args.min_snr}, max SNR={self.args.max_snr}, mixing prob: {self.args.mixing_prob}")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
+            cuts_musan = load_manifest("data/musan/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
-                CutMix(cuts=cuts_musan, p=0.5, snr=(10, 20), preserve_id=True)
+                CutMix(
+                    cuts=cuts_musan, p=self.args.mixing_prob, snr=(self.args.min_snr, self.args.max_snr), 
+                    preserve_id=True, pad_to_longest=False
+                )
             )
         else:
             logging.info("Disable MUSAN")
+            
+        if self.args.batch_mixing:
+            assert not self.args.enable_musan, "Do not use musan and in-batch mixing together!"
+            if self.args.p_noise > 0.0:
+                noise_cuts = load_manifest("data/musan/audioset_non_human.jsonl.gz").drop_features()
+                logging.info(f"Get the noise cuts for batch mixing as well")
+            else:
+                noise_cuts = None
+            t = BatchMixing(
+                min_snr=self.args.min_snr, 
+                max_snr=self.args.max_snr,
+                p=self.args.mixing_prob,
+                min_noise_snr=self.args.min_noise_snr,
+                p_noise=self.args.p_noise,
+                noise_cuts=noise_cuts,
+            )
+            transforms.append(t)
+            logging.info(f"Performing batch mixing: {t}")
 
         if self.args.concatenate_cuts:
             logging.info(
@@ -967,6 +1066,38 @@ class MultiTaskDataModule:
     def wenetspeech_test_meeting_cuts(self) -> CutSet:
         logging.info("About to get TEST_MEETING cuts")
         return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_TEST_MEETING.jsonl.gz")
+    
+    @lru_cache()
+    def commonvoice_en_train_cuts(self) -> CutSet:
+        logging.info("About to get CommonVoice English train cuts")
+        if self.args.use_shar:
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/commonvoice/en/train",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            cuts = cuts.resample(16000)
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "commonvoice_en_cuts_train.jsonl.gz"
+            ).resample(16000)
+    
+    def voxpopuli_unlabelled_cuts(self) -> CutSet:
+        if self.args.use_shar:
+            logging.info(f"Loading the unlabelled voxpopuli data: {self.args.voxpopuli_subset}")
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.shar_dir)}/voxpopuli/{self.args.voxpopuli_subset}/",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            cuts_train = load_manifest_lazy(
+                self.args.manifest_dir / f"voxpopuli_cuts_{self.args.voxpopuli_subset}.jsonl.gz"
+            )
+            return cuts_train
     
     @lru_cache()
     def mls_cuts(self) -> CutSet:

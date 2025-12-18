@@ -113,20 +113,6 @@ class CodebookCache:
         with cls.__lock:
             cls.__cache_dict.clear()
 
-def str2multihot(events: List[str], n_classes=527, id_mapping=None):
-    # generate multi-hot class labels
-    if not isinstance(events, list):
-        events = [events]
-    labels = [list(map(int, event.split(";"))) for event in events]
-    batch_size = len(labels)
-    out = torch.zeros(batch_size, n_classes)
-
-    for i, label in enumerate(labels):
-        if id_mapping is not None:
-            label = [id_mapping[l] for l in label]
-        out[i, label] = 1
-
-    return out, labels
 
 def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     # generate multi-hot class labels
@@ -233,11 +219,6 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # throughout the epoch. It regularly closes open file handles to
         # reset the internal HDF5 caches.
         self.hdf5_fix = Hdf5MemoryIssueFix(reset_interval=100)
-        
-        self.enable_cache = enable_cache
-        if self.enable_cache:
-            CodebookCache.enable()
-            assert CodebookCache.enabled()
 
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         """
@@ -351,17 +332,13 @@ def validate_multi_kd(cuts: CutSet) -> None:
 
 def load_codebook_indexes(c):
     info = c.codebook_indexes
-    cached_cb = CodebookCache.try_cache(c.supervisions[0].id) # we use supervision ID rather than cut id because cuts.repeat() ruins the cut id
-    if cached_cb is not None:
-        return cached_cb
+    if isinstance(info, dict):
+        filename = info["path"]
+        cb_indexes = np.load(filename)
     else:
-        if isinstance(info, dict):
-            filename = info["path"]
-            cb_indexes = np.load(filename)
-        else:
-            cb_indexes = c.load_custom("codebook_indexes")
-        CodebookCache.add_to_cache(c.supervisions[0].id, cb_indexes)
-        return cb_indexes
+        cb_indexes = c.load_custom("codebook_indexes")
+    return cb_indexes
+    
        
 def _collate_custom_field(
     cuts: CutSet, 

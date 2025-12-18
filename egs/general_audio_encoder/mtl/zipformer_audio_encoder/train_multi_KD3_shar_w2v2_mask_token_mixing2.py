@@ -1036,6 +1036,12 @@ def compute_loss(
     mixed_cb_indexes = batch["mixed_cb_indexes"]
     if mixed_cb_indexes is not None:
         mixed_cb_indexes = mixed_cb_indexes.to(device)
+        
+    # get the loss scale
+    replacement_probs = batch["replacement_probs"].to(device)
+    replacement_probs[replacement_probs == 0.0] = 0.5
+    scale_orig = 1 - replacement_probs
+    scale_mixed = replacement_probs
     
     # audio tagging label
     if params.do_audio_tagging:
