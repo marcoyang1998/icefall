@@ -63,7 +63,6 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-import torch.distributed as dist
 from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut, MonoCut
@@ -78,13 +77,7 @@ from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import (
-    _add_task_id, 
-    MetricsTracker, 
-    setup_distributed,
-    _save_checkpoint,
-    _save_checkpoint_with_global_batch_idx,
-)
+from utils import _add_task_id, MetricsTracker, setup_distributed
 
 from zipformer2 import Zipformer2
 
@@ -339,6 +332,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
+    # mvq related
     parser.add_argument(
         "--do-mvq",
         type=str2bool,
@@ -401,6 +395,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     # mae related
+    parser.add_argument(
+        "--mae-target",
+        type=str,
+        default="mel",
+        choices=["mel", "linear"],
+    )
+    
+    parser.add_argument(
+        "--mae-target-dim",
+        type=int,
+        default=128,
+        help="The dimension of the mae target (frame level)"
+    )
+    
     parser.add_argument(
         "--mae-downsample-factor",
         type=int,
@@ -741,6 +749,12 @@ def get_parser():
         default=True,
         help="If stop early if using mux"
     )
+    
+    parser.add_argument(
+        "--estimate-epoch",
+        type=str2bool,
+        default=True,
+    )
 
     add_finetune_arguments(parser)
     add_model_arguments(parser)
@@ -916,14 +930,16 @@ def get_model(params: AttributeDict) -> nn.Module:
         interpolate_teacher=params.interpolate_teacher,
         teacher_frame_ratio=params.teacher_frame_ratio,
         n_mels=params.feature_dim,
+        mae_target=params.mae_target,
         mae_loss_norm=params.mae_loss_norm,
         mae_downsample_factor=params.mae_downsample_factor,
+        mae_target_dim=params.mae_target_dim,
         mask_prob=params.mask_prob,
         mask_length=params.mask_length,
         mask_selection=params.mask_selection,
+        mask_other=params.mask_other,
         mask_channel_prob=params.mask_channel_prob,
         mask_channel_length=params.mask_channel_length,
-        mask_other=params.mask_other,
         loss_only_mask=params.loss_only_mask,
     )
     return model
@@ -1124,13 +1140,24 @@ def compute_loss(
     cuts = supervisions["cut"]
         
     feature_lens = supervisions["num_frames"].to(device)
-    task_ids = batch["task_ids"].int().to(device) 
+    task_ids = batch["task_ids"].int().to(device)
     
     if random.random() < 0.01 and is_training:
+        cuts = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
         for t in range(1, params.num_tasks+1):
             duration = sum([c.duration for c in cuts if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
             logging.info(f"Total duration of task {t}: {duration}")
+
+    # audio
+    audio = batch["audio"].to(device)
+    if params.mae_target == "linear":
+        if isinstance(model, DDP):
+            mae_target = model.module.mae_target_extractor(audio) # (N,T, feature_dim)
+        else:
+            mae_target = model.mae_target_extractor(audio) # (N,T, feature_dim)
+    else:
+        mae_target = feature.clone()
 
     # mvq tokens
     mvq_tokens = batch["cb_indexes"].to(device)
@@ -1147,7 +1174,7 @@ def compute_loss(
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
-            fbank_target=feature,
+            mae_target=mae_target,
             mask=is_training,
         )
 
@@ -1182,7 +1209,7 @@ def compute_loss(
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
         info["utterances"] = task_ids.size(0)
 
-    # Note: We use reduction=sum while computing the loss
+    # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
@@ -1303,7 +1330,7 @@ def train_one_epoch(
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
-        if params.use_shar:
+        if params.use_shar and params.estimate_epoch:
             est_epoch = estimate_cur_epoch(
                 params.max_duration, world_size, params.batch_idx_train, params.train_duration,
             )
@@ -1379,12 +1406,11 @@ def train_one_epoch(
                 model_cur=model,
                 model_avg=model_avg,
             )
-        
+
         if (
             params.batch_idx_train > 0
             and params.batch_idx_train % params.save_every_n == 0
         ):
-            
             save_checkpoint_with_global_batch_idx(
                 out_dir=params.exp_dir,
                 global_batch_idx=params.batch_idx_train,
@@ -1517,6 +1543,15 @@ def run(rank, world_size, args):
 
     logging.info("About to create model")
     model = get_model(params)
+    
+    if params.mae_target == "linear":
+        from model_multi_kd_mae import LinearSpectrogramTarget_1024
+        params.linear_spectrogram_extractor = LinearSpectrogramTarget_1024()
+        logging.info("Using linear spectrogram as the MAE target")
+    elif params.mae_target == "mel":
+        logging.info(f"Using the mel-spectrogram as the MAE target")
+    else:
+        raise ValueError(f"Unsupported MAE target: {params.mae_target}")
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
@@ -1585,6 +1620,7 @@ def run(rank, world_size, args):
     asr_training_cuts = []
     asr_training_cuts_lens = []
     asr_training_cuts_duration = []
+    
     if params.use_librispeech:
         if not params.full_libri: 
             librispeech_cuts = librispeech.train_clean_100_cuts()
@@ -1598,8 +1634,7 @@ def run(rank, world_size, args):
         asr_training_cuts.append(librispeech_cuts)
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
-        
-    
+
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
@@ -1641,19 +1676,55 @@ def run(rank, world_size, args):
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
         libriheavy_cuts_len = {
-            "small": 122512 * 0.9, # 122512
-            "medium": 996017, # 1093040, fewer after filtering
-            "large": 10093746,
+            "small": 118334,
+            "medium": 1062926,
+            "large": 10796160,
         }
         libriheavy_cuts_duration = {
-            "small": 466,
-            "medium": 4148,
-            "large": 42074,
+            "small": 473,
+            "medium": 4208 + 473,
+            "large": 42683 + 4208 + 473,  # 47364 hrs 
         }
+        def change_to_s3(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/librilight/", 
+                "s3://yangxiaoyu/librilight_split/"
+            )
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            return c
         libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        libriheavy_cuts = libriheavy_cuts.map(change_to_s3)
+        logging.info(libriheavy_cuts[0])
         asr_training_cuts.append(libriheavy_cuts)
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
+    
+    if params.use_voxpopuli:
+        voxpopuli_cuts = librispeech.voxpopuli_unlabelled_cuts()
+        voxpopuli_cuts = voxpopuli_cuts.map(partial(_add_task_id, 1))
+        # vox en unlabelled: 24151 hrs, 3059813 cuts
+        asr_training_cuts.append(voxpopuli_cuts)
+        asr_training_cuts_lens.append(3059813)
+        asr_training_cuts_duration.append(24151)
+        
+    if params.use_yodas:
+        yodas_cuts = librispeech.yodas_granary_cuts()
+        yodas_cuts = yodas_cuts.map(partial(_add_task_id, 1))
+        def change_to_s3_yodas(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "brainllm-h:", 
+                ""
+            )
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            return c
+        yodas_cuts = yodas_cuts.map(change_to_s3_yodas)
+        asr_training_cuts.append(yodas_cuts)
+        asr_training_cuts_lens.append(37965268)
+        asr_training_cuts_duration.append(93784)
     
     if params.use_mls:
         mls_cuts = librispeech.mls_cuts()
@@ -1692,10 +1763,10 @@ def run(rank, world_size, args):
         train_cuts["cuts_asr"] = asr_training_cuts
         train_cuts_duration.append(sum(asr_training_cuts_duration))
     
-    # general audio data
-    if params.do_audio_tagging:
-        assert params.use_audioset, "If we do audio tagging, we must use audioset"
-        
+    # audio data
+    audio_training_cuts = []
+    audio_training_cuts_lens = []
+    audio_training_cuts_duration = []
     if params.use_audioset:
         logging.info(f"Getting audioset cuts")
         if params.repeat_audioset > 1 and not params.use_shar:
@@ -1726,9 +1797,27 @@ def run(rank, world_size, args):
         audioset_cuts = audioset_cuts.map(change_source)
         logging.info(audioset_cuts[0])
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
-        train_cuts["cuts_audioset"] = audioset_cuts
-        train_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
+        audio_training_cuts.append(audioset_cuts)
+        audio_training_cuts_lens.append(num_audio_cuts)
+        audio_training_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
         
+    # combine the audio datasets
+    if len(audio_training_cuts) >= 1:
+        logging.info(f"audio cuts: {audio_training_cuts}")
+        logging.info(f"audio cuts length: {audio_training_cuts_lens}")
+        logging.info(f"audio cuts duration: {audio_training_cuts_duration}")
+        if len(audio_training_cuts) > 1:
+            audio_training_cuts = CutSet.mux(
+                *audio_training_cuts,
+                weights=audio_training_cuts_lens,
+                stop_early=False,
+            )
+        else:
+            audio_training_cuts = audio_training_cuts[0]
+    
+        train_cuts["cuts_audio"] = audio_training_cuts
+        train_cuts_duration.append(sum(audio_training_cuts_duration))    
+    
     assert len(train_cuts) >= 1, "At least one task should be done!"
     
     logging.info(train_cuts)
@@ -1736,9 +1825,8 @@ def run(rank, world_size, args):
     params.train_duration = sum(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 0.98 or c.duration > 29.0:
+        if c.duration < 0.98 or c.duration > 35:
             return False
-
         return True
     
     # If we filter the data and use weighted_sampler, the number of cuts

@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import math
 import random
 from typing import Tuple
 
@@ -51,7 +52,7 @@ class MAELoss(torch.nn.Module):
         
         # compute the MSE loss
         loss = (pred - target)**2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch, normalized by the fbank dim
+        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch, normalized by the feature dim
         return loss
 
 class MultiKDModel(nn.Module):
@@ -72,6 +73,8 @@ class MultiKDModel(nn.Module):
         num_events: int = 527,
         mae_loss_norm: str = "sample",
         mae_downsample_factor: int = 4,
+        mae_target: str = "mel",
+        mae_target_dim: int = 128,
         mask_mode: str = "w2v2",
         mask_prob: float = 0.65,
         mask_length: int = 10,
@@ -115,6 +118,8 @@ class MultiKDModel(nn.Module):
             The length of each mask
           mask_selection:
             How to determine the length of the mask, see ``compute_mask_indices''
+          mae_target_dim:
+            The dimension of the MAE target. 
         """
         super().__init__()
 
@@ -126,9 +131,21 @@ class MultiKDModel(nn.Module):
         self.decoder_dim = decoder_dim
         
         self.fbank_dim = n_mels
+        self.mae_target = mae_target
+        
+        if self.mae_target == "linear":
+            self.mae_target_extractor = LinearSpectrogramTarget_1024()
+            # self.mae_target_extractor = LinearSpectrogramTarget_Unnorm()
+        self.mae_loss_norm = mae_loss_norm
+        self.mae_loss = MAELoss(mae_loss_norm)    
+        self.mae_target_dim = mae_target_dim
+        
         self.mae_downsample_factor = mae_downsample_factor
         self.decoder_embed = nn.Linear(encoder_dim, decoder_input_dim) # projecting encoder_out to decoder dim
-        self.decoder_pred = nn.Linear(decoder_dim, n_mels * mae_downsample_factor) # we are predicting 4 fbank frames per decoder frame
+        self.decoder_pred = nn.Linear(
+            decoder_dim, 
+            mae_target_dim * mae_downsample_factor
+        ) # we are predicting 4 fbank frames per decoder frame
             
         # mvq distillation
         self.distillation_layer = distillation_layer
@@ -149,9 +166,6 @@ class MultiKDModel(nn.Module):
             )
         else:
             self.codebook_loss_net = None
-        
-        self.mae_loss_norm = mae_loss_norm
-        self.mae_loss = MAELoss(mae_loss_norm)
         
         self.audio_tagging_proj = nn.Sequential(
             nn.Dropout(0.1),
@@ -235,7 +249,7 @@ class MultiKDModel(nn.Module):
         )
         pred = self.decoder_pred(decoder_out) # map to 4 * fbank dim
         N,T,_ = pred.shape
-        pred = pred.reshape(N, -1, self.fbank_dim)
+        pred = pred.reshape(N, -1, self.mae_target_dim)
         
         assert pred.shape[2] == target.shape[2]
         target = self.truncate_target(pred, target)
@@ -273,7 +287,7 @@ class MultiKDModel(nn.Module):
         self,
         x: torch.Tensor,
         x_lens: torch.Tensor,
-        fbank_target: torch.Tensor,
+        mae_target: torch.Tensor,
         codebook_indexes: torch.Tensor = None,
         at_targets: torch.Tensor = None,
         mask: bool = True,
@@ -285,7 +299,7 @@ class MultiKDModel(nn.Module):
           x_lens:
             A 1-D tensor of shape (N,). It contains the number of frames in `x`
             before padding.
-          fbank_target:
+          mae_target:
             The original fbank features
           codebook_indexes:
             Codebook indexes of teacher embeddings
@@ -335,8 +349,8 @@ class MultiKDModel(nn.Module):
         else:
             at_loss = None
         
-        mae_loss = self.forward_mae_loss(encoder_out, encoder_out_lens, fbank_target, reduction="none") # (N,T)
-        # we only compute the fbank reconstruction loss on masked positions, regardless of loss_only_mask
+        mae_loss = self.forward_mae_loss(encoder_out, encoder_out_lens, mae_target, reduction="none") # (N,T)
+        # we only compute the reconstruction loss on masked positions, regardless of loss_only_mask
         if mask_indices is not None:
             diff = mask_indices.shape[1] - mae_loss.shape[1]
             if diff > 0:
@@ -556,3 +570,135 @@ class MultiKDModel(nn.Module):
         codebook_indexes = codebook_indexes.reshape(N, t_expected, C * ratio)
         assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
         return codebook_indexes
+
+
+import torchaudio.transforms as T
+
+class BatchAmplitudeToDB(torch.nn.Module):
+    def __init__(self, stype="magnitude", top_db=80):
+        super().__init__()
+        self.stype = stype
+        self.top_db = top_db
+        self.multiplier = 10.0 if stype == "power" else 20.0
+        self.amin = 1e-10  # 防止 log(0)
+        self.ref_value = 1.0 # 假设输入最大幅度大致为1，或者动态计算
+
+    def forward(self, x):
+        # x shape: (Batch, Freq, Frames)
+        
+        # 1. 计算 Log 值
+        # clamp 防止 log(0) -> -inf
+        spec_db = self.multiplier * torch.log10(torch.clamp(x, min=self.amin))
+    
+        if self.top_db is not None:
+            # 2. 关键修改：在 (Freq, Frames) 维度上寻找每个样本的最大值
+            # x.shape[1:] 覆盖了频域和时域，保持 Batch 维度独立
+            # max_val shape: (Batch, 1, 1)
+            max_val = spec_db.flatten(1).max(dim=1)[0].view(x.shape[0], 1, 1)
+            
+            # 3. 对每个样本独立计算阈值
+            cutoff = max_val - self.top_db
+            
+            # 4. 截断
+            spec_db = torch.maximum(spec_db, cutoff)
+            
+        return spec_db
+
+class LinearSpectrogramTarget_1024(torch.nn.Module):
+    def __init__(
+        self, 
+        sample_rate=16000, 
+        n_fft=1024, 
+        win_length=1024, 
+        hop_length=160 
+    ):
+        super().__init__()
+        # 1. 提取线性幅度谱
+        self.spectrogram = T.Spectrogram(
+            n_fft=n_fft,
+            win_length=win_length,
+            hop_length=hop_length,
+            power=1.0, 
+            center=True,
+            pad_mode="reflect", 
+            normalized=False 
+        )
+        
+        # 2. 使用自定义的 Batch-Aware Log 压缩
+        # self.amplitude_to_db = BatchAmplitudeToDB(stype="magnitude", top_db=80)
+        self.amplitude_to_db = T.AmplitudeToDB(stype="magnitude", top_db=80)
+
+    def forward(self, waveform):
+        # waveform: (Batch, Time)
+        
+        # [可选] 处理 Padding 导致的 Reflect 边缘问题
+        # 如果 waveform 是经过补零对齐的，建议在此处使用 mask 或者
+        # 确保输入 waveform 没有多余的 padding 零，或者接受边缘的轻微误差。
+        
+        spec = self.spectrogram(waveform)
+        log_spec = self.amplitude_to_db(spec)
+        
+        return log_spec.transpose(-1, -2)
+    
+class LinearSpectrogramTarget_Unnorm(nn.Module):
+    def __init__(
+        self, 
+        n_fft=1024, 
+        win_length=1024, 
+        hop_length=160,
+        ref_value=1.0,   # 关键参数：满刻度参考值
+        min_db=-80.0     # 关键参数：截断阈值（底噪）
+    ):
+        """
+        Args:
+            ref_value (float): 
+                如果你的 waveform 是 [-1, 1] 的浮点数 (torchaudio.load(normalize=True))，这里设为 1.0。
+                如果你的 waveform 是 [-32768, 32767] 的整数，这里设为 32768.0。
+            min_db (float): 
+                动态范围的下限。低于这个分贝值的信号会被视为静音。
+                通常设为 -80.0 或 -100.0。
+        """
+        super().__init__()
+        
+        # 1. 提取线性幅度谱 (Linear Magnitude Spectrogram)
+        self.spectrogram = T.Spectrogram(
+            n_fft=n_fft,
+            win_length=win_length,
+            hop_length=hop_length,
+            power=1.0,          # 必须使用幅度 (Magnitude) 对应系数 20
+            center=True,
+            pad_mode="reflect",
+            normalized=False    # 注意：这里的 normalized 指的是 STFT 自身的缩放，通常保持 False
+        )
+        
+        self.ref_value = ref_value
+        self.min_db = min_db
+        self.multiplier = 20.0  # Amplitude 用 20，Power 用 10
+
+    def forward(self, waveform):
+        # waveform: (Batch, Time)
+        # 假设 waveform 保留了原始音量差异
+        
+        # 1. 计算线性谱
+        # spec shape: (Batch, n_fft//2 + 1, Frames)
+        spec = self.spectrogram(waveform)
+        
+        # 2. 手动计算 dB (Fixed Reference)
+        # 公式: 20 * log10(spec / ref_value)
+        #     = 20 * log10(spec) - 20 * log10(ref_value)
+        
+        # a. 取对数 (加 clamp 防止 log(0))
+        spec_db = self.multiplier * torch.log10(torch.clamp(spec, min=1e-10))
+        
+        # b. 减去基准值 (Fixed Reference Normalization)
+        # 这确保了 1.0 的信号永远对应 0dB，0.01 的信号对应 -40dB
+        ref_db = self.multiplier * math.log10(self.ref_value)
+        spec_db = spec_db - ref_db
+        
+        # 3. 截断 (Clamping)
+        # 将所有小于 min_db (如 -80dB) 的底噪抹平
+        spec_db = torch.maximum(spec_db, torch.tensor(self.min_db, device=spec_db.device))
+        
+        # 4. 转置以适配 Transformer/Flow Matching
+        # Output: (Batch, Frames, Freq_Bins)
+        return spec_db.transpose(-1, -2)
