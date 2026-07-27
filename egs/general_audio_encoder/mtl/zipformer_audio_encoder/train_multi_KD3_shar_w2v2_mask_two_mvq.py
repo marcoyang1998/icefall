@@ -63,12 +63,12 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar import MultiTaskDataModule
+from kd_datamodule3_shar_two_mvq import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd_w2v2_mask import MultiKDModel
+from model_multi_kd_w2v2_mask_two_mvq import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -342,6 +342,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
     )
     
+    parser.add_argument(
+        "--loss-scales",
+        type=str,
+        help="Loss scales for different tasks, comma separated, e.g. 0.5,0.5",
+        default="0.5,0.5"
+        
+    )
+    
     # masking related
     parser.add_argument(
         "--loss-only-mask",
@@ -515,61 +523,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--context-size",
-        type=int,
-        default=2,
-        help="The context size in the decoder. 1 means bigram; " "2 means tri-gram",
-    )
-
-    parser.add_argument(
-        "--prune-range",
-        type=int,
-        default=5,
-        help="The prune range for rnnt loss, it means how many symbols(context)"
-        "we are using to compute the loss",
-    )
-
-    parser.add_argument(
-        "--lm-scale",
-        type=float,
-        default=0.25,
-        help="The scale to smooth the loss with lm "
-        "(output of prediction network) part.",
-    )
-
-    parser.add_argument(
-        "--am-scale",
-        type=float,
-        default=0.0,
-        help="The scale to smooth the loss with am (output of encoder network)" "part.",
-    )
-
-    parser.add_argument(
-        "--simple-loss-scale",
-        type=float,
-        default=0.5,
-        help="To get pruning ranges, we will calculate a simple version"
-        "loss(joiner is just addition), this simple loss also uses for"
-        "training (as a regularization item). We will scale the simple loss"
-        "with this parameter before adding to the final loss.",
-    )
-
-    parser.add_argument(
-        "--ctc-loss-scale",
-        type=float,
-        default=0.2,
-        help="Scale for CTC loss.",
-    )
-
-    parser.add_argument(
         "--audio-tagging-loss-scale",
-        type=float,
-        default=1.0,
-        help="Scale for audio tagging loss.",
-    )
-    
-    parser.add_argument(
-        "--speaker-verification-loss-scale",
         type=float,
         default=1.0,
         help="Scale for audio tagging loss.",
@@ -735,6 +689,8 @@ def get_params() -> AttributeDict:
 
 def _to_int_tuple(s: str):
     return tuple(map(int, s.split(",")))
+def _to_float_tuple(s: str):
+    return tuple(map(float, s.split(",")))
 
 def get_encoder_embed(params: AttributeDict) -> nn.Module:
     # encoder_embed converts the input of shape (N, T, num_features)
@@ -1041,7 +997,7 @@ def compute_loss(
         at_targets = None
     
     with torch.set_grad_enabled(is_training):
-        mvq_losses, audio_tagging_loss = model(
+        mvq_loss_1, mvq_loss_2, audio_tagging_loss = model(
             x=feature,
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
@@ -1052,17 +1008,23 @@ def compute_loss(
 
         # task_id=1: ASR data
         # task_id=2: AT data
-        mvq_loss_1, mvq_loss_2 = mvq_losses
 
         # MVQ loss 
+        loss_scales = _to_float_tuple(params.loss_scales)
+        
         if params.do_mvq:
             if params.mvq_loss_by_task:
                 mask = task_ids == 1 # ASR=1
-                mvq_loss = (mvq_loss * mask).sum()
+                mvq_loss_1 = (mvq_loss_1 * mask).sum()
+                mvq_loss_2 = (mvq_loss_2 * mask).sum()
             else:
-                mvq_loss = mvq_loss.sum()
+                mvq_loss_1 = mvq_loss_1.sum()
+                mvq_loss_2 = mvq_loss_2.sum()
+            mvq_loss = mvq_loss_1 * loss_scales[0] + mvq_loss_2 * loss_scales[1]
             loss += mvq_loss
-            
+        else:
+            mvq_loss = None
+
         # AT loss
         if params.do_audio_tagging:
             mask = task_ids == 2 # AT=2
@@ -1081,6 +1043,8 @@ def compute_loss(
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
+        info["mvq_loss_1"] = mvq_loss_1.detach().cpu().item()
+        info["mvq_loss_2"] = mvq_loss_2.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
@@ -1414,7 +1378,7 @@ def run(rank, world_size, args):
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
-    num_param_prediction_head = sum([p.numel() for p in model.codebook_loss_net.parameters()])
+    num_param_prediction_head = sum([p.numel() for p in model.codebook_loss_heads.parameters()])
     logging.info(f"Number of encoder parameters: {num_param - num_param_prediction_head}")
 
     assert params.save_every_n >= params.average_period

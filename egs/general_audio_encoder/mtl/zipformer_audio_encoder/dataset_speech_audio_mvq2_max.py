@@ -6,11 +6,14 @@ import torch
 from torch.utils.data.dataloader import default_collate
 import numpy as np
 
-from lhotse.cut import CutSet, MonoCut
+from lhotse import Fbank, FbankConfig
+from lhotse.cut import CutSet, MonoCut, Cut, MixedCut
 from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
 from lhotse.dataset.collation import collate_custom_field
 from lhotse.utils import compute_num_frames, ifnone
 from lhotse.workarounds import Hdf5MemoryIssueFix
+
+from dataset2_batch_mixing_max import compute_feature, compute_prob_from_energies, fix_supervision, _load_mixed_cut_single
 
 def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     # generate multi-hot class labels
@@ -117,6 +120,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.cut_transforms = ifnone(cut_transforms, [])
         self.input_transforms = ifnone(input_transforms, [])
         self.input_strategy = input_strategy
+        self.extractor = Fbank(FbankConfig(num_mel_bins=128))
         
         self.at_KD = at_KD
         self.sv_KD = sv_KD
@@ -163,19 +167,12 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         # Get a tensor with batched feature matrices, shape (B, T, F)
         # Collation performs auto-padding, if necessary.
-        input_tpl = self.input_strategy(cuts)
-        if len(input_tpl) == 3:
-            # An input strategy with fault tolerant audio reading mode.
-            # "cuts" may be a subset of the original "cuts" variable,
-            # that only has cuts for which we succesfully read the audio.
-            inputs, _, cuts = input_tpl
-        else:
-            inputs, _ = input_tpl
-        assert inputs.shape[0] == len(cuts)
+        inputs, input_lens, mix_gains, replacement_prob = self.load_audio_and_compute_fbank(cuts)
 
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
+        cuts = cuts.map(fix_supervision)
         supervision_intervals = self.input_strategy.supervision_intervals(cuts)
 
         # Apply all available transforms on the inputs, i.e. either audio or features.
@@ -190,7 +187,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         assert len(cuts_pre_mixed) == len(cuts)
         
         # load wavlm cb indexes
-        mvq_tokens, mvq_token_lens = _collate_custom_field(
+        speech_mvq_tokens, speech_mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
             "wavlm_codebook_indexes",
             dummy=self.dummy_codebook_indexes,
@@ -217,6 +214,28 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             audio_events = [getattr(c.supervisions[0], "audio_event", "0") for c in cuts_pre_mixed] # the label indices are in CED format
             at_targets, _ = str2multihot(audio_events) # (N, num_events)
             
+        # perform token mixing, for now we only consider speech tokens
+        mix_speech_mvq_tokens = self.prepare_mixed_mvq_tokens(
+            speech_mvq_tokens,
+            cuts,
+            field_name="wavlm_codebook_indexes",
+            frame_rate=self.speech_target_frame_rate,
+        )
+        
+        max_target_duration = max(c.duration for c in cuts)
+        
+        # the mixed utterance is longer, so we pad the orig mvq tokens to the same length
+        if mix_speech_mvq_tokens.size(1) != speech_mvq_tokens.size(1):    
+            diff = mix_speech_mvq_tokens.size(1) - speech_mvq_tokens.size(1)
+            right_padding = torch.ones(speech_mvq_tokens.size(0), diff, speech_mvq_tokens.size(2)) * (-100)
+            speech_mvq_tokens = torch.cat([speech_mvq_tokens, right_padding], dim=1)
+            
+        # pad the audio mvq tokens to the same length as well
+        diff = int(max_target_duration * self.audio_target_frame_rate - audio_mvq_tokens.size(1))
+        if diff > 0:
+            right_padding = torch.ones(audio_mvq_tokens.size(0), diff, audio_mvq_tokens.size(2)) * (-100)
+            audio_mvq_tokens = torch.cat([audio_mvq_tokens, right_padding], dim=1)
+        
         sv_targets = None
         
         # task ids
@@ -227,8 +246,11 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         batch = {
             "inputs": inputs,
-            "cb_indexes": [mvq_tokens, audio_mvq_tokens],
-            "cb_indexes_len": [mvq_token_lens, audio_mvq_token_lens],
+            "cb_indexes": [speech_mvq_tokens, audio_mvq_tokens],
+            "cb_indexes_len": [speech_mvq_token_lens, audio_mvq_token_lens],
+            "mixed_cb_indexes": [mix_speech_mvq_tokens, audio_mvq_tokens],
+            "mixed_cb_indexes_len": [speech_mvq_token_lens, audio_mvq_token_lens],
+            "replacement_probs": torch.tensor(replacement_prob),
             "supervisions": default_collate(
                 [
                     {
@@ -250,6 +272,66 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             ]
 
         return batch
+    
+    def load_audio_and_compute_fbank(self, cuts: CutSet):
+        audios = []
+        mix_ratios = []
+        replacement_probs = []
+        for cut in cuts:
+            if isinstance(cut, MixedCut):
+                # by default, we assume the mixing is with noise
+                mix_type = getattr(cut, "mix_type", "noise")
+                if mix_type == "noise":
+                    audio = cut.load_audio()
+                    mix_ratio = 0.0
+                    replacement_prob = 0.0
+                elif mix_type == "speech":
+                    audio, mix_ratio, replacement_prob = _load_mixed_cut_single(cut)
+                else:
+                    raise ValueError()
+            else:
+                audio = cut.load_audio()
+                mix_ratio = 0.0
+                replacement_prob = 0.0
+            audios.append(audio)
+            mix_ratios.append(mix_ratio)
+            replacement_probs.append(replacement_prob)
+        
+        inputs, input_lens = compute_feature(audios, cuts, self.extractor)
+        
+        return inputs, input_lens, mix_ratios, replacement_probs
+    
+    def prepare_mixed_mvq_tokens(
+        self,
+        mvq_tokens: torch.Tensor,
+        cuts: CutSet,
+        field_name: str = "codebook_indexes",
+        frame_rate: int = 50,
+    ):
+        mvq_tokens_mix = []
+        
+        for i,c in enumerate(cuts):
+            if not isinstance(c, MixedCut):
+                mvq_tokens_mix.append(mvq_tokens[i])
+                continue
+            
+            if c.mix_type != "speech":
+                mvq_tokens_mix.append(mvq_tokens[i])
+                continue
+            cur_mvq_tokens = mvq_tokens[i].clone()
+            orig_track, mix_track = c.tracks # get the two tracks
+            
+            # compute the starting mixing frame
+            offset = int(mix_track.offset * frame_rate)
+            mixed_in_cb = torch.from_numpy(mix_track.cut.load_custom(field_name))
+            left_padding_cb = torch.ones(offset, mixed_in_cb.shape[1]) * (-100)
+            mixed_in_cb = torch.cat([left_padding_cb, mixed_in_cb], dim=0)
+            
+            mvq_tokens_mix.append(mixed_in_cb)
+        
+        mvq_tokens_mix = torch.nn.utils.rnn.pad_sequence(mvq_tokens_mix, batch_first=True, padding_value=-100)
+        mvq_tokens_mix = mvq_tokens_mix.to(torch.int64)
+        return mvq_tokens_mix
 
 def filter_cuts_by_duration(cuts: CutSet, batch_duration_threshold: int = 2000) -> CutSet:
     # the cuts are sorted by duration in decending order

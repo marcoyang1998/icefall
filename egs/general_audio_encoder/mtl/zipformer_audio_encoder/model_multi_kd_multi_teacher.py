@@ -230,10 +230,10 @@ class MultiKDModel(nn.Module):
                     )
                     if self.loss_only_mask and mask_indices is not None:
                         # downsample the mask 
-                        mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
-                        assert mask_indices.size(1) >= codebook_loss.size(1)
-                        mask_indices = mask_indices[:, :codebook_loss.size(1)].float()
-                        codebook_loss = codebook_loss * mask_indices
+                        ds_mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
+                        assert ds_mask_indices.size(1) >= codebook_loss.size(1), (ds_mask_indices.shape, codebook_loss.shape)
+                        ds_mask_indices = ds_mask_indices[:, :codebook_loss.size(1)].float()
+                        codebook_loss = codebook_loss * ds_mask_indices
                     codebook_loss = codebook_loss.sum(dim=1) # (B,)    
                 else:
                     codebook_loss = 0.0

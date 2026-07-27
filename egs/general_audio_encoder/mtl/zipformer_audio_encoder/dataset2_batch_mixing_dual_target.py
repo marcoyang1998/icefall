@@ -213,6 +213,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             "cb_indexes_len": mvq_token_lens,
             "mixed_cb_indexes": mix_speech_mvq_tokens,
             "mixed_cb_indexes_len": mvq_token_lens,
+            "replacement_probs": torch.tensor(replacement_prob),
             "supervisions": default_collate(
                 [
                     {

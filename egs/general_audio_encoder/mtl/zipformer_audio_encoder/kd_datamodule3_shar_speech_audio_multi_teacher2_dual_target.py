@@ -20,7 +20,6 @@
 import argparse
 import inspect
 import logging
-import os
 from functools import lru_cache, cached_property
 from pathlib import Path
 from typing import Any, Dict, Optional, Union, List
@@ -33,7 +32,6 @@ from lhotse.dataset import (  # noqa F401 for PrecomputedFeatures
     DynamicBucketingSampler,
     K2SpeechRecognitionDataset,
     PrecomputedFeatures,
-    ReverbWithImpulseResponse,
     SimpleCutSampler,
     ZipSampler,
     SpecAugment,
@@ -47,8 +45,8 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
-from augmentations import BatchMixing
-from dataset2_npy_cache import MultiTaskKDDataset
+from augmentations import BatchMixingWithTask
+from dataset_speech_audio_mvq2_max import MultiTaskKDDataset
 from icefall.utils import str2bool
 
 
@@ -116,7 +114,13 @@ class MultiTaskDataModule:
             default=False,
         )
         group.add_argument(
-            "--shar-dir",
+            "--speech-shar-dir",
+            type=Path,
+            default=Path("data-shar"),
+            help="Path to directory with train/valid/test cuts.",
+        )
+        group.add_argument(
+            "--audio-shar-dir",
             type=Path,
             default=Path("data-shar"),
             help="Path to directory with train/valid/test cuts.",
@@ -127,6 +131,22 @@ class MultiTaskDataModule:
             default=200.0,
             help="Maximum pooled recordings duration (seconds) in a "
             "single batch. You can reduce it if it causes CUDA OOM.",
+        )
+        group.add_argument(
+            "--max-cuts",
+            type=int,
+            default=2000,
+            help="Maximum number of cuts per batch; Useful to adjust this when"
+            "seeing CUDA OOM in zipsampler",
+        )
+        group.add_argument(
+            "--batch-duration-factor",
+            type=int,
+            default=5,
+            help="""Used to filter shorter cuts when batching. The ZipSampler can sometime
+            produce very large batch, this is a double safety measure to prevent the model 
+            from OOM error. This is evaluated as an upperlimit: batch_duration_factor * max_duration
+            """,
         )
         group.add_argument(
             "--num-mel-bins",
@@ -256,20 +276,6 @@ class MultiTaskDataModule:
             "Larger values mean more warping. "
             "A value less than 1 means to disable time warp.",
         )
-
-        group.add_argument(
-            "--enable-rir",
-            type=str2bool,
-            default=False,
-            help="When enabled, perform RIR on the cuts",
-        )
-        
-        group.add_argument(
-            "--rir-cuts",
-            type=str,
-            default="data/rir/rir_cuts.jsonl.gz",
-            help="If None, use the default fast random RIR generator"
-        )
         
         group.add_argument(
             "--features-mask-size",
@@ -284,7 +290,7 @@ class MultiTaskDataModule:
             default=100,
             help="The maximum mask length along the time axis in specaug"
         )
-        
+
         group.add_argument(
             "--enable-musan",
             type=str2bool,
@@ -298,11 +304,19 @@ class MultiTaskDataModule:
             type=str2bool,
             default=False,
         )
+        
         group.add_argument(
             "--batch-mix-mode",
             type=str,
             default="wavlm",
             choices=["wavlm", "max"],
+        )
+        
+        group.add_argument(
+            "--mix-delay-max",
+            type=float,
+            default=10.0,
+            help="The maximum allowed delay when performing mixing two cuts, only used in `max` mode mixing",
         )
         
         group.add_argument(
@@ -355,18 +369,12 @@ class MultiTaskDataModule:
             default="PrecomputedFeatures",
             help="AudioSamples or PrecomputedFeatures",
         )
-        group.add_argument(
-            "--target-frame-rate",
-            type=int,
-            default=50,
-            help="The frame rate of the target"
-        )
         
         # KD related
         group.add_argument(
             "--at-KD",
             type=str2bool,
-            default=False,
+            default=True,
             help="If load the logits instead of ground truth of audio events"
         )
         
@@ -375,6 +383,34 @@ class MultiTaskDataModule:
             type=str2bool,
             default=False,
             help="If load speaker embedding instead of speaker identity"
+        )
+        
+        group.add_argument(
+            "--speech-target-frame-rate",
+            type=int,
+            default=50,
+            help="The speech target's frame rate in Hz"
+        )
+        
+        group.add_argument(
+            "--audio-target-frame-rate",
+            type=int,
+            default=25,
+            help="The audio target's frame rate in Hz"
+        )
+        
+        group.add_argument(
+            "--num-cb-speech",
+            type=int,
+            default=16,
+            help="Number of codebooks for speech MVQ"
+        )
+        
+        group.add_argument(
+            "--num-cb-audio",
+            type=int,
+            default=8,
+            help="Number of codebooks for audio MVQ"
         )
         
         # multi task dataset related
@@ -404,6 +440,12 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
+            "--repeat-gigaspeech",
+            type=int,
+            default=1,
+        )
+        
+        group.add_argument(
             "--use-fisher",
             type=str2bool,
             default=False,
@@ -411,6 +453,16 @@ class MultiTaskDataModule:
         
         group.add_argument(
             "--use-voxpopuli",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
+            "--voxpopuli-subset",
+            type=str,
+            default="en_v2",
+        )
+        group.add_argument(
+            "--use-commonvoice",
             type=str2bool,
             default=False,
         )
@@ -447,18 +499,6 @@ class MultiTaskDataModule:
         
         group.add_argument(
             "--use-mls",
-            type=str2bool,
-            default=False,
-        )
-        
-        group.add_argument(
-            "--use-fleurs",
-            type=str2bool,
-            default=False,
-        )
-        
-        group.add_argument(
-            "--use-commonvoice",
             type=str2bool,
             default=False,
         )
@@ -540,30 +580,6 @@ class MultiTaskDataModule:
         )
         
         group.add_argument(
-            "--use-soundnet",
-            type=str2bool,
-            default=False,
-        )
-        
-        group.add_argument(
-            "--repeat-soundnet",
-            type=int,
-            default=1,
-        )
-        
-        group.add_argument(
-            "--use-acavcaps",
-            type=str2bool,
-            default=False,
-        )
-        
-        group.add_argument(
-            "--repeat-acavcaps",
-            type=int,
-            default=1,
-        )
-        
-        group.add_argument(
             "--use-bbceffect",
             type=str2bool,
             default=False,
@@ -602,6 +618,13 @@ class MultiTaskDataModule:
             type=int,
             default=1,
         )
+        
+        group.add_argument(
+            "--audio-duration-factor", 
+            type=float,
+            default=1.0,
+            help="When calculating the sampling weight of audio dataset, this factor is applied to the total duration of all audio data"
+        )
 
     def train_dataloaders(
         self,
@@ -621,47 +644,29 @@ class MultiTaskDataModule:
         # properly set world_size and rank
         if self.args.use_shar:
             logging.info(f"Setting world_size=1 and rank=0 because we will be using shar!")
-            # world_size = 1
-            # rank = 0
         
         transforms = []
-        if self.args.enable_rir:
-            logging.info("Enable RIR")
-            if os.path.exists(self.args.rir_cuts):
-                logging.info("About to get RIR cuts")
-                rir_cuts = load_manifest_lazy(self.args.rir_cuts)
-            else:
-                logging.info("Use the fast random RIR generator as no RIR recordings are provided")
-                rir_cuts = None
-            transforms.append(
-                ReverbWithImpulseResponse(rir_recordings=rir_cuts, p=0.5)
-            )
         
         if self.args.enable_musan:
-            assert not self.args.batch_mixing, "Do not use musan and in-batch mixing together!"
-            logging.info(f"Enable MUSAN with minimum SNR={self.args.min_snr}, max SNR={self.args.max_snr}, mixing prob: {self.args.mixing_prob}")
+            logging.info(f"Enable MUSAN with minimum SNR={self.args.min_snr}, mixing prob: {self.args.mixing_prob}")
             logging.info("About to get Musan cuts")
             cuts_musan = load_manifest("data/musan/musan_cuts.jsonl.gz").drop_features()
-            
-            # logging.info("About to get audioset balanced cuts for mixing")
-            # cuts_musan = load_manifest("data/audioset_manifest/audioset_cuts_balanced.jsonl.gz").drop_features().drop_supervisions()
             transforms.append(
                 CutMix(
-                    cuts=cuts_musan, p=self.args.mixing_prob, snr=(self.args.min_snr, self.args.max_snr), 
-                    preserve_id=True, pad_to_longest=True,
+                    cuts=cuts_musan, p=0.5, snr=(self.args.min_snr, self.args.max_snr), preserve_id=True, pad_to_longest=False
                 )
             )
         else:
             logging.info("Disable MUSAN")
-            
+
         if self.args.batch_mixing:
             assert not self.args.enable_musan, "Do not use musan and in-batch mixing together!"
             if self.args.p_noise > 0.0:
                 noise_cuts = load_manifest("data/musan/audioset_non_human.jsonl.gz").drop_features()
-                logging.info(f"Get the noise cuts for batch mixing as well")
+                logging.info(f"Get the noise cuts for batch mixing.")
             else:
                 noise_cuts = None
-            t = BatchMixing(
+            t = BatchMixingWithTask(
                 min_snr=self.args.min_snr, 
                 max_snr=self.args.max_snr,
                 p=self.args.mixing_prob,
@@ -669,10 +674,11 @@ class MultiTaskDataModule:
                 p_noise=self.args.p_noise,
                 noise_cuts=noise_cuts,
                 batch_mix_mode=self.args.batch_mix_mode,
+                mix_delay_max=self.args.mix_delay_max,
             )
             transforms.append(t)
             logging.info(f"Performing batch mixing: {t}")
-
+        
         if self.args.concatenate_cuts:
             logging.info(
                 f"Using cut concatenation with duration factor "
@@ -702,10 +708,6 @@ class MultiTaskDataModule:
                 num_frame_masks = 2
             num_frame_masks = int(10 * self.args.time_mask_ratio)
             max_frames_mask_fraction = 0.15 * self.args.time_mask_ratio
-            logging.info(
-                f"num_frame_masks: {num_frame_masks}, "
-                f"max_frames_mask_fraction: {max_frames_mask_fraction}"
-            )
             input_transforms.append(
                 SpecAugment(
                     time_warp_factor=self.args.spec_aug_time_warp_factor,
@@ -716,11 +718,16 @@ class MultiTaskDataModule:
                     max_frames_mask_fraction=max_frames_mask_fraction,
                 )
             )
+            logging.info(
+                f"num_frame_masks: {num_frame_masks}, "
+                f"max_frames_mask_fraction: {max_frames_mask_fraction}, "
+                f"frames_mask_size: {self.args.frames_mask_size}, "
+                f"features_mask_size: {self.args.features_mask_size}"
+            )
         else:
             logging.info("Disable SpecAugment")
 
         logging.info("About to create train dataset")
-
         assert self.args.on_the_fly_feats
         if self.args.on_the_fly_feats:
             # NOTE: the PerturbSpeed transform should be added only if we
@@ -738,9 +745,13 @@ class MultiTaskDataModule:
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=self.args.num_mel_bins))),
                 input_transforms=input_transforms,
                 return_cuts=self.args.return_cuts,
-                target_frame_rate=self.args.target_frame_rate,
                 at_KD=self.args.at_KD,
                 sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                num_cb_speech=self.args.num_cb_speech,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
+                num_cb_audio=self.args.num_cb_audio,
+                batch_duration_threshold=self.args.max_duration * self.args.batch_duration_factor,
             )
 
         if self.args.bucketing_sampler:
@@ -768,8 +779,8 @@ class MultiTaskDataModule:
                 max_duration=self.args.max_duration,
                 shuffle=self.args.shuffle,
                 num_buckets=self.args.num_buckets,
-                buffer_size=self.args.num_buckets * 1500,
-                shuffle_buffer_size=self.args.num_buckets * 1500,
+                buffer_size=self.args.num_buckets * 10000,
+                shuffle_buffer_size=self.args.num_buckets * 10000,
                 drop_last=self.args.drop_last,
                 sync_buckets=self.args.sync_buckets,
                 duration_bins=duration_bins,
@@ -800,6 +811,7 @@ class MultiTaskDataModule:
                     sampler = DynamicBucketingSampler(
                         cuts,
                         max_duration=md,
+                        max_cuts=self.args.max_cuts,
                         shuffle=self.args.shuffle,
                         num_buckets=self.args.num_buckets,
                         buffer_size=self.args.num_buckets * 1500,
@@ -883,7 +895,7 @@ class MultiTaskDataModule:
                 train_iter_dataset,
                 batch_size=None,
                 num_workers=self.args.num_workers,
-                pin_memory=False,
+                pin_memory=True,
                 worker_init_fn=make_worker_init_fn(seed=0, rank=rank, world_size=world_size),
             )
 
@@ -909,24 +921,29 @@ class MultiTaskDataModule:
                 cut_transforms=transforms,
                 input_strategy=OnTheFlyFeatures(Fbank(FbankConfig(num_mel_bins=128))),
                 return_cuts=self.args.return_cuts,
-                target_frame_rate=self.args.target_frame_rate,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                num_cb_speech=self.args.num_cb_speech,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
+                num_cb_audio=self.args.num_cb_audio,
             )
         else:
             validate = MultiTaskKDDataset(
                 cut_transforms=transforms,
                 return_cuts=self.args.return_cuts,
-                target_frame_rate=self.args.target_frame_rate,
                 at_KD=self.args.at_KD,
-                sv_KD=self.args.sv_KD
+                sv_KD=self.args.sv_KD,
+                speech_target_frame_rate=self.args.speech_target_frame_rate,
+                num_cb_speech=self.args.num_cb_speech,
+                audio_target_frame_rate=self.args.audio_target_frame_rate,
+                num_cb_audio=self.args.num_cb_audio,
             )
         valid_sampler = DynamicBucketingSampler(
             cuts_valid,
             max_duration=self.args.max_duration,
             shuffle=False,
             world_size=world_size,
-            buffer_size=10000,
             rank=rank,
         )
         logging.info("About to create dev dataloader")
@@ -934,7 +951,7 @@ class MultiTaskDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=4,
+            num_workers=8,
             persistent_workers=False,
         )
 
@@ -952,9 +969,12 @@ class MultiTaskDataModule:
             if self.args.on_the_fly_feats
             else eval(self.args.input_strategy)(),
             return_cuts=self.args.return_cuts,
-            target_frame_rate=self.args.target_frame_rate,
             at_KD=self.args.at_KD,
-            sv_KD=self.args.sv_KD
+            sv_KD=self.args.sv_KD,
+            speech_target_frame_rate=self.args.speech_target_frame_rate,
+            num_cb_speech=self.args.num_cb_speech,
+            audio_target_frame_rate=self.args.audio_target_frame_rate,
+            num_cb_audio=self.args.num_cb_audio,
         )
         sampler = DynamicBucketingSampler(
             cuts,
@@ -1008,7 +1028,7 @@ class MultiTaskDataModule:
         )
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/train-all-shuf",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/train-all-shuf",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1031,7 +1051,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use share for librispeech dev-clean cuts")
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-clean",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/dev-clean",
                 shuffle_shards=False,
             )
         else:
@@ -1044,7 +1064,7 @@ class MultiTaskDataModule:
         logging.info("About to get dev-other cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/librispeech/dev-other",
+                in_dir=f"{str(self.args.speech_shar_dir)}/librispeech/dev-other",
                 shuffle_shards=False,
             )
         else:
@@ -1086,7 +1106,7 @@ class MultiTaskDataModule:
             weights.append(durations[i])
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/gigaspeech/{subset}",
+                    in_dir=f"{str(self.args.speech_shar_dir)}/gigaspeech/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1108,11 +1128,10 @@ class MultiTaskDataModule:
     def gigaspeech_dev_cuts(self) -> CutSet:
         logging.info("About to get Gigaspeech dev cuts")
         if self.args.use_shar:
-            cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/gigaspeech/dev",
+            return CutSet.from_shar(
+                in_dir=f"{str(self.args.speech_shar_dir)}/gigaspeech/dev",
                 shuffle_shards=False,
             )
-            return cuts
         else:
             return load_manifest_lazy(self.args.manifest_dir / "gigaspeech_cuts_dev.jsonl.gz")
 
@@ -1131,7 +1150,7 @@ class MultiTaskDataModule:
             all_cuts = []
             for part in parts:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/fisher/{part}",
+                    in_dir=f"{str(self.args.speech_shar_dir)}/fisher/{part}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1150,18 +1169,87 @@ class MultiTaskDataModule:
                 self.args.manifest_dir / "fisher_cuts_part2.jsonl.gz"
             )
             return part1_cuts + part2_cuts
+        
+    @lru_cache()
+    def voxpopuli_asr_train_cuts(self) -> CutSet:
+        # languages = ["en", "de", "fr", "es", "pl", "it", "ro", "hu", "cs", "nl", "fi", "hr", "sk", "sl", "et", "lt"]
+        VOX_POPULI_LANGUAGES = {
+            "en": 514, "de": 270, "fr": 202, "es": 153, "pl": 100, "it": 80, "ro": 77, "hu": 55, "cs": 55,
+            "nl": 48, "fi": 22, "hr": 18.5, "sk": 31, "sl": 6.5, "et": 2, "lt": 1.5,
+        } # total 1636 hrs, 526497 cuts
+        
+        all_cuts = []
+        duration_weights = []
+        for lang, dur in VOX_POPULI_LANGUAGES.items():
+            logging.info(f"Loading voxpopuli {lang}")
+            if self.args.use_shar:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.speech_shar_dir)}/voxpopuli/{lang}/train",
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                    seed="randomized",
+                ).repeat()
+            else:
+                cuts = load_manifest_lazy(
+                    self.args.manifest_dir / f"voxpopuli-asr-{lang}_cuts_train.jsonl.gz"
+                )
+            all_cuts.append(cuts)
+            duration_weights.append(dur)
+        
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=duration_weights,
+            stop_early=False,
+        )
+        all_cuts = all_cuts.map(fix_supervisions)
+        all_cuts = all_cuts.filter(filter_supervisions_start)
+        return all_cuts
+    
+    @lru_cache()
+    def voxpopuli_asr_dev_cuts(self) -> CutSet:
+        # languages = ["en", "de", "fr", "es", "pl", "it", "ro", "hu", "cs", "nl", "fi", "hr", "sk", "sl", "et", "lt"]
+        VOX_POPULI_LANGUAGES = {
+            "en": 514, "de": 270, "fr": 202, "es": 153, "pl": 100, "it": 80, "ro": 77, "hu": 55, "cs": 55,
+            "nl": 48, "fi": 22, "hr": 18.5, "sk": 31, "sl": 6.5, "et": 2,
+        }
+        
+        all_cuts = []
+        duration_weights = []
+        for lang, dur in VOX_POPULI_LANGUAGES.items():
+            logging.info(f"Loading voxpopuli {lang}")
+            if self.args.use_shar:
+                cuts = CutSet.from_shar(
+                    in_dir=f"{str(self.args.speech_shar_dir)}/voxpopuli/{lang}/dev",
+                    shuffle_shards=False,
+                )
+            else:
+                cuts = load_manifest_lazy(
+                    self.args.manifest_dir / f"voxpopuli-asr-{lang}_cuts_dev.jsonl.gz"
+                )
+            all_cuts.append(cuts)
+            duration_weights.append(dur)
+        
+        all_cuts = CutSet.mux(
+            *all_cuts,
+            weights=[1.0]*len(all_cuts),
+            stop_early=False,
+        )
+        all_cuts = all_cuts.map(fix_supervisions)
+        all_cuts = all_cuts.filter(filter_supervisions_start)
+        return all_cuts
     
     def voxpopuli_unlabelled_cuts(self) -> CutSet:
         if self.args.use_shar:
+            logging.info(f"Loading the unlabelled voxpopuli data: {self.args.voxpopuli_subset}")
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/voxpopuli/en_v2/",
+                in_dir=f"{str(self.args.speech_shar_dir)}/voxpopuli/{self.args.voxpopuli_subset}/",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
         else:
             cuts_train = load_manifest_lazy(
-                self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
+                self.args.manifest_dir / f"voxpopuli_cuts_{self.args.voxpopuli_subset}.jsonl.gz"
             )
             return cuts_train
     
@@ -1179,7 +1267,7 @@ class MultiTaskDataModule:
             weights.append(durations[i])
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/libriheavy/{subset}",
+                    in_dir=f"{str(self.args.speech_shar_dir)}/libriheavy/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1190,24 +1278,22 @@ class MultiTaskDataModule:
             all_cuts.append(cuts)
             if self.args.libriheavy_subset == subset:
                 break
-        def change_source(c):
-            source = c.recording.sources[0].source
-            source = source.replace(
-                "/cpfs02/shared/speechllm/xiaoyu/librilight/",
-                "s3://yangxiaoyu/librilight_split/"
-            )
-            c.recording.sources[0].source = source
-            c.recording.sources[0].type = "url"
-            
-            return c   
-        
         all_cuts = CutSet.mux(
             *all_cuts,
             weights=weights,
             stop_early=False,
         ).drop_features()
         
-        all_cuts = all_cuts.map(change_source)
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "/cpfs02/shared/speechllm/xiaoyu/librilight/",
+                "download/librilight/"
+            )
+            c.recording.sources[0].source = source
+            
+            return c   
+        all_cuts = all_cuts.map(change_source) 
         
         return all_cuts
     
@@ -1227,7 +1313,7 @@ class MultiTaskDataModule:
                 weights.append(0.1)
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/yodas_granary/{subset}",
+                    in_dir=f"{str(self.args.speech_shar_dir)}/yodas_granary/{subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
@@ -1262,27 +1348,38 @@ class MultiTaskDataModule:
     @lru_cache()
     def wenetspeech_train_cuts(self) -> CutSet:
         logging.info(f"About to get wenetspeech {self.args.wenetspeech_subset} cuts")
-        # L: 14625245, 10k hours
         if self.args.use_shar:
-            cuts_train = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/wenetspeech/{self.args.wenetspeech_subset}",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            
+            num_splits = 10
+            all_cuts = []
+            for i in range(num_splits):
+                split_dir = f"{str(self.args.speech_shar_dir)}/wenetspeech/L/split_{i}"
+                logging.info(f"Loading {split_dir}")
+                cuts = CutSet.from_shar(
+                    in_dir=split_dir,
+                    shuffle_shards=True,
+                    stateful_shuffle=True,
+                    seed="randomized",
+                ).repeat()
+                cuts = cuts.resample(16000)
+                all_cuts.append(cuts)
+            return CutSet.mux(
+                *all_cuts,
+                weights=[1.0] * num_splits,
+                stop_early=False,
+            )
         else:
             cuts_train = load_manifest_lazy(
                 self.args.manifest_dir / f"wenetspeech_cuts_{self.args.training_subset}.jsonl.gz"
             )
-        return cuts_train
+            return cuts_train
 
     @lru_cache()
     def wenetspeech_valid_cuts(self) -> CutSet:
         logging.info("About to get dev cuts")
         if self.args.use_shar:
+            logging.info("Get wenetspeech dev cuts from shar")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/wenetspeech/DEV",
+                in_dir=f"{str(self.args.speech_shar_dir)}/wenetspeech/DEV",
                 shuffle_shards=False,
             )
             return cuts
@@ -1302,126 +1399,53 @@ class MultiTaskDataModule:
         return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_TEST_MEETING.jsonl.gz")
     
     @lru_cache()
-    def fleurs_train_cuts(self) -> CutSet:
-        # return the combined fleurs data
-        def fix_supervision(c):
-            c.supervisions[0].duration = c.duration
-            return c
-            
-        logging.info("About to get fleurs train cuts")
-        language = "all"
+    def commonvoice_en_train_cuts(self) -> CutSet:
+        logging.info("About to get CommonVoice English train cuts")
         if self.args.use_shar:
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/fleurs/{language}/train",
+                in_dir=f"{str(self.args.speech_shar_dir)}/commonvoice/en/train",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            cuts = cuts.resample(16000)
+            return cuts
         else:
-            cuts = load_manifest_lazy(self.args.manifest_dir / f"fleurs_cuts_train.jsonl.gz")
-        cuts = cuts.map(fix_supervision)
-        return cuts
+            return load_manifest_lazy(
+                self.args.manifest_dir / "commonvoice_en_cuts_train.jsonl.gz"
+            ).resample(16000)
     
     @lru_cache()
-    def fleurs_dev_cuts(self) -> CutSet:
-        # return the combined fleurs data
-        logging.info("About to get fleurs dev cuts")
-        language = "all"
-        def fix_supervision(c):
-            c.supervisions[0].duration = c.duration
-            return c
-        if self.args.use_shar:
-            cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/fleurs/{language}/dev",
-                shuffle_shards=False,
-            )
-        else:
-            cuts = load_manifest_lazy(self.args.manifest_dir / f"fleurs_cuts_dev.jsonl.gz")
-        cuts = cuts.map(fix_supervision)
-        return cuts
-    
-    @lru_cache()
-    def fleurs_dev_cuts_5k(self) -> CutSet:
-        # return the combined fleurs data
-        logging.info("About to get a subset of fleurs dev cuts")
-        def fix_supervision(c):
-            c.supervisions[0].duration = c.duration
-            return c
-        language = "all"
-        if self.args.use_shar:
-            cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/fleurs/{language}/dev_shuf_5k",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-            ) # 17 hours
-        else:
-            cuts = load_manifest_lazy(self.args.manifest_dir / f"fleurs_cuts_dev_shuf_5k.jsonl.gz")
-        cuts = cuts.map(fix_supervision)
-        return cuts
-
-    @lru_cache()
-    def fleurs_test_cuts(self) -> CutSet:
-        # return the combined fleurs data
-        logging.info("About to get fleurs test cuts")
-        language = "all"
-        if self.args.use_shar:
-            cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/fleurs/{language}/test",
-                shuffle_shards=False,
-            )
-        else:
-            cuts = load_manifest_lazy(self.args.manifest_dir / f"fleurs_cuts_test_shuf.jsonl.gz")
-        
-        return cuts
-    
-    @lru_cache()
-    def commonvoice_cuts(self) -> CutSet:
-        logging.info("About to get commonvoice cuts")
-        language = "all"
-        if self.args.use_shar:
-            cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/commonvoice/{language}/train",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-        else:
-            cuts = load_manifest_lazy(self.args.manifest_dir / f"commonvoice_{language}_cuts_train.jsonl.gz")
-        
-        return cuts
-    
-    @lru_cache()
-    def mls_cuts(self) -> CutSet:
+    def mls_train_cuts(self) -> CutSet:
         logging.info("About to get MLS cuts")
-        languages = ["dutch", "french", "german", "italian", "polish", "portuguese", "spanish"]
-        durations = [1554, 1076, 1966, 247, 103, 161, 917]
-        
+        LANGUAGES={
+            "german": 1966.5, "dutch": 1554, "french": 1077, "polish": 104, "spanish": 918, "italian": 247, "portuguese": 161
+        }
         all_cuts = []
-        weights = []
-        for i, lang in enumerate(languages):
+        durations = []
+        
+        for lang, dur in LANGUAGES.items():    
             if self.args.use_shar:
-                logging.info(f"Loading mls cuts subset: {lang}")
+                split_dir = f"{str(self.args.speech_shar_dir)}/mls/{lang}/train"
+                logging.info(f"Loading {split_dir}")
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/mls/{lang}_train",
+                    in_dir=split_dir,
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
                 ).repeat()
-            
+                cuts = cuts.resample(16000)
             else:
                 cuts = load_manifest_lazy(
-                    self.args.manifest_dir / f"MLS_cuts_{self.args.training_subset}.jsonl.gz"
-                )
+                    self.args.manifest_dir / f"mls-asr-{lang}_train.jsonl.gz"
+                ).resample(16000)
             all_cuts.append(cuts)
-            weights.append(durations[i])
-        
-        all_cuts = CutSet.mux(
+            durations.append(dur)
+        return CutSet.mux(
             *all_cuts,
-            weights=weights,
+            weights=durations,
             stop_early=False,
         )
-        
-        return all_cuts
     
     @lru_cache()
     def multi_english_cuts(self):
@@ -1434,7 +1458,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"{self.args.speech_shar_dir}/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1467,7 +1491,7 @@ class MultiTaskDataModule:
         for dataset in datasets:
             logging.info(f"Loading {dataset}")
             cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/{dataset}",
+                in_dir=f"{self.args.speech_shar_dir}/{dataset}",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1488,14 +1512,9 @@ class MultiTaskDataModule:
         logging.info(f"Getting a total of {all_duration} hours ({all_len} samples) of Chinese speech data. ")
         return all_cuts, all_duration, all_len
     
-    @lru_cache()
-    def weread_dataset_cuts(self):
-        logging.info("About to get weread dataset")
-        
-    
     @cached_property
     def dataset_duration_stats(self):
-        stats_file = f"data/stats/stats_duration.txt"
+        stats_file = f"{self.args.shar_dir}/stats_duration.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:
@@ -1505,7 +1524,7 @@ class MultiTaskDataModule:
     
     @cached_property
     def dataset_len_stats(self):
-        stats_file = f"data/stats/stats_len.txt"
+        stats_file = f"{self.args.shar_dir}/stats_len.txt"
         stats = {}
         with open(stats_file, "r") as f:
             for line in f:
@@ -1520,7 +1539,7 @@ class MultiTaskDataModule:
             if not self.args.at_weighted_sampler:
                 if self.args.use_shar:
                     cuts = CutSet.from_shar(
-                        in_dir=f"{str(self.args.shar_dir)}/audioset/full",
+                        in_dir=f"{str(self.args.audio_shar_dir)}/audioset/full",
                         shuffle_shards=True,
                         stateful_shuffle=True,
                         seed="randomized",
@@ -1537,27 +1556,31 @@ class MultiTaskDataModule:
         else:
             if self.args.use_shar:
                 cuts = CutSet.from_shar(
-                    in_dir=f"{str(self.args.shar_dir)}/audioset/{self.args.audioset_subset}",
+                    in_dir=f"{str(self.args.audio_shar_dir)}/audioset/{self.args.audioset_subset}",
                     shuffle_shards=True,
                     stateful_shuffle=True,
                     seed="randomized",
                 ).repeat()
             else:
-                cuts = load_manifest_lazy(self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz")
-        return cuts.drop_features()
+                cuts = load_manifest_lazy(
+                    self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
+                )
+        return cuts
 
     @lru_cache()
     def audioset_eval_cuts(self) -> CutSet:
-        logging.info("About to get audioset eval cuts")
+        logging.info("About to get test-other cuts")
         if self.args.use_shar:
             logging.info(f"Use share for audioset eval cuts")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/audioset/eval",
+                in_dir=f"{self.args.audio_shar_dir}/audioset/eval",
                 shuffle_shards=False,
             )
             return cuts
-        else:
-            return load_manifest_lazy(self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz")
+        else:    
+            return load_manifest_lazy(
+                self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
+            )
         
     @lru_cache()
     def audioset_sampling_weights(self):
@@ -1577,25 +1600,6 @@ class MultiTaskDataModule:
                 weights.append(weight)
         logging.info(f"Get the sampling weight for {len(weights)} cuts")
         return weights
-
-    @lru_cache()
-    def music4all_cuts(self) -> CutSet:
-        logging.info("About to get music4all cuts")
-        if self.args.use_shar:
-            logging.info(f"Use share for music4all cuts")
-            cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/music4all/all",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-        else:
-            cuts = load_manifest_lazy(
-                self.args.manifest_dir / "music4all_cuts_all.jsonl.gz"
-            )
-            
-        cuts = cuts.map(change_to_s3_audio)
-        return cuts
     
     @lru_cache()
     def vggsound_train_cuts(self) -> CutSet:
@@ -1603,7 +1607,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use shard for vggsound")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/vggsound/train",
+                in_dir=f"{str(self.args.audio_shar_dir)}/vggsound/train",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1615,137 +1619,22 @@ class MultiTaskDataModule:
         cuts = cuts.map(change_to_s3_audio)
         return cuts
     
-    
     @lru_cache()
     def vggsound_test_cuts(self) -> CutSet:
         logging.info("About to get vgg sound test cuts")
         if self.args.use_shar:
             logging.info(f"Use shard for vggsound")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/vggsound/test",
+                in_dir=f"{str(self.args.audio_shar_dir)}/vggsound/test",
                 shuffle_shards=False,
             )
         else:
             cuts = load_manifest_lazy(
                 self.args.manifest_dir / "vggsound_cuts_test.jsonl.gz"
             )
+        cuts = cuts.map(change_to_s3_audio)
         return cuts
-            
-    @lru_cache()
-    def soundnet_train_cuts(self) -> CutSet:
-        logging.info("About to get soundnet training cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/soundnet/train",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_train.jsonl.gz"
-            )
-            
-    @lru_cache()
-    def soundnet_test_cuts(self) -> CutSet:
-        logging.info("About to get soundnet test cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/soundnet/test",
-                shuffle_shards=False,
-            )
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_test.jsonl.gz"
-            )
-    
-    @lru_cache()
-    def soundnet_raw_train_cuts(self) -> CutSet:
-        logging.info("About to get soundnet training cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"data-shar/soundnet/train",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_train.jsonl.gz"
-            )
-            
-    @lru_cache()
-    def soundnet_raw_test_cuts(self) -> CutSet:
-        logging.info("About to get soundnet test cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"data-shar/soundnet/test",
-                shuffle_shards=False,
-            )
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_test.jsonl.gz"
-            )
-            
-    @lru_cache()
-    def acavcaps_cuts(self) -> CutSet:
-        logging.info("About to get acavcaps cuts. Full version 1.0.")
-        logging.info(f"Use shard for acavcaps")
-        subsets = ["00A", "0MA", "SM0", "0M0", "S0A", "SMA", "S00"]
-        # durations = [126, 59, 2589, 1332, 958, 186, 6160]
-        durations = [162, 78, 3373, 1737, 1246, 245, 6160] # total 13000 hours, 4680000 cuts
-        
-        all_cuts = []
-        weights = []
-        for i, subset in enumerate(subsets):
-            logging.info(f"Getting acavcaps subset {subset}")
-            if self.args.use_shar:
-                cuts = CutSet.from_shar(
-                    in_dir=f"{self.args.shar_dir}/acavcaps/{subset}",
-                    shuffle_shards=True,
-                    stateful_shuffle=True,
-                    seed="randomized",
-                ).repeat()
-            else:
-                cuts = load_manifest_lazy(self.args.manifest_dir / f"acavcaps_cuts_{subset}.jsonl.gz")
-            all_cuts.append(cuts)
-            weights.append(durations[i])
-            
-        all_cuts = CutSet.mux(
-            *all_cuts,
-            weights=weights,
-            stop_early=False,
-        )
-        return all_cuts
-    
-    @lru_cache()
-    def acavcaps_raw_all_cuts(self) -> CutSet:
-        logging.info("About to get acavcaps all cuts. Download version 1.0.")
-        # 5250 hours
-        # 1887735 cuts
-        if self.args.use_shar:
-            logging.info(f"Use shard for acavcaps")
-            cuts = CutSet.from_shar(
-                in_dir="data-shar/acavcaps/all",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "acavcaps_cuts_all.jsonl.gz"
-            )
-            
-            
+
     @lru_cache()
     def mtg_cuts(self) -> CutSet:
         # 1028645 cuts, 2811:31:17 hrs
@@ -1753,7 +1642,7 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use shard for MTG cuts")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/mtg_wav",
+                in_dir=f"{str(self.args.audio_shar_dir)}/mtg_wav",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1762,21 +1651,40 @@ class MultiTaskDataModule:
             cuts = load_manifest_lazy(
                 self.args.manifest_dir / "mtg_wav_cuts_10s.jsonl.gz"
             )
-            
-        # cuts = cuts.map(change_to_s3_audio)
+
         return cuts
-        
+            
+    @lru_cache()
+    def music4all_cuts(self) -> CutSet:
+        logging.info("About to get music4all cuts")
+        if self.args.use_shar:
+            logging.info(f"Use share for music4all cuts")
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.audio_shar_dir)}/music4all/all",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+        else:
+            cuts = load_manifest_lazy(
+                self.args.manifest_dir / "music4all_cuts_all.jsonl.gz"
+            )
+            
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
+            
     @lru_cache()
     def bbc_soundeffect_train_cuts(self) -> CutSet:
         logging.info("About to get BBC sound effect training cuts")
         if self.args.use_shar:
             logging.info(f"Use shard for BBC cuts")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/bbc_soundeffect/train_10s",
+                in_dir=f"{str(self.args.audio_shar_dir)}/bbc_soundeffect/train_10s",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            cuts = cuts.map(change_to_s3_audio)
             return cuts
         else:
             return load_manifest_lazy(
@@ -1788,14 +1696,16 @@ class MultiTaskDataModule:
         logging.info("About to get BBC sound effect test cuts")
         if self.args.use_shar:
             logging.info(f"Use shard for BBC cuts")
-            return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/bbc_soundeffect/test_10s",
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.audio_shar_dir)}/bbc_soundeffect/test_10s",
                 shuffle_shards=False,
             )
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "bbc_soundeffect_cuts_test_10s.jsonl.gz"
             )
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
             
     @lru_cache()
     def freesound_train_cuts(self) -> CutSet:
@@ -1803,30 +1713,35 @@ class MultiTaskDataModule:
         if self.args.use_shar:
             logging.info(f"Use shard for freesound cuts")
             cuts = CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/freesound/train_10s",
+                in_dir=f"{str(self.args.audio_shar_dir)}/freesound/train_10s",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
-            return cuts
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "freesound_cuts_train_10s.jsonl.gz"
             )
+        
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
         
     @lru_cache()
     def freesound_test_cuts(self) -> CutSet:
         logging.info("About to get freesound test cuts")
         if self.args.use_shar:
             logging.info(f"Use shard for freesound cuts")
-            return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/freesound/test_10s",
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.audio_shar_dir)}/freesound/test_10s",
                 shuffle_shards=False,
             )
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "freesound_cuts_test_10s.jsonl.gz"
             )
+        
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
     
     @lru_cache()
     def voxceleb_cuts(self) -> CutSet:
@@ -1853,7 +1768,7 @@ class MultiTaskDataModule:
         logging.info("About to get MELD training cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/MELD/train",
+                in_dir=f"{str(self.args.speech_shar_dir)}/MELD/train",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1868,7 +1783,7 @@ class MultiTaskDataModule:
         logging.info("About to get IEMOCAP cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/iemocap/all",
+                in_dir=f"{str(self.args.speech_shar_dir)}/iemocap/all",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1883,7 +1798,7 @@ class MultiTaskDataModule:
         logging.info("About to get MEAD cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/mead/all",
+                in_dir=f"{str(self.args.speech_shar_dir)}/mead/all",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
@@ -1910,14 +1825,14 @@ class MultiTaskDataModule:
         logging.info("About to get msp podcast training cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/msp_podcast_2/Train",
+                in_dir=f"{str(self.args.speech_shar_dir)}/msp_podcast/Train",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "msp_podcast_2_cuts_Train.jsonl.gz"
+                self.args.manifest_dir / "msp_podcast_cuts_Train.jsonl.gz"
             )
             
     @lru_cache()
@@ -1925,77 +1840,51 @@ class MultiTaskDataModule:
         logging.info("About to get msp podcast development cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.shar_dir)}/msp_podcast_2/Development",
+                in_dir=f"{str(self.args.speech_shar_dir)}/msp_podcast/Development",
                 shuffle_shards=False,
             )
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "msp_podcast_2_cuts_Development.jsonl.gz"
+                self.args.manifest_dir / "msp_podcast_cuts_Development.jsonl.gz"
             )
+def fix_supervisions(cut):
+    supervision = cut.supervisions[0]
+    cut.supervisions = [supervision]
+    return cut
 
-def _test():
-    parser = argparse.ArgumentParser()
-    MultiTaskDataModule.add_arguments(parser)
-    
-    args = parser.parse_args()
-    
-    mtl_datamodule = MultiTaskDataModule(args)
-    
-    from functools import partial
-    from utils import _add_dummy_embeddings_and_taskIDs
-    from lhotse import CutSet
-    cuts_path = "cuts.json"
-    cuts = CutSet.from_json(cuts_path)
-    asr_cuts = cuts.repeat(200)
-    asr_cuts = asr_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
-    cuts[0].id = cuts[0].id + "_at"
-    at_cuts = cuts.repeat(2000)
-    at_cuts = at_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=0
-    at_cuts = at_cuts.to_eager()
-    sampling_weight = [300,100]
-    
-    train_cuts = {
-        "asr_cuts": asr_cuts,
-        "audio_tagging_cuts": at_cuts,
-    }
-    
-    train_dl = mtl_datamodule.train_dataloaders(
-        cuts_train=train_cuts,
-        sampling_weight=sampling_weight
-    )
-    num_epochs = 3
-    for epoch in range(1, num_epochs+1):
-        train_dl.sampler.set_epoch(epoch-1)
-        num1, num2 = 0, 0
-        for batch_idx, batch in enumerate(train_dl):
-            task_ids = batch["task_ids"]
-            num1 += sum(task_ids == 1)
-            num2 += sum(task_ids == 2)
-            print(f"Epoch {epoch}, batch {batch_idx}: {sum(task_ids == 1)} {sum(task_ids == 2)}")
-            cuts = batch["supervisions"]["cut"]
-            if batch_idx == 0:
-                print([c.id for c in cuts])
-        assert num2 <= args.at_num_samples
-        print(f"Number of cuts from task1: {num1}")
-        print(f"Number of cuts from task2: {num2}")
-     
+def filter_supervisions_start(c):
+    if c.supervisions[0].start != 0.0:
+        return False
+    return True
+
 def change_to_s3_audio(cut):
     source = cut.recording.sources[0].source
     new_source = source.replace("download/", "s3://yangxiaoyu/audio-dataset/")
     cut.recording.sources[0].source = new_source
     cut.recording.sources[0].type = "url"
-    return cut 
-       
-def _test_bucketing_sampler():
+    return cut
+
+if __name__=="__main__":
+    formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
+
+    logging.basicConfig(format=formatter, level=logging.INFO)
+    
     parser = argparse.ArgumentParser()
     MultiTaskDataModule.add_arguments(parser)
     
     args = parser.parse_args()
-    args.use_shar = False
-    args.on_the_fly_feats = True
-    args.max_duration = 600
+    args.gigaspeech_subset = "xl"
+    args.libriheavy_subset = "large"
     args.audioset_subset = "full"
-    args.manifest_dir = Path("data/vq_dasheng_large_layer_-1_normalize_0_cb_8")
+    args.use_shar = True
+    args.speech_shar_dir = "data-shar/data-shar-hubert-large-layer-21-normalize-cb16-hdf5"
+    args.audio_shar_dir = "data-shar/data-shar-dasheng-as-cb8"
+    args.num_buckets = 20
+    args.on_the_fly_feats = 1
+    args.sync_buckets = False
+    args.num_workers = 0
+    args.at_KD = False
+    args.max_duration = 400
     
     mtl_datamodule = MultiTaskDataModule(args)
     
@@ -2003,38 +1892,60 @@ def _test_bucketing_sampler():
     from utils import _add_dummy_embeddings_and_taskIDs
     from lhotse import CutSet
     
-    cuts_audioset = mtl_datamodule.audioset_cuts()
-    cuts_audioset = cuts_audioset.map(partial(_add_dummy_embeddings_and_taskIDs, 2))
-    cuts_music4all = mtl_datamodule.music4all_cuts()
-    cuts_music4all = cuts_music4all.map(partial(_add_dummy_embeddings_and_taskIDs, 3))
+    import pdb; pdb.set_trace()
+    libriheavy_cuts = mtl_datamodule.libriheavy_train_cuts()
+    gigaspeech_cuts = mtl_datamodule.gigaspeech_train_cuts()
+    asr_cuts = [libriheavy_cuts, gigaspeech_cuts]
+    asr_cuts = CutSet.mux(
+        *asr_cuts,
+        weights=[10093746, 8611516],
+        stop_early=False,
+    )
+    asr_cuts = asr_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 1)) # ASR task ID=0
     
-    cuts_train = CutSet.mux(
-        *[cuts_audioset, cuts_music4all],
-        weights=[1904746,109269],
-        stop_early=False
+    def change_codebook_indexes(c):
+        c.audio_codebook_indexes = c.codebook_indexes
+        del c.codebook_indexes
+        return c
+    
+    audio_cuts = mtl_datamodule.audioset_cuts().repeat(4)
+    audio_cuts = audio_cuts.map(partial(_add_dummy_embeddings_and_taskIDs, 2)) # ASR task ID=0
+    audio_cuts = audio_cuts.map(change_codebook_indexes)
+    
+    train_cuts = [asr_cuts, audio_cuts]
+    train_cuts = CutSet.mux(
+        *train_cuts,
+        weights=[2,1],
+        stop_early=False,
     )
     
+    import pdb; pdb.set_trace()
     train_dl = mtl_datamodule.train_dataloaders(
-        cuts_train=cuts_train,
-        sampling_weight=[100]
+        cuts_train=train_cuts,
     )
-    count = {
-        "audioset": 0,
-        "music": 0,
-    }
-    
-    for batch_idx, batch in enumerate(train_dl):
-        # import pdb; pdb.set_trace()
-        task_ids = batch["task_ids"]
-        num_as_cuts = (task_ids == 2).sum()
-        num_music_cuts = (task_ids == 3).sum()
-        count["audioset"] += num_as_cuts
-        count["music"] += num_music_cuts
-        print(count)
-        if batch_idx > 1000:
-            break
-    
-    
-
-if __name__=="__main__":
-    _test_bucketing_sampler()
+    num_epochs = 3
+    import pdb; pdb.set_trace()
+    for epoch in range(1, num_epochs+1):
+        # train_dl.sampler.set_epoch(epoch-1)
+        num1, num2 = 0, 0
+        duration1, duration2 = 0,0
+        for batch_idx, batch in enumerate(train_dl):
+            task_ids = batch["task_ids"]
+            num1 += sum(task_ids == 1)
+            num2 += sum(task_ids == 2)
+            cuts = batch["supervisions"]["cut"]
+            cuts_1 = [c for c in cuts if c.task_id == 1]
+            cuts_2 = [c for c in cuts if c.task_id == 2]
+            duration1 += sum([c.duration for c in cuts_1])
+            duration2 += sum([c.duration for c in cuts_2])
+            logging.info(f"Epoch {epoch}, batch {batch_idx}: {sum(task_ids == 1)}, {sum(task_ids == 2)}")
+            cuts = batch["supervisions"]["cut"]
+            if batch_idx == 200:
+                break
+            # if batch_idx == 0:
+            #     print([c.id for c in cuts])
+        assert num2 <= args.at_num_samples
+        print(f"Sample stats: {num1}, {num2}; Duration stats: {duration1}, {duration2}")
+        # print(f"Number of cuts from task1: {num1}")
+        # print(f"Number of cuts from task2: {num2}")
+        

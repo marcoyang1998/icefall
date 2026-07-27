@@ -339,6 +339,13 @@ class MultiTaskDataModule:
             default=False,
         )
         
+        group.add_argument(
+            "--librimix-subset",
+            type=str,
+            default="train-clean-100",
+            choices=["train-clean-100", "train-clean-360", "train-all"]
+        )
+        
         # KD related
         group.add_argument(
             "--mvq-KD",
@@ -1221,7 +1228,34 @@ class MultiTaskDataModule:
                 self.args.manifest_dir / "cuts_vox2_train.jsonl.gz"
             )
         return cuts
+    
+    @lru_cache()
+    def librimix_train_clean_100_cuts(self) -> CutSet:
+        logging.info("About to get librimix train_clean_100 cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_train-clean-100.jsonl.gz"
+        )
+        
+    @lru_cache()
+    def librimix_train_clean_360_cuts(self) -> CutSet:
+        logging.info("About to get librimix train_clean_360 cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_train-clean-360.jsonl.gz"
+        )
 
+    @lru_cache()
+    def librimix_dev_cuts(self) -> CutSet:
+        logging.info("About to get librimix dev cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_dev-clean.jsonl.gz"
+        )
+    
+    @lru_cache()
+    def librimix_test_cuts(self) -> CutSet:
+        logging.info("About to get librimix test cuts")
+        return load_manifest_lazy(
+            self.args.manifest_dir / "librispeech_cuts_test-clean.jsonl.gz"
+        )
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()

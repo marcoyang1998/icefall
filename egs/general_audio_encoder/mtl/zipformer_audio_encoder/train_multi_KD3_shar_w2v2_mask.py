@@ -290,7 +290,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--do-audio-tagging",
         type=str2bool,
-        default=True,
+        default=False,
         help="If do audio tagging multi task training"
     )
     
@@ -793,6 +793,11 @@ def get_model(params: AttributeDict) -> nn.Module:
                 "However, the output downsampling factor is 1. This could be wrong!"
             )
         params.subsampling_factor = 2
+        
+    if params.distillation_delta > 0:
+        assert params.causal
+        logging.info(f"Using delta={params.distillation_delta} during for MVQ-KD pre-training.")
+        
     assert params.enable_spec_aug == False, "Should not use specaug when using w2v2 style masking"
     if params.loss_only_mask:
         logging.info("Only computing loss on the masked positions")
@@ -1249,7 +1254,7 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad()
         except:  # noqa
-            save_bad_model()
+            # save_bad_model()
             display_and_save_batch(batch, params=params, sp=sp)
             raise
 
@@ -1474,6 +1479,7 @@ def run(rank, world_size, args):
     asr_training_cuts = []
     asr_training_cuts_lens = []
     asr_training_cuts_duration = []
+    
     if params.use_librispeech:
         if not params.full_libri: 
             librispeech_cuts = librispeech.train_clean_100_cuts()
@@ -1521,7 +1527,18 @@ def run(rank, world_size, args):
             "medium": 4208 + 473,
             "large": 42683 + 4208 + 473,  # 47364 hrs 
         }
+        def change_to_s3(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/librilight/", 
+                "s3://yangxiaoyu/librilight_split/"
+            )
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            return c
         libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        libriheavy_cuts = libriheavy_cuts.map(change_to_s3)
+        logging.info(libriheavy_cuts[0])
         asr_training_cuts.append(libriheavy_cuts)
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
@@ -1534,13 +1551,34 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(3059813)
         asr_training_cuts_duration.append(24151)
     
+    if params.use_yodas:
+        yodas_cuts = librispeech.yodas_granary_cuts()
+        yodas_cuts = yodas_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(yodas_cuts)
+        asr_training_cuts_lens.append(37965268)
+        asr_training_cuts_duration.append(93784)
+    
     if params.use_mls:
         mls_cuts = librispeech.mls_cuts()
         mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
         # mls cuts: 10801 hrs, 2619190 cuts
         asr_training_cuts.append(mls_cuts)
-        asr_training_cuts_lens.append(2619190)
-        asr_training_cuts_duration.append(10801)
+        asr_training_cuts_lens.append(1400000) # estimated, not exact
+        asr_training_cuts_duration.append(6024)
+    
+    if params.use_fleurs:
+        fleur_cuts = librispeech.fleurs_train_cuts()
+        fleur_cuts = fleur_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(fleur_cuts)
+        asr_training_cuts_lens.append(271798) # estimated, not exact
+        asr_training_cuts_duration.append(987)
+        
+    if params.use_commonvoice:
+        commonvoice_cuts = librispeech.commonvoice_cuts()
+        commonvoice_cuts = commonvoice_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(commonvoice_cuts)
+        asr_training_cuts_lens.append(6690668) # estimated, not exact
+        asr_training_cuts_duration.append(9757)
     
     if params.use_extra_english_dataset:
         englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
@@ -1554,13 +1592,20 @@ def run(rank, world_size, args):
         wenetspeech_cuts_len = {
             "S": 151600,
             "M": 1514500,
-            "L": 13306651, # TODO: update this number
+            "L": 14625245, # TODO: update this number
         }
         wenetspeech_cuts_duration = {
             "S": 100,
             "M": 1000,
-            "L": 9700,
+            "L": 10000,
         }
+        def convert_to_s3(cut):
+            source = cut.recording.sources[0].source
+            new_source = source.replace("download/", "s3://yangxiaoyu/speech-dataset/")
+            cut.recording.sources[0].source = new_source
+            cut.recording.sources[0].type = "url"
+            return cut
+        wenetspeech_cuts = wenetspeech_cuts.map(convert_to_s3)
         wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(wenetspeech_cuts)
         asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
@@ -1574,17 +1619,18 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(chinese_cut_durations)
         
     if params.use_emotion_dataset:
-        other_emotion_cuts = librispeech.multi_emotion_cuts()
+        multi_emotion_cuts = librispeech.multi_emotion_cuts()
         msp_podcast_cuts = librispeech.msp_podcast_train_cust()
         emotion_cuts = CutSet.mux(
-            *[other_emotion_cuts, msp_podcast_cuts],
-            weights=[134, 52],
+            *[multi_emotion_cuts, msp_podcast_cuts],
+            weights=[52, 256],
             stop_early=False,
         )
+        emotion_cuts = emotion_cuts.resample(16000)
         emotion_cuts = emotion_cuts.map(partial(_add_task_id, 1)) # for now we treat ER cuts as part of ASR cuts
         asr_training_cuts.append(emotion_cuts)
-        asr_training_cuts_lens.append(130297 * params.repeat_emo)  # 46267 + 84030
-        asr_training_cuts_duration.append(186 * params.repeat_emo) # 52 + 134
+        asr_training_cuts_lens.append(215457 * params.repeat_emo)  # 46267 + 169190
+        asr_training_cuts_duration.append(308 * params.repeat_emo) # 52 + 256
     
     # combine the asr data into a BIG cut
     if len(asr_training_cuts) >= 1:
@@ -1626,7 +1672,17 @@ def run(rank, world_size, args):
             "balanced": 50,
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download3/" # use local
+            )
+            c.recording.sources[0].source = source
+            return c
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+        audioset_cuts = audioset_cuts.map(change_source)
+        logging.info(audioset_cuts[0])
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         audio_training_cuts.append(audioset_cuts)
         audio_training_cuts_lens.append(num_audio_cuts)
@@ -1664,11 +1720,28 @@ def run(rank, world_size, args):
     
     if params.use_mtg:
         # split into 10s
-        mtg_cuts = librispeech.mtg_cuts() # 
+        mtg_cuts = librispeech.mtg_cuts() 
         mtg_cuts = mtg_cuts.map(partial(_add_task_id, 2))
         audio_training_cuts.append(mtg_cuts)
         audio_training_cuts_lens.append(1032727)
         audio_training_cuts_duration.append(2812)
+        
+    if params.use_soundnet:
+        logging.info(f"Getting soundnet cuts")
+        soundnet_cuts = librispeech.soundnet_train_cuts()
+        soundnet_cuts = soundnet_cuts.map(partial(_add_task_id, 2))
+        audio_training_cuts.append(soundnet_cuts)
+        soundnet_cuts_lens = 9569658
+        soundnet_cuts_duration = 25078
+        audio_training_cuts_lens.append(soundnet_cuts_lens * params.repeat_soundnet)
+        audio_training_cuts_duration.append(soundnet_cuts_duration * params.repeat_soundnet)
+        
+    if params.use_acavcaps:
+        acavcaps_cuts = librispeech.acavcaps_cuts() # 5250 hours, 1887735 cuts
+        acavcaps_cuts = acavcaps_cuts.map(partial(_add_task_id, 2))
+        audio_training_cuts.append(acavcaps_cuts)
+        audio_training_cuts_lens.append(4680000 * params.repeat_acavcaps)
+        audio_training_cuts_duration.append(13000 * params.repeat_acavcaps)
 
     # combine the audio datasets
     if len(audio_training_cuts) >= 1:
@@ -1694,7 +1767,7 @@ def run(rank, world_size, args):
     params.train_duration = sum(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        if c.duration < 0.98 or c.duration > 31:
+        if c.duration < 0.98 or c.duration > 35:
             return False
         return True
     
@@ -1746,7 +1819,7 @@ def run(rank, world_size, args):
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_task_id, 1))
-        asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
+        asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank)
         valid_sets.append("ASR_ls")
         valid_dls.append(asr_ls_valid_dl)
         
@@ -1756,17 +1829,18 @@ def run(rank, world_size, args):
         asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_giga")
         valid_dls.append(asr_giga_valid_dl)
-    
-    if params.use_wenetspeech:
-        wenet_dev_cuts = librispeech.wenetspeech_valid_cuts()
-        wenet_dev_cuts = wenet_dev_cuts.map(partial(_add_task_id, 1))
-        asr_wenet_valid_dl = librispeech.valid_dataloaders(wenet_dev_cuts, world_size=world_size, rank=rank,)
-        valid_sets.append("ASR_wenet")
-        valid_dls.append(asr_wenet_valid_dl)
+        
+    if params.use_fleurs:
+        fleurs_dev_cuts = librispeech.fleurs_dev_cuts_5k()
+        fleurs_dev_cuts = fleurs_dev_cuts.map(partial(_add_task_id, 1))
+        asr_fleur_dev_dl = librispeech.valid_dataloaders(fleurs_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ASR_fleurs")
+        valid_dls.append(asr_fleur_dev_dl)
     
     if params.use_emotion_dataset:
         msp_podcast_dev_cuts = librispeech.msp_podcast_dev_cust()
         msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(partial(_add_task_id, 1))
+        msp_podcast_dev_cuts = msp_podcast_dev_cuts.resample(16000)
         er_msp_dev_dl = librispeech.valid_dataloaders(msp_podcast_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ER_msp_podcast")
         valid_dls.append(er_msp_dev_dl)
@@ -1774,6 +1848,7 @@ def run(rank, world_size, args):
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
+        as_eval_cuts = as_eval_cuts.map(change_source)
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
@@ -1834,7 +1909,7 @@ def run(rank, world_size, args):
         )
 
         if params.print_diagnostics:
-            diagnostic.print_diagnostics()
+            diagnostics.print_diagnostics()
             break
 
         if params.batch_idx_train > params.max_iters:

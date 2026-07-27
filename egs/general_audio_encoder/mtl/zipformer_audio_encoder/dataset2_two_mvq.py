@@ -182,6 +182,15 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             pad_value=-100,
         )
         
+        mvq_tokens_2, mvq_token_lens_2 = _collate_custom_field(
+            cuts_pre_mixed,
+            "ft_mvq_codebook_indexes",
+            dummy=self.dummy_codebook_indexes,
+            temporal_array=True,
+            target_frame_rate=self.target_frame_rate,
+            pad_value=-100,
+        )
+        
         if self.at_KD:
             # at_targets = collate_custom_field(
             #     cuts_pre_mixed, "beats_embedding", pad_value=-100
@@ -205,8 +214,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         batch = {
             "inputs": inputs,
-            "cb_indexes": mvq_tokens,
-            "cb_indexes_len": mvq_token_lens,
+            "cb_indexes": [mvq_tokens, mvq_tokens_2],
+            "cb_indexes_len": [mvq_token_lens, mvq_token_lens_2],
             "supervisions": default_collate(
                 [
                     {
@@ -252,17 +261,13 @@ def validate_multi_kd(cuts: CutSet) -> None:
             # audio cuts, should have audio logits
             assert cut.beats_embedding.storage_key != "dummy_beats_embedding"
 
-def load_codebook_indexes(c):
-    info = c.codebook_indexes
-    
+def load_codebook_indexes(c, field: str = "codebook_indexes"):
+    info = getattr(c, field)
     if isinstance(info, dict):
         filename = info["path"]
-        with open(filename, "rb") as f:
-            cb_indexes = np.load(f)
-        # return np.load(filename, mmap_mode="r")
+        return np.load(filename)
     else:
-        cb_indexes = c.load_custom("codebook_indexes")
-    return cb_indexes
+        return c.load_custom(field)
 
 def _collate_custom_field(
     cuts: CutSet, 
@@ -280,7 +285,7 @@ def _collate_custom_field(
         temporal_dim = 0
         pad_value = -100
         arrs = [
-            torch.from_numpy(load_codebook_indexes(c)) if c.has_custom(field) else dummy for c in cuts # load the numpy codebook indexes
+            torch.from_numpy(load_codebook_indexes(c, field)) if c.has_custom(field) else dummy for c in cuts # load the numpy codebook indexes
         ]
         for i, arr in enumerate(arrs):
             arrs[i] = arr[:max_frames[i],:]

@@ -1,4 +1,4 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 #
 # Copyright    2024  University of Cambridge  (authors: Xiaoyu Yang,
 #
@@ -63,12 +63,12 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar_speech_audio_multi_teacher2 import MultiTaskDataModule
+from kd_datamodule3_shar import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd_multi_teacher import MultiKDModel
+from model_kmeans_w2v2_mask import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -280,6 +280,7 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "chunk left-context frames will be chosen randomly from this list; else not relevant.",
     )
 
+    # mvq related
     parser.add_argument(
         "--do-mvq",
         type=str2bool,
@@ -302,20 +303,20 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     
     parser.add_argument(
         "--distillation-layer",
-        type=str,
-        default="-1,-1",
+        type=int,
+        default=-1,
     )
     
     parser.add_argument(
         "--distillation-delta",
-        type=str,
-        default="0,0",
+        type=int,
+        default=0,
     )
     
     parser.add_argument(
         "--teacher-frame-ratio",
-        type=str,
-        default="2,2",
+        type=int,
+        default=2,
         help="The frame rate ratio between teacher and student"
     )
     
@@ -329,8 +330,16 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     
     parser.add_argument(
         "--num-codebooks",
-        type=str,
-        default="16,16",
+        type=int,
+        default=1,
+    )
+    
+    parser.add_argument(
+        "--mvq-loss-by-task",
+        type=str2bool,
+        default=True,
+        help="If True, only compute MVQ loss on the task from which the sample is drawn."
+        "Otherwise, ignore the task_ids and treat all data as if they come from the same task"
     )
     
     # masking related
@@ -384,6 +393,14 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.0,
         help="probability of replacing a channel with mask",
+    )
+    
+    # normalization
+    parser.add_argument(
+        "--normalize-fbank",
+        type=str2bool,
+        default=False,
+        help="If perform normalization to the input fbank features"
     )
 
 
@@ -485,7 +502,7 @@ def get_parser():
         "--lr-hours",
         type=float,
         default=30000,
-        help="""Number of epochs that affects how rapidly the learning rate decreases.
+        help="""Number of hours trained speech that affects how rapidly the learning rate decreases.
         """,
     )
 
@@ -549,21 +566,6 @@ def get_parser():
         type=float,
         default=1.0,
         help="Scale for audio tagging loss.",
-    )
-    
-    # TODO: make this applicable to more than two losses
-    parser.add_argument(
-        "--speech-mvq-loss-scale",
-        type=float,
-        default=1.0,
-        help="The scale of speech mvq losses"
-    )
-
-    parser.add_argument(
-        "--audio-mvq-loss-scale",
-        type=float,
-        default=1.0,
-        help="The scale of audio mvq losses"
     )
     
     parser.add_argument(
@@ -649,6 +651,18 @@ def get_parser():
         type=str2bool,
         default=True,
         help="If stop early if using mux"
+    )
+    
+    parser.add_argument(
+        "--estimate-epoch",
+        type=str2bool,
+        default=True,
+    )
+    
+    parser.add_argument(
+        "--use-cfs",
+        type=str2bool,
+        default=False,
     )
 
     add_finetune_arguments(parser)
@@ -779,28 +793,32 @@ def get_model(params: AttributeDict) -> nn.Module:
         
     if params.output_downsampling_factor == 1:
         logging.info(f"Setting the output downsample factor to 1.")
-        teacher_frame_ratios = _to_int_tuple(params.teacher_frame_ratio)
-        for ratio in teacher_frame_ratios:
-            if ratio > 1:
-                logging.warning(
-                    f"You are using teacher_frame_ratio={ratio}. "
-                    "However, the output downsampling factor is 1. This could be wrong!"
-                )
-        params.subsampling_factor = 2 
-    
+        if params.teacher_frame_ratio > 1:
+            logging.warning(
+                f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
+                "However, the output downsampling factor is 1. This could be wrong!"
+            )
+        params.subsampling_factor = 2
+        
+    if params.distillation_delta > 0:
+        assert params.causal
+        logging.info(f"Using delta={params.distillation_delta} during for MVQ-KD pre-training.")
+        
     assert params.enable_spec_aug == False, "Should not use specaug when using w2v2 style masking"
     if params.loss_only_mask:
         logging.info("Only computing loss on the masked positions")
-
+    if params.normalize_fbank:
+        logging.info("Normalizing the input fbank features")
+    
     model = MultiKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
-        num_codebooks=_to_int_tuple(params.num_codebooks),
-        distillation_layer=_to_int_tuple(params.distillation_layer),
-        distillation_delta=_to_int_tuple(params.distillation_delta),
+        num_codebooks=params.num_codebooks,
+        distillation_layer=params.distillation_layer,
+        distillation_delta=params.distillation_delta,
         interpolate_teacher=params.interpolate_teacher,
-        teacher_frame_ratio=_to_int_tuple(params.teacher_frame_ratio),
+        teacher_frame_ratio=params.teacher_frame_ratio,
         n_mels=params.feature_dim,
         mask_mode=params.mask_mode,
         mask_prob=params.mask_prob,
@@ -810,6 +828,7 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_channel_prob=params.mask_channel_prob,
         mask_channel_length=params.mask_channel_length,
         loss_only_mask=params.loss_only_mask,
+        normalize_fbank=params.normalize_fbank,
     )
     return model
 
@@ -972,6 +991,11 @@ def save_checkpoint(
         best_valid_filename = params.exp_dir / "best-valid-loss.pt"
         copyfile(src=filename, dst=best_valid_filename)
 
+def collate_kmeans_tokens(cuts):
+    cuts = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
+    tokens = [torch.tensor(c.tokens) for c in cuts]
+    tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=-100)
+    return tokens
 
 def compute_loss(
     params: AttributeDict,
@@ -1006,20 +1030,21 @@ def compute_loss(
 
     supervisions = batch["supervisions"]
     cuts = supervisions["cut"]
-    cut_ids = [c.id for c in cuts]
         
     feature_lens = supervisions["num_frames"].to(device)
-    task_ids = batch["task_ids"].int().to(device) 
+    task_ids = batch["task_ids"].int().to(device)
     
     if random.random() < 0.01 and is_training:
+        cuts = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
         for t in range(1, params.num_tasks+1):
             duration = sum([c.duration for c in cuts if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
             logging.info(f"Total duration of task {t}: {duration}")
-    
-    # mvq tokens
-    mvq_tokens = batch["cb_indexes"]
-    mvq_tokens = [tokens.to(device) for tokens in mvq_tokens]
+
+    # kmeans tokens
+    kmeans_tokens = collate_kmeans_tokens(cuts).to(device)
+    if kmeans_tokens.ndim == 2:
+        kmeans_tokens = kmeans_tokens.unsqueeze(-1)  # (N, T, 1)
     
     # audio tagging label
     if params.do_audio_tagging:
@@ -1028,56 +1053,27 @@ def compute_loss(
         at_targets = None
     
     with torch.set_grad_enabled(is_training):
-        losses = model(
+        mvq_loss, audio_tagging_loss = model(
             x=feature,
             x_lens=feature_lens,
-            codebook_indexes=mvq_tokens,
+            codebook_indexes=kmeans_tokens,
             at_targets=at_targets,
         )
 
-        speech_mvq_loss, audio_mvq_loss = losses[:-1]
-        audio_tagging_loss = losses[-1]
         loss = 0.0
 
         # task_id=1: ASR data
         # task_id=2: AT data
-        
-        # MVQ loss, first is speech-based MVQ, second is audio-based MVQ, third is speech2audio MVQ loss
-        mvq_loss_values = []
+
+        # MVQ loss 
         if params.do_mvq:
+            if params.mvq_loss_by_task:
+                mask = task_ids == 1 # ASR=1
+                mvq_loss = (mvq_loss * mask).sum()
+            else:
+                mvq_loss = mvq_loss.sum()
+            loss += mvq_loss
             
-            # NOTE: we always only compute speech mvq loss against the speech teacher
-            # so only speech_mvq_loss will be used
-            
-            # 1. Compute the speech mvq loss induced by the speech teacher on speech data
-            speech_mask = task_ids == 1 # speech data task_id=1
-            num_speech_frames = feature_lens[speech_mask].sum() // 4 # equivalent frames
-            if torch.isnan(speech_mvq_loss).any(): # filter the nan loss
-                logging.info(f"Detected NaN in speech mvq loss")
-                speech_mvq_loss = torch.nan_to_num(speech_mvq_loss, nan=0.0)
-            speech2speech_mvq_loss = (speech_mvq_loss * speech_mask).sum()
-            mvq_loss_values.append(speech2speech_mvq_loss)
-            loss += speech2speech_mvq_loss * params.speech_mvq_loss_scale # TODO: make this an option
-            
-            
-            # NOTE: In this version of training, we compute audio mvq loss against two teachers!
-            # 2. Compute the audio mvq loss induced by the audio teacher on audio data
-            correction_factor = 1.0
-            audio_mask = task_ids == 2
-            
-            if torch.isnan(audio_mvq_loss).any():
-                logging.info(f"Detected NaN in audio mvq loss")
-                audio_mvq_loss = torch.nan_to_num(audio_mvq_loss, nan=0.0)
-            audio_mvq_loss = (audio_mvq_loss * audio_mask).sum()
-            mvq_loss_values.append(audio_mvq_loss) # the un-normalized loss
-        
-            loss += audio_mvq_loss * correction_factor * params.audio_mvq_loss_scale # TODO: make this an option
-            
-            # 3. Compute the mvq loss induced by the speech teacher on audio data
-            speech2audio_mvq_loss = (speech_mvq_loss * audio_mask).sum()
-            mvq_loss_values.append(speech2audio_mvq_loss)
-            loss += speech2audio_mvq_loss * correction_factor * params.speech_mvq_loss_scale
-        
         # AT loss
         if params.do_audio_tagging:
             mask = task_ids == 2 # AT=2
@@ -1086,23 +1082,19 @@ def compute_loss(
 
     assert loss.requires_grad == is_training
 
-    info = MetricsTracker(normalize=True)
+    info = MetricsTracker()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
         info["utterances"] = task_ids.size(0)
 
-    # Note: We use reduction=sum while computing the loss
+    # Note: We use reduction=sum while computing the loss.
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
-        teachers = ["speech", "audio", "speech2audio"]
-        for i, mvq_loss in enumerate(mvq_loss_values):
-            info[f"{teachers[i]}_mvq_loss"] = mvq_loss.detach().cpu().item()
+        info["mvq_loss"] = mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 
-    # logging.info(f"Batch: {params.batch_idx_train}: speech mvq loss: {speech_mvq_loss}, num_frames: {num_speech_frames}")
-    # logging.info(f"Batch: {params.batch_idx_train}: audio mvq loss: {audio_mvq_loss}, num_frames: {num_audio_frames}")
     return loss, info
 
 
@@ -1116,7 +1108,7 @@ def compute_validation_loss(
     """Run the validation process."""
     model.eval()
 
-    tot_loss = MetricsTracker(normalize=True)
+    tot_loss = MetricsTracker()
 
     for batch_idx, batch in enumerate(valid_dl):
         loss, loss_info = compute_loss(
@@ -1200,11 +1192,11 @@ def train_one_epoch(
             params=params,
             optimizer=optimizer,
             scheduler=scheduler,
-            sampler=train_dl.sampler if not params.use_shar else None,
+            sampler=train_dl.sampler,
             scaler=scaler,
             rank=0,
         )
-        
+    
     def estimate_cur_epoch(max_duration: float, world_size: int, steps: int, train_hrs: int):
         estimated_hours = max_duration * world_size * steps / 3600
         estimated_epochs = estimated_hours // train_hrs
@@ -1212,14 +1204,11 @@ def train_one_epoch(
 
     shard_count = {}
     shard_durations_count = {}
-    total_speech_durations = 0.0
-    total_audio_durations = 0.0
     cur_epoch = 0
     for batch_idx, batch in enumerate(train_dl):
         if batch_idx % 10 == 0:
             set_batch_count(model, get_adjusted_batch_count(params))
-            
-        if params.use_shar:
+        if params.use_shar and params.estimate_epoch:
             est_epoch = estimate_cur_epoch(
                 params.max_duration, world_size, params.batch_idx_train, params.train_duration,
             )
@@ -1250,18 +1239,7 @@ def train_one_epoch(
             for sh in shard_origin:
                 count[sh] += 1
                 
-            task_ids = batch["task_ids"]
-            num_speech_cuts = sum(task_ids == 1).item()
-            speech_duration = sum([c.duration for c in cuts if c.task_id == 1])
-            total_speech_durations += speech_duration / 3600
-            num_audio_cuts = sum(task_ids == 2).item()
-            audio_duration = sum([c.duration for c in cuts if c.task_id == 2])
-            total_audio_durations += audio_duration / 3600
-            
             if batch_idx % 100 == 1:
-                logging.info(f"batch {batch_idx}: task cuts: {num_speech_cuts}, {num_audio_cuts}, task durations: {speech_duration}, {audio_duration}")
-                logging.info(f"Duration stats by far: speech: {total_speech_durations}, audio: {total_audio_durations}")
-
                 logging.info(f"All shards source by far: {shard_count}")
                 logging.info(f"All shard duration by far: {shard_durations_count}")
         try:
@@ -1394,7 +1372,8 @@ def train_one_epoch(
                         tb_writer, f"train/valid_{valid_set}", params.batch_idx_train
                     )
             model.train()
-        if params.use_shar and params.batch_idx_train > params.max_iters:
+        # the max iteration criteria should be applied to both shar and non-shar
+        if params.batch_idx_train > params.max_iters:
             return
 
     loss_value = tot_loss["loss"] / tot_loss["frames"]
@@ -1446,6 +1425,8 @@ def run(rank, world_size, args):
 
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
+    num_param_prediction_head = sum([p.numel() for p in model.codebook_loss_net.parameters()])
+    logging.info(f"Number of encoder parameters: {num_param - num_param_prediction_head}")
 
     assert params.save_every_n >= params.average_period
     model_avg: Optional[nn.Module] = None
@@ -1462,8 +1443,7 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        logging.info(f"Creating Model on {local_rank}")
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     parameters = get_parameter_groups_with_lrs(
         model, lr=params.base_lr, include_names=True
@@ -1498,9 +1478,6 @@ def run(rank, world_size, args):
     if params.inf_check:
         register_inf_check_hooks(model)
 
-    # import torch.distributed as dist
-    # logging.info("Backend:", dist.get_backend())
-    
     librispeech = MultiTaskDataModule(args)
 
     # When using zip sampler to combine speech and audio data
@@ -1529,7 +1506,6 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(librispeech_cuts_len * params.repeat_librispeech)
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
         
-    
     if params.use_gigaspeech:
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
@@ -1544,29 +1520,12 @@ def run(rank, world_size, args):
             "s": 250, # 250 hrs
             "m": 1000, # 1000 hrs
             "l": 2500, # 2500 hrs
-            "xl": 10000 # 10000 hrs, avg dur 4.2s
+            "xl": 10000 # 10000 hrs
         }
         gigaspeech_cuts = gigaspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
         asr_training_cuts.append(gigaspeech_cuts)
-        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset] * params.repeat_gigaspeech)
-        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset] * params.repeat_gigaspeech)
-        
-    if params.use_wenetspeech:
-        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
-        wenetspeech_cuts_len = {
-            "S": 151600,
-            "M": 1514500,
-            "L": 13306651, # TODO: update this number
-        }
-        wenetspeech_cuts_duration = {
-            "S": 100,
-            "M": 1000,
-            "L": 9700,
-        }
-        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
-        asr_training_cuts.append(wenetspeech_cuts)
-        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
-        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
+        asr_training_cuts_lens.append(gigaspeech_cuts_len[params.gigaspeech_subset])
+        asr_training_cuts_duration.append(gigaspeech_cuts_duration[params.gigaspeech_subset])
     
     if params.use_libriheavy:
         libriheavy_cuts = librispeech.libriheavy_train_cuts()
@@ -1585,21 +1544,73 @@ def run(rank, world_size, args):
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
     
-    if params.use_commonvoice:
-        cv_cuts = librispeech.commonvoice_en_train_cuts()
-        cv_cuts = cv_cuts.map(partial(_add_task_id, 1))
-        
-        asr_training_cuts.append(cv_cuts)
-        asr_training_cuts_lens.append(1100825)
-        asr_training_cuts_duration.append(1738)
+    if params.use_voxpopuli:
+        voxpopuli_cuts = librispeech.voxpopuli_unlabelled_cuts()
+        voxpopuli_cuts = voxpopuli_cuts.map(partial(_add_task_id, 1))
+        # vox en unlabelled: 24151 hrs, 3059813 cuts
+        asr_training_cuts.append(voxpopuli_cuts)
+        asr_training_cuts_lens.append(3059813)
+        asr_training_cuts_duration.append(24151)
+    
+    if params.use_yodas:
+        yodas_cuts = librispeech.yodas_granary_cuts()
+        yodas_cuts = yodas_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(yodas_cuts)
+        asr_training_cuts_lens.append(37965268)
+        asr_training_cuts_duration.append(93784)
     
     if params.use_mls:
-        mls_cuts = librispeech.mls_train_cuts()
+        mls_cuts = librispeech.mls_cuts()
         mls_cuts = mls_cuts.map(partial(_add_task_id, 1))
-        # mls cuts: 6000 hrs, 1409826 cuts
+        # mls cuts: 10801 hrs, 2619190 cuts
         asr_training_cuts.append(mls_cuts)
-        asr_training_cuts_lens.append(1409826)
-        asr_training_cuts_duration.append(6000)
+        asr_training_cuts_lens.append(1400000) # estimated, not exact
+        asr_training_cuts_duration.append(6024)
+    
+    if params.use_fleurs:
+        fleur_cuts = librispeech.fleurs_train_cuts()
+        fleur_cuts = fleur_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(fleur_cuts)
+        asr_training_cuts_lens.append(271798) # estimated, not exact
+        asr_training_cuts_duration.append(987)
+        
+    if params.use_commonvoice:
+        commonvoice_cuts = librispeech.commonvoice_cuts()
+        commonvoice_cuts = commonvoice_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(commonvoice_cuts)
+        asr_training_cuts_lens.append(6690668) # estimated, not exact
+        asr_training_cuts_duration.append(9757)
+    
+    if params.use_extra_english_dataset:
+        englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
+        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
+        asr_training_cuts.append(englishs_cuts)
+        asr_training_cuts_lens.append(english_cuts_len)
+        asr_training_cuts_duration.append(english_cut_durations)
+    
+    if params.use_wenetspeech:
+        wenetspeech_cuts = librispeech.wenetspeech_train_cuts()
+        wenetspeech_cuts_len = {
+            "S": 151600,
+            "M": 1514500,
+            "L": 14625245, # TODO: update this number
+        }
+        wenetspeech_cuts_duration = {
+            "S": 100,
+            "M": 1000,
+            "L": 10000,
+        }
+        def convert_to_s3(cut):
+            source = cut.recording.sources[0].source
+            new_source = source.replace("download/", "s3://yangxiaoyu/speech-dataset/")
+            cut.recording.sources[0].source = new_source
+            cut.recording.sources[0].type = "url"
+            return cut
+        wenetspeech_cuts = wenetspeech_cuts.map(convert_to_s3)
+        wenetspeech_cuts = wenetspeech_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        asr_training_cuts.append(wenetspeech_cuts)
+        asr_training_cuts_lens.append(wenetspeech_cuts_len[params.wenetspeech_subset])
+        asr_training_cuts_duration.append(wenetspeech_cuts_duration[params.wenetspeech_subset])
     
     if params.use_extra_chinese_dataset:
         chineses_cuts, chinese_cut_durations, chinese_cuts_len = librispeech.multi_chinese_cuts()
@@ -1607,13 +1618,6 @@ def run(rank, world_size, args):
         asr_training_cuts.append(chineses_cuts)
         asr_training_cuts_lens.append(chinese_cuts_len)
         asr_training_cuts_duration.append(chinese_cut_durations)
-        
-    if params.use_extra_english_dataset:
-        englishs_cuts, english_cut_durations, english_cuts_len = librispeech.multi_english_cuts()
-        englishs_cuts = englishs_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(englishs_cuts)
-        asr_training_cuts_lens.append(english_cuts_len)
-        asr_training_cuts_duration.append(english_cut_durations)
         
     if params.use_emotion_dataset:
         multi_emotion_cuts = librispeech.multi_emotion_cuts()
@@ -1628,44 +1632,10 @@ def run(rank, world_size, args):
         asr_training_cuts.append(emotion_cuts)
         asr_training_cuts_lens.append(215457 * params.repeat_emo)  # 46267 + 169190
         asr_training_cuts_duration.append(308 * params.repeat_emo) # 52 + 256
-        
-    if params.use_fisher:
-        fisher_cuts = librispeech.fisher_cuts()
-        fisher_cuts = fisher_cuts.map(partial(_add_task_id, 1))
-        # fihser cuts: 2041 hrs, 2113438 cuts
-        asr_training_cuts.append(fisher_cuts)
-        asr_training_cuts_lens.append(2113438)
-        asr_training_cuts_duration.append(2041)
-        
-    if params.use_voxpopuli:
-        # multi-lingual data
-        if params.voxpopuli_subset == "en_v2":
-            voxpopuli_cuts = librispeech.voxpopuli_unlabelled_cuts()
-            asr_training_cuts_lens.append(3059813)
-            asr_training_cuts_duration.append(24151) # avg dur: 28.4
-        else:
-            voxpopuli_cuts = librispeech.voxpopuli_asr_train_cuts()
-            asr_training_cuts_lens.append(526497)
-            asr_training_cuts_duration.append(1636)
-        
-        voxpopuli_cuts = voxpopuli_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(voxpopuli_cuts)
-        
-    if params.use_yodas:
-        yodas_cuts = librispeech.yodas_granary_cuts()
-        yodas_cuts = yodas_cuts.map(partial(_add_task_id, 1))
-        asr_training_cuts.append(yodas_cuts)
-        asr_training_cuts_lens.append(37965268)
-        asr_training_cuts_duration.append(93784)
-        
-    def change_speech_data_codebook_indexes(c):
-        c.wavlm_codebook_indexes = c.codebook_indexes
-        del c.codebook_indexes
-        return c
     
     # combine the asr data into a BIG cut
-    assert len(asr_training_cuts) >= 1
     if len(asr_training_cuts) >= 1:
+        # assert len(asr_training_cuts) >= 1, len(asr_training_cuts)
         logging.info(f"ASR cuts: {asr_training_cuts}")
         logging.info(f"ASR cuts length: {asr_training_cuts_lens}")
         logging.info(f"ASR cuts duration: {asr_training_cuts_duration}")
@@ -1678,15 +1648,9 @@ def run(rank, world_size, args):
         else:
             asr_training_cuts = asr_training_cuts[0]
     
-        # now that each speech cut has a wavlm codebook index
-        asr_training_cuts = asr_training_cuts.map(change_speech_data_codebook_indexes) 
         train_cuts["cuts_asr"] = asr_training_cuts
         train_cuts_duration.append(sum(asr_training_cuts_duration))
     
-    # general audio data
-    if params.do_audio_tagging:
-        assert params.use_audioset, "If we do audio tagging, we must use audioset"
-        
     # audio data
     audio_training_cuts = []
     audio_training_cuts_lens = []
@@ -1700,14 +1664,6 @@ def run(rank, world_size, args):
             )
         else:
             audioset_cuts = librispeech.audioset_cuts()
-        def change_source(c):
-            source = c.recording.sources[0].source
-            source = source.replace(
-                "download/",
-                "download3/" # use local
-            )
-            c.recording.sources[0].source = source
-            return c
         
         audioset_cuts_lens = {
             "balanced": 21155,
@@ -1717,23 +1673,30 @@ def run(rank, world_size, args):
             "balanced": 50,
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download3/" # use local
+            )
+            c.recording.sources[0].source = source
+            return c
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
         audioset_cuts = audioset_cuts.map(change_source)
         logging.info(audioset_cuts[0])
+        num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         audio_training_cuts.append(audioset_cuts)
-        audio_training_cuts_lens.append(audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset)
+        audio_training_cuts_lens.append(num_audio_cuts)
         audio_training_cuts_duration.append(audioset_cuts_duration[params.audioset_subset] * params.repeat_audioset)
         
     if params.use_music4all:
-        # all 30s cuts
-        music4all_cuts = librispeech.music4all_cuts() # 910 hrs, 109269 cuts
+        music4all_cuts = librispeech.music4all_cuts() # 910 hrs, 109269 cuts, 30s
         music4all_cuts = music4all_cuts.map(partial(_add_task_id, 2))
         audio_training_cuts.append(music4all_cuts)
         audio_training_cuts_lens.append(109269 * params.repeat_music4all)
         audio_training_cuts_duration.append(910 * params.repeat_music4all)
         
     if params.use_vggsound:
-        # all 10s cuts
         vggsound_cuts = librispeech.vggsound_train_cuts() # 427 hrs, 154142 cuts
         vggsound_cuts = vggsound_cuts.map(partial(_add_task_id, 2))
         audio_training_cuts.append(vggsound_cuts)
@@ -1749,8 +1712,8 @@ def run(rank, world_size, args):
         audio_training_cuts_duration.append(430)
         
     if params.use_freesound:
-        # split into 10s, so all cuts <=10s
-        freesound_cuts = librispeech.freesound_train_cuts() # 2811 hrs, 1028645 cuts
+        # split into 10s
+        freesound_cuts = librispeech.freesound_train_cuts() # 2516 hrs, 1073093 cuts
         freesound_cuts = freesound_cuts.map(partial(_add_task_id, 2))
         audio_training_cuts.append(freesound_cuts)
         audio_training_cuts_lens.append(1073093)
@@ -1758,14 +1721,13 @@ def run(rank, world_size, args):
     
     if params.use_mtg:
         # split into 10s
-        mtg_cuts = librispeech.mtg_cuts() # 
+        mtg_cuts = librispeech.mtg_cuts() 
         mtg_cuts = mtg_cuts.map(partial(_add_task_id, 2))
         audio_training_cuts.append(mtg_cuts)
         audio_training_cuts_lens.append(1032727)
         audio_training_cuts_duration.append(2812)
-    
+
     # combine the audio datasets
-    assert len(audio_training_cuts) >= 1
     if len(audio_training_cuts) >= 1:
         logging.info(f"audio cuts: {audio_training_cuts}")
         logging.info(f"audio cuts length: {audio_training_cuts_lens}")
@@ -1781,16 +1743,15 @@ def run(rank, world_size, args):
     
         train_cuts["cuts_audio"] = audio_training_cuts
         train_cuts_duration.append(sum(audio_training_cuts_duration))
-        
+    
     assert len(train_cuts) >= 1, "At least one task should be done!"
     
-    logging.info(f"Training cuts: {train_cuts}")
-    logging.info(f"Training cuts duration: {train_cuts_duration}")
+    logging.info(train_cuts)
+    logging.info(train_cuts_duration)
     params.train_duration = sum(train_cuts_duration)
     
     def remove_short_and_long_utt(c: Cut):
-        # because we have some music cuts, the duration is 30 second
-        if c.duration < 0.9 or c.duration > 32.0:
+        if c.duration < 0.98 or c.duration > 35:
             return False
         return True
     
@@ -1805,26 +1766,32 @@ def run(rank, world_size, args):
         assert params.zip_sampler == False
         train_cuts = [item[1] for item in train_cuts.items()]
         if len(train_cuts) > 1:
-            assert len(train_cuts) == 2, "We should only have speech and audio cuts"
             logging.info(f"Using mux to combine data")
-            
-            train_cuts_lens = [sum(asr_training_cuts_lens), sum(audio_training_cuts_lens)] 
+            logging.info(f"Training cuts: {train_cuts}")
+            train_cuts_lens = [sum(asr_training_cuts_lens), num_audio_cuts] 
             logging.info(f"Training cuts lens: {train_cuts_lens}")
-            
-            if params.audio_duration_factor > 1.0:
-                logging.info(f"Using audio duration factor {params.audio_duration_factor}")
-                train_cuts_lens[1] = train_cuts_lens[1] * params.audio_duration_factor
-            logging.info(f"Sampling weight: {train_cuts_lens}")
             train_cuts = CutSet.mux(
                 *train_cuts,
-                weights=train_cuts_lens, # TODO: make this an option!
-                # weights=train_cuts_lens,
+                weights=train_cuts_lens,
                 stop_early=params.stop_early,
             )
         else:
             train_cuts = train_cuts[0]
         assert isinstance(train_cuts, CutSet), type(train_cuts)
 
+    if params.use_cfs:
+        def change_cfs_root(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download2/",
+            )
+            c.recording.sources[0].source = source
+            
+            return c
+        train_cuts = train_cuts.map(change_cfs_root)
+            
+    
     # NOTE: when using Shar, the sampler shouldn't have state
     if params.start_batch > 0 and checkpoints and "sampler" in checkpoints:
         # We only load the sampler's state dict when it loads a checkpoint
@@ -1849,34 +1816,38 @@ def run(rank, world_size, args):
         ls_valid_cuts = librispeech.dev_clean_cuts()
         ls_valid_cuts += librispeech.dev_other_cuts()
         ls_valid_cuts = ls_valid_cuts.map(partial(_add_task_id, 1))
-        ls_valid_cuts = ls_valid_cuts.map(change_speech_data_codebook_indexes)
-        asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank,)
+        if params.use_cfs:
+            ls_valid_cuts = ls_valid_cuts.map(change_cfs_root)
+        asr_ls_valid_dl = librispeech.valid_dataloaders(ls_valid_cuts, world_size=world_size, rank=rank)
         valid_sets.append("ASR_ls")
         valid_dls.append(asr_ls_valid_dl)
         
     if params.use_gigaspeech:
         giga_dev_cuts = librispeech.gigaspeech_dev_cuts()
         giga_dev_cuts = giga_dev_cuts.map(partial(_add_task_id, 1))
-        giga_dev_cuts = giga_dev_cuts.map(change_speech_data_codebook_indexes)
+        if params.use_cfs:
+            giga_dev_cuts = giga_dev_cuts.map(change_cfs_root)
         asr_giga_valid_dl = librispeech.valid_dataloaders(giga_dev_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("ASR_giga")
         valid_dls.append(asr_giga_valid_dl)
-    
-    # if params.use_emotion_dataset:
-    #     msp_podcast_dev_cuts = librispeech.msp_podcast_dev_cust()
-    #     msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(partial(_add_task_id, 1))
-    #     msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(change_speech_data_codebook_indexes)
-    #     er_msp_dev_dl = librispeech.valid_dataloaders(msp_podcast_dev_cuts, world_size=world_size, rank=rank,)
-    #     valid_sets.append("ER_msp_podcast")
-    #     valid_dls.append(er_msp_dev_dl) 
         
-    if params.use_voxpopuli and params.voxpopuli_subset != "en_v2":
-        voxpopuli_dev_cuts = librispeech.voxpopuli_dev_cuts()
-        voxpopuli_dev_cuts = voxpopuli_dev_cuts.map(partial(_add_task_id, 1))
-        asr_voxpopuli_dev_dl = librispeech.valid_dataloaders(voxpopuli_dev_cuts, world_size=world_size, rank=rank,)
-        valid_sets.append("ASR_voxpopuli")
-        valid_dls.append(asr_voxpopuli_dev_dl) 
+    if params.use_fleurs:
+        fleurs_dev_cuts = librispeech.fleurs_dev_cuts_5k()
+        fleurs_dev_cuts = fleurs_dev_cuts.map(partial(_add_task_id, 1))
+        asr_fleur_dev_dl = librispeech.valid_dataloaders(fleurs_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ASR_fleurs")
+        valid_dls.append(asr_fleur_dev_dl)
     
+    if params.use_emotion_dataset:
+        msp_podcast_dev_cuts = librispeech.msp_podcast_dev_cust()
+        msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(partial(_add_task_id, 1))
+        if params.use_cfs:
+            msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(change_cfs_root)
+        msp_podcast_dev_cuts = msp_podcast_dev_cuts.resample(16000)
+        er_msp_dev_dl = librispeech.valid_dataloaders(msp_podcast_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ER_msp_podcast")
+        valid_dls.append(er_msp_dev_dl)
+     
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
@@ -1884,7 +1855,7 @@ def run(rank, world_size, args):
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
-        
+    
     if params.use_vggsound:
         vggsound_eval_cuts = librispeech.vggsound_test_cuts()
         vggsound_eval_cuts = vggsound_eval_cuts.map(partial(_add_task_id, 2))
@@ -1892,17 +1863,16 @@ def run(rank, world_size, args):
         valid_sets.append("AT_vggsound")
         valid_dls.append(vggsound_valid_dl)
         
-    # if params.use_bbceffect:
-    #     bbc_test_cuts = librispeech.bbc_soundeffect_test_cuts()
-    #     bbc_test_cuts = bbc_test_cuts.map(partial(_add_task_id, 2))
-    #     bbc_test_dl = librispeech.valid_dataloaders(bbc_test_cuts, world_size=world_size, rank=rank,)
-    #     valid_sets.append("AT_bbc")
-    #     valid_dls.append(bbc_test_dl)
+    if params.use_bbceffect:
+        bbc_test_cuts = librispeech.bbc_soundeffect_test_cuts()
+        bbc_test_cuts = bbc_test_cuts.map(partial(_add_task_id, 2))
+        bbc_test_dl = librispeech.valid_dataloaders(bbc_test_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("AT_bbc")
+        valid_dls.append(bbc_test_dl)
         
     # if params.use_freesound:
     #     freesound_test_cuts = librispeech.freesound_test_cuts()
     #     freesound_test_cuts = freesound_test_cuts.map(partial(_add_task_id, 2))
-    #     freesound_test_cuts = freesound_test_cuts.map(change_codebook_indexes)
     #     freesound_test_dl = librispeech.valid_dataloaders(freesound_test_cuts, world_size=world_size, rank=rank,)
     #     valid_sets.append("AT_freesound")
     #     valid_dls.append(freesound_test_dl)

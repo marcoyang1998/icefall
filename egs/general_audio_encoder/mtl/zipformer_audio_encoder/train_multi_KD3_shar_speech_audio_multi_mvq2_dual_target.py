@@ -63,12 +63,12 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar_speech_audio_multi_teacher2 import MultiTaskDataModule
+from kd_datamodule3_shar_speech_audio_multi_teacher2_dual_target import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd_multi_teacher import MultiKDModel
+from model_multi_kd_multi_teacher_dual_target import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
 from subsampling import Conv2dSubsampling
@@ -1006,6 +1006,7 @@ def compute_loss(
 
     supervisions = batch["supervisions"]
     cuts = supervisions["cut"]
+    cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
     cut_ids = [c.id for c in cuts]
         
     feature_lens = supervisions["num_frames"].to(device)
@@ -1013,13 +1014,23 @@ def compute_loss(
     
     if random.random() < 0.01 and is_training:
         for t in range(1, params.num_tasks+1):
-            duration = sum([c.duration for c in cuts if c.task_id == t])
+            duration = sum([c.duration for c in cuts_pre_mixed if c.task_id == t])
             logging.info(f"Number of samples from task {t}: {sum(task_ids == t).item()}/{len(task_ids)}")
             logging.info(f"Total duration of task {t}: {duration}")
     
     # mvq tokens
     mvq_tokens = batch["cb_indexes"]
     mvq_tokens = [tokens.to(device) for tokens in mvq_tokens]
+    
+    mixed_cb_indexes = batch["mixed_cb_indexes"]
+    if mixed_cb_indexes is not None:
+        mixed_cb_indexes = [tokens.to(device) for tokens in mixed_cb_indexes]
+        
+    # get the loss scale
+    replacement_probs = batch["replacement_probs"].to(device)
+    replacement_probs[replacement_probs == 0.0] = 0.5
+    scale_orig = 1 - replacement_probs
+    scale_mixed = replacement_probs
     
     # audio tagging label
     if params.do_audio_tagging:
@@ -1032,10 +1043,12 @@ def compute_loss(
             x=feature,
             x_lens=feature_lens,
             codebook_indexes=mvq_tokens,
+            mixed_codebook_indexes=mixed_cb_indexes,
             at_targets=at_targets,
         )
 
-        speech_mvq_loss, audio_mvq_loss = losses[:-1]
+        speech_mvq_loss, audio_mvq_loss = losses[0]
+        mixed_speech_mvq_loss, mixed_audio_mvq_loss = losses[1]
         audio_tagging_loss = losses[-1]
         loss = 0.0
 
@@ -1055,7 +1068,11 @@ def compute_loss(
             if torch.isnan(speech_mvq_loss).any(): # filter the nan loss
                 logging.info(f"Detected NaN in speech mvq loss")
                 speech_mvq_loss = torch.nan_to_num(speech_mvq_loss, nan=0.0)
-            speech2speech_mvq_loss = (speech_mvq_loss * speech_mask).sum()
+            speech2speech_mvq_loss = (
+                speech_mvq_loss * scale_orig + 
+                mixed_speech_mvq_loss * scale_mixed  
+            )
+            speech2speech_mvq_loss = (speech2speech_mvq_loss * speech_mask).sum()
             mvq_loss_values.append(speech2speech_mvq_loss)
             loss += speech2speech_mvq_loss * params.speech_mvq_loss_scale # TODO: make this an option
             
@@ -1580,7 +1597,18 @@ def run(rank, world_size, args):
             "medium": 4208 + 473,
             "large": 42683 + 4208 + 473,  # 47364 hrs 
         }
+        def change_to_s3(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/librilight/", 
+                "s3://yangxiaoyu/librilight_split/"
+            )
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            return c
         libriheavy_cuts = libriheavy_cuts.map(partial(_add_task_id, 1)) # ASR task ID=1
+        libriheavy_cuts = libriheavy_cuts.map(change_to_s3)
+        logging.info(libriheavy_cuts[0])
         asr_training_cuts.append(libriheavy_cuts)
         asr_training_cuts_lens.append(libriheavy_cuts_len[params.libriheavy_subset])
         asr_training_cuts_duration.append(libriheavy_cuts_duration[params.libriheavy_subset])
@@ -1616,23 +1644,22 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(english_cut_durations)
         
     if params.use_emotion_dataset:
-        multi_emotion_cuts = librispeech.multi_emotion_cuts()
+        other_emotion_cuts = librispeech.multi_emotion_cuts()
         msp_podcast_cuts = librispeech.msp_podcast_train_cust()
         emotion_cuts = CutSet.mux(
-            *[multi_emotion_cuts, msp_podcast_cuts],
-            weights=[52, 256],
+            *[other_emotion_cuts, msp_podcast_cuts],
+            weights=[134, 52],
             stop_early=False,
         )
-        emotion_cuts = emotion_cuts.resample(16000)
         emotion_cuts = emotion_cuts.map(partial(_add_task_id, 1)) # for now we treat ER cuts as part of ASR cuts
         asr_training_cuts.append(emotion_cuts)
-        asr_training_cuts_lens.append(215457 * params.repeat_emo)  # 46267 + 169190
-        asr_training_cuts_duration.append(308 * params.repeat_emo) # 52 + 256
+        asr_training_cuts_lens.append(130297 * params.repeat_emo)  # 46267 + 84030
+        asr_training_cuts_duration.append(186 * params.repeat_emo) # 52 + 134
         
     if params.use_fisher:
         fisher_cuts = librispeech.fisher_cuts()
         fisher_cuts = fisher_cuts.map(partial(_add_task_id, 1))
-        # fihser cuts: 2041 hrs, 2113438 cuts
+        # mls cuts: 2041 hrs, 2113438 cuts
         asr_training_cuts.append(fisher_cuts)
         asr_training_cuts_lens.append(2113438)
         asr_training_cuts_duration.append(2041)
@@ -1862,13 +1889,13 @@ def run(rank, world_size, args):
         valid_sets.append("ASR_giga")
         valid_dls.append(asr_giga_valid_dl)
     
-    # if params.use_emotion_dataset:
-    #     msp_podcast_dev_cuts = librispeech.msp_podcast_dev_cust()
-    #     msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(partial(_add_task_id, 1))
-    #     msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(change_speech_data_codebook_indexes)
-    #     er_msp_dev_dl = librispeech.valid_dataloaders(msp_podcast_dev_cuts, world_size=world_size, rank=rank,)
-    #     valid_sets.append("ER_msp_podcast")
-    #     valid_dls.append(er_msp_dev_dl) 
+    if params.use_emotion_dataset:
+        msp_podcast_dev_cuts = librispeech.msp_podcast_dev_cust()
+        msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(partial(_add_task_id, 1))
+        msp_podcast_dev_cuts = msp_podcast_dev_cuts.map(change_speech_data_codebook_indexes)
+        er_msp_dev_dl = librispeech.valid_dataloaders(msp_podcast_dev_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("ER_msp_podcast")
+        valid_dls.append(er_msp_dev_dl) 
         
     if params.use_voxpopuli and params.voxpopuli_subset != "en_v2":
         voxpopuli_dev_cuts = librispeech.voxpopuli_dev_cuts()
@@ -1880,6 +1907,18 @@ def run(rank, world_size, args):
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download3/" # use local
+            )
+            source = source.replace(
+                "eval/",
+                "eval/wav_all/" # use local
+            )
+            c.recording.sources[0].source = source
+            return c
         as_eval_cuts = as_eval_cuts.map(change_source)
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
@@ -1892,12 +1931,12 @@ def run(rank, world_size, args):
         valid_sets.append("AT_vggsound")
         valid_dls.append(vggsound_valid_dl)
         
-    # if params.use_bbceffect:
-    #     bbc_test_cuts = librispeech.bbc_soundeffect_test_cuts()
-    #     bbc_test_cuts = bbc_test_cuts.map(partial(_add_task_id, 2))
-    #     bbc_test_dl = librispeech.valid_dataloaders(bbc_test_cuts, world_size=world_size, rank=rank,)
-    #     valid_sets.append("AT_bbc")
-    #     valid_dls.append(bbc_test_dl)
+    if params.use_bbceffect:
+        bbc_test_cuts = librispeech.bbc_soundeffect_test_cuts()
+        bbc_test_cuts = bbc_test_cuts.map(partial(_add_task_id, 2))
+        bbc_test_dl = librispeech.valid_dataloaders(bbc_test_cuts, world_size=world_size, rank=rank,)
+        valid_sets.append("AT_bbc")
+        valid_dls.append(bbc_test_dl)
         
     # if params.use_freesound:
     #     freesound_test_cuts = librispeech.freesound_test_cuts()

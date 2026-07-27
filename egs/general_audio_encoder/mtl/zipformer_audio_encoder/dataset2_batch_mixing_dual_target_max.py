@@ -160,6 +160,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
+        cuts = cuts.map(fix_supervision_duration)
         supervision_intervals = self.input_strategy.supervision_intervals(cuts)
 
         # Apply all available transforms on the inputs, i.e. either audio or features.
@@ -172,6 +173,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
         cuts_pre_mixed = fix_start(cuts_pre_mixed)
         
+        # load the first set of mvq tokens
         mvq_tokens, mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
             "codebook_indexes",
@@ -184,8 +186,15 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # perform token mixing
         if self.token_mixing:
             mix_speech_mvq_tokens = self.prepare_mixed_mvq_tokens(mvq_tokens, cuts, field_name="codebook_indexes")
+            if mix_speech_mvq_tokens.size(1) != mvq_tokens.size(1):
+                # the mixed utterance is always longer, so we pad the orig mvq tokens to the same length
+                diff = mix_speech_mvq_tokens.size(1) - mvq_tokens.size(1)
+                right_padding = torch.ones(mix_speech_mvq_tokens.size(0), diff, mix_speech_mvq_tokens.size(2)) * (-100)
+                mvq_tokens = torch.cat([mvq_tokens, right_padding], dim=1)
         else:
             mix_speech_mvq_tokens = mvq_tokens
+            
+        assert mix_speech_mvq_tokens.shape == mvq_tokens.shape
         
         if self.at_KD:
             # at_targets = collate_custom_field(
@@ -213,6 +222,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             "cb_indexes_len": mvq_token_lens,
             "mixed_cb_indexes": mix_speech_mvq_tokens,
             "mixed_cb_indexes_len": mvq_token_lens,
+            "replacement_probs": torch.tensor(replacement_prob),
             "supervisions": default_collate(
                 [
                     {
@@ -282,16 +292,13 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             # compute the starting mixing frame
             offset = int(mix_track.offset * self.target_frame_rate)
             mixed_in_cb = torch.from_numpy(mix_track.cut.load_custom(field_name))
-            mix_length = mixed_in_cb.shape[0]
-            if mix_length + offset >= mvq_tokens.size(1):
-                mix_length = mvq_tokens.size(1) - offset
-                mixed_in_cb = mixed_in_cb[:, :mix_length]
+            left_padding_cb = torch.ones(offset, mixed_in_cb.shape[1]) * (-100)
+            mixed_in_cb = torch.cat([left_padding_cb, mixed_in_cb], dim=0)
             
-            # replace the codebook indexes in the mix region
-            cur_mvq_tokens[offset:offset + mix_length, :] = mixed_in_cb
-            mvq_tokens_mix.append(cur_mvq_tokens)
+            mvq_tokens_mix.append(mixed_in_cb)
         
-        mvq_tokens_mix = torch.stack(mvq_tokens_mix, dim=0)
+        mvq_tokens_mix = torch.nn.utils.rnn.pad_sequence(mvq_tokens_mix, batch_first=True, padding_value=-100)
+        mvq_tokens_mix = mvq_tokens_mix.to(torch.int64)
         return mvq_tokens_mix
             
     
@@ -323,6 +330,18 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             mixed_cb = _mix_tokens_single(cur_cb_slice, mixed_in_cb, mix_probs[i])
             mvq_tokens[i, offset:offset + mix_length] = mixed_cb
         return mvq_tokens
+    
+def fix_supervision_duration(c):
+    # after the mixing, the cut may become longer, which causes a mismatch
+    # between the cut duration and the supervision duration.
+    # Therefore, we modify the duration of the supervision to match the cut duration.
+    if isinstance(c, MixedCut):
+        if c.supervisions[0].duration != c.duration:
+            sup = c.tracks[0].cut.supervisions[0]
+            sup.duration = c.duration
+            c.tracks[0].cut.supervisions = [sup]
+    return c
+        
 
 def compute_prob_from_energies(gain: float, energy_main: float, energy_mixin: float) -> float:
     """
@@ -357,6 +376,8 @@ def _load_mixed_cut_single(cut: MixedCut):
     """
     Loads a mixed cut, mixing the second track (noise/interference) into the 
     first track (signal) at a specific SNR, and computes the mixing probability.
+    The result can be longer than the original reference cut if the mixed_in audio 
+    extends beyond it.
     """
     assert len(cut.tracks) == 2, "Only support mixing two cuts (Signal + Interference)"
     
@@ -366,7 +387,6 @@ def _load_mixed_cut_single(cut: MixedCut):
     track_noise = cut.tracks[1]
     
     # Load full audio for both
-    # We use .load_audio() on the underlying cut to get the raw samples
     orig_audio = track_sig.cut.load_audio()
     mix_in_audio = track_noise.cut.load_audio()
     
@@ -377,45 +397,58 @@ def _load_mixed_cut_single(cut: MixedCut):
     
     mix_in_frames = mix_in_audio.shape[1]
     sig_frames = orig_audio.shape[1]
-
-    # 3. Determine Overlap Region in Signal
-    start_sample = max(0, mix_offset_frames)
-    end_sample = min(sig_frames, mix_offset_frames + mix_in_frames)
     
-    # Slice the signal where the overlap occurs
-    sig_slice = orig_audio[0, start_sample:end_sample]
+    # 3. Determine the total duration needed (may be longer than orig_audio)
+    total_frames = max(sig_frames, mix_offset_frames + mix_in_frames)
     
-    # 4. Calculate Energies
-    energy_sig_local = audio_energy(sig_slice)
+    # 4. Create output audio with the required length
+    if total_frames > sig_frames:
+        # Need to extend the original audio with zeros
+        extended_audio = np.zeros((1, total_frames), dtype=orig_audio.dtype)
+        extended_audio[0, :sig_frames] = orig_audio[0, :]
+        result_audio = extended_audio
+    else:
+        # Original audio is long enough
+        result_audio = orig_audio.copy()
+    
+    # 5. Determine overlap region for energy calculation
+    overlap_start = max(0, mix_offset_frames)
+    overlap_end = min(sig_frames, mix_offset_frames + mix_in_frames)
+    
+    # Calculate energies based on the overlap region
+    if overlap_end > overlap_start:
+        sig_slice = orig_audio[0, overlap_start:overlap_end]
+        energy_sig_local = audio_energy(sig_slice)
+    else:
+        # No overlap with original signal
+        energy_sig_local = audio_energy(orig_audio)
+    
     energy_mix_in = audio_energy(mix_in_audio)
     
     # --- FIX: THE SILENCE BUG ---
-    # If the local slice is silent, gain calculation will fail (gain=0).
-    # We fallback to the global energy of the signal to ensure the noise is still added.
     if energy_sig_local < 1e-9:
-        # Fallback to global energy of the utterance
         energy_sig_local = audio_energy(orig_audio) + 1e-9
 
-    # 5. Calculate Gain
-    # SNR definition: SNR = 10 * log10(E_signal / E_noise)
-    # Therefore: E_target_noise = E_signal * 10^(-SNR/10)
+    # 6. Calculate Gain
     target_noise_energy = energy_sig_local * (10.0 ** (-track_noise.snr / 10))
-    
-    # Gain = sqrt(Target / Current)
     gain = math.sqrt(target_noise_energy / (energy_mix_in + 1e-9))
     
-    # 6. Calculate Replacement Probability (for Tokens)
+    # 7. Calculate Replacement Probability (for Tokens)
     replacement_prob = compute_prob_from_energies(gain, energy_sig_local, energy_mix_in)
     
-    # 7. Mix Audio in-place
-    # Determine the slice of the noise audio to add 
+    # 8. Mix Audio - place the entire mix_in_audio at the offset position
+    mix_start_sample = max(0, mix_offset_frames)
+    mix_end_sample = mix_start_sample + mix_in_frames
+    
+    # Determine which part of mix_in_audio to use
     noise_start_idx = 0 if mix_offset_frames >= 0 else abs(mix_offset_frames)
-    noise_end_idx = noise_start_idx + (end_sample - start_sample)
+    noise_frames_to_use = min(mix_in_frames - noise_start_idx, total_frames - mix_start_sample)
     
-    if noise_end_idx > noise_start_idx: # Ensure we have valid frames to mix
-        orig_audio[0, start_sample:end_sample] += gain * mix_in_audio[0, noise_start_idx:noise_end_idx]
+    if noise_frames_to_use > 0:
+        result_audio[0, mix_start_sample:mix_start_sample + noise_frames_to_use] += \
+            gain * mix_in_audio[0, noise_start_idx:noise_start_idx + noise_frames_to_use]
     
-    return orig_audio, gain, replacement_prob
+    return result_audio, gain, replacement_prob
         
 def mix_audio_with_offset(
     reference_cut: Cut,
@@ -461,7 +494,7 @@ def _mix_tokens_single(A: torch.Tensor, B: torch.Tensor, p: float) -> torch.Tens
         Tensor: 替换后的新张量
     """
     assert A.shape == B.shape, "A and B must have the same shape"
-    assert 0 <= p <= 1, "p must be between 0 and 1"
+    assert 0 <= p <= 1, f"p must be between 0 and 1, but got {p}"
     
     # 创建一个与 A 相同形状的 mask，表示哪些位置需要替换
     mask = torch.rand_like(A, dtype=torch.float32) < p

@@ -10,111 +10,13 @@ import numpy as np
 from lhotse import validate
 from lhotse.cut import CutSet, MonoCut, Cut
 from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
-from lhotse.dataset.collation import collate_custom_field
 from lhotse.utils import compute_num_frames, ifnone
 from lhotse.workarounds import Hdf5MemoryIssueFix
 
 from lhotse.cut.set import mix
 
-class CodebookCache:
-    """
-    Cache of 'bytes' objects with audio data.
-    It is used to cache the "command" type audio inputs.
+from lhotse.audio.backend import set_current_audio_backend, FfmpegSubprocessOpusBackend
 
-    By default it is disabled, to enable call `set_caching_enabled(True)`
-    or `AudioCache.enable()`.
-
-    The cache size is limited to max 100 elements and 500MB of audio.
-
-    A global dict `__cache_dict` (static member variable of class AudioCache)
-    is holding the codebooks as np.array.
-    The key is the supervision ID, we avoid using cut.id because the cut IDs could be ruined by repeat
-
-    Thread-safety is ensured by a threading.Lock guard.
-    """
-
-    __enabled: bool = False
-
-    max_cache_memory: int = 500 * 1e6  # 500 MB
-    max_cache_elements: int = 10000  # number audio files
-
-    __cache_dict: Dict[str, np.array] = {}
-    __lock: Lock = Lock()
-
-    @classmethod
-    def enable(cls, enabled=True):
-        cls.__enabled = enabled
-        if not enabled:
-            cls.__clear_cache()
-
-    @classmethod
-    def enabled(cls) -> bool:
-        return cls.__enabled
-
-    @classmethod
-    def try_cache(cls, key: str) -> Optional[bytes]:
-        """
-        Test if 'key' is in the chache. If yes return the bytes array,
-        otherwise return None.
-        """
-
-        if not cls.__enabled:
-            return None
-
-        with cls.__lock:
-            if key in cls.__cache_dict:
-                return cls.__cache_dict[key]
-            else:
-                return None
-
-    @classmethod
-    def add_to_cache(cls, key: str, value: np.array):
-        """
-        Add the new (key,value) pair to cache.
-        Possibly free some elements before adding the new pair.
-        The oldest elements are removed first.
-        """
-
-        if not cls.__enabled:
-            return None
-
-        if value.itemsize * value.size > cls.max_cache_memory:
-            return
-
-        with cls.__lock:
-            # limit cache elements
-            while len(cls.__cache_dict) > cls.max_cache_elements:
-                # remove oldest elements from cache
-                # (dict pairs are sorted according to insertion order)
-                cls.__cache_dict.pop(next(iter(cls.__cache_dict)))
-
-            # limit cache memory
-            while value.itemsize * value.size + CodebookCache.__cache_memory() > cls.max_cache_memory:
-                # remove oldest elements from cache
-                # (dict pairs are sorted according to insertion order)
-                cls.__cache_dict.pop(next(iter(cls.__cache_dict)))
-
-            # store the new (key,value) pair
-            cls.__cache_dict[key] = value
-
-    @classmethod
-    def __cache_memory(cls) -> int:
-        """
-        Return size of CodebookCache values in bytes.
-        (internal, not to be called from outside)
-        """
-        ans = 0
-        for key, value in cls.__cache_dict.items():
-            ans += value.itemsize * value.size
-        return ans
-
-    @classmethod
-    def __clear_cache(cls) -> None:
-        """
-        Clear the cache, remove the data.
-        """
-        with cls.__lock:
-            cls.__cache_dict.clear()
 
 def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     # generate multi-hot class labels
@@ -217,13 +119,10 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.sv_KD = sv_KD
         
         self.target_frame_rate = target_frame_rate
-        self.dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
+        self.dummy_codebook_indexes = torch.ones(1510, 8) * (-100) # should be enough for 30 seconds audio of 50Hz frame rate
         self.dummy_audio_logits = torch.ones(527) * 0.5
         
         self.enable_cache = enable_cache
-        if self.enable_cache:
-            CodebookCache.enable()
-            assert CodebookCache.enabled()
 
         # This attribute is a workaround to constantly growing HDF5 memory
         # throughout the epoch. It regularly closes open file handles to
@@ -249,6 +148,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         # Sort the cuts again after transforms
         cuts = cuts.sort_by_duration(ascending=False)
+        
+        audio, audio_lens = read_audio(cuts)
 
         # Get a tensor with batched feature matrices, shape (B, T, F)
         # Collation performs auto-padding, if necessary.
@@ -260,7 +161,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             inputs, _, cuts = input_tpl
         else:
             inputs, _ = input_tpl
-
+        
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
@@ -308,6 +209,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         batch = {
             "inputs": inputs,
+            "audio": audio,
+            "audio_lens": audio_lens,
             "cb_indexes": mvq_tokens,
             "cb_indexes_len": mvq_token_lens,
             "supervisions": default_collate(
@@ -331,6 +234,18 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
             ]
 
         return batch
+
+def read_audio(cuts: CutSet):
+    audios = []
+    audio_lens = []
+    for cut in cuts:
+        audio = torch.from_numpy(cut.load_audio())
+        audio_len = audio.shape[1]
+        audios.append(audio[0])
+        audio_lens.append(audio_len)
+    audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True)
+    audio_lens = torch.tensor(audio_lens)
+    return audios, audio_lens
 
 
 def fix_start(cuts):
@@ -357,21 +272,16 @@ def validate_multi_kd(cuts: CutSet) -> None:
 
 def load_codebook_indexes(c):
     info = c.codebook_indexes
-    cached_cb = CodebookCache.try_cache(c.supervisions[0].id) # we use supervision ID rather than cut id because cuts.repeat() ruins the cut id
-    if cached_cb is not None:
-        return cached_cb
-    else:
-        if isinstance(info, dict):
-            filename = info["path"]
-            with open(filename, "rb") as f:
-                cb_indexes = np.load(f)
-            # return np.load(filename, mmap_mode="r")
-        else:
-            cb_indexes = c.load_custom("codebook_indexes")
     
-        CodebookCache.add_to_cache(c.supervisions[0].id, cb_indexes)
-        return cb_indexes
-       
+    if isinstance(info, dict):
+        filename = info["path"]
+        with open(filename, "rb") as f:
+            cb_indexes = np.load(f)
+        # return np.load(filename, mmap_mode="r")
+    else:
+        cb_indexes = c.load_custom("codebook_indexes")
+    return cb_indexes
+
 def _collate_custom_field(
     cuts: CutSet, 
     field: str,
@@ -428,7 +338,6 @@ if __name__=="__main__":
     from lhotse import load_manifest
     
     # enable the cache
-    CodebookCache.enable()
     
     dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
     dummy_audio_logits = torch.ones(527) * 0.5
@@ -449,7 +358,6 @@ if __name__=="__main__":
         temporal_array=True,
         pad_value=-100
     )
-    print(f"Cache: {CodebookCache.enabled()}, Time elapsed: {time.time() - start}")
     # print(gt_mvq_tokens)
     
     # gt_beats_embed = collate_custom_field(augmented_cuts, "beats_embedding")

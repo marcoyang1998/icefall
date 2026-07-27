@@ -177,6 +177,7 @@ class MultiKDModel(nn.Module):
         x: torch.Tensor,
         x_lens: torch.Tensor,
         codebook_indexes: list[torch.Tensor] = None,
+        mixed_codebook_indexes: list[torch.Tensor] = None,
         at_targets: torch.Tensor = None,
         mask: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -238,13 +239,38 @@ class MultiKDModel(nn.Module):
                 else:
                     codebook_loss = 0.0
                 cb_losses.append(codebook_loss)
-        
+
+        mixed_cb_losses = []
+        if mixed_codebook_indexes is not None:
+            for i, cb_loss_net in enumerate(self.codebook_loss_heads):
+                cb_indexes = mixed_codebook_indexes[i]
+                if cb_indexes is not None and cb_loss_net is not None:
+                    mixed_codebook_loss = self.forward_codebook_loss(
+                        encoder_out,
+                        encoder_out_lens,
+                        cb_indexes,
+                        cb_loss_net=cb_loss_net,
+                        teacher_frame_ratio=self.teacher_frame_ratio[i],
+                        distillation_delta=self.distillation_delta[i],
+                        reduction="none"
+                    )
+                    if self.loss_only_mask and mask_indices is not None:
+                        # downsample the mask
+                        ds_mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
+                        assert ds_mask_indices.size(1) >= mixed_codebook_loss.size(1), (ds_mask_indices.shape, mixed_codebook_loss.shape)
+                        ds_mask_indices = ds_mask_indices[:, :mixed_codebook_loss.size(1)].float()
+                        mixed_codebook_loss = mixed_codebook_loss * ds_mask_indices
+                    mixed_codebook_loss = mixed_codebook_loss.sum(dim=1) # (B,)
+                else:
+                    mixed_codebook_loss = 0.0
+                mixed_cb_losses.append(mixed_codebook_loss)
+
         if at_targets is not None:
             at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
             at_loss = None
-        
-        return *cb_losses, at_loss
+
+        return cb_losses, mixed_cb_losses, at_loss
 
     def forward_codebook_loss(
         self,

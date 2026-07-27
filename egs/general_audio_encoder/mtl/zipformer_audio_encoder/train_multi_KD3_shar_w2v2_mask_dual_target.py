@@ -63,7 +63,7 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar_token_mixing2 import MultiTaskDataModule
+from kd_datamodule3_shar_dual_target import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.sampling.base import CutSampler
@@ -658,6 +658,12 @@ def get_parser():
         type=str2bool,
         default=True,
     )
+    
+    parser.add_argument(
+        "--snr-weighted-loss",
+        type=str2bool,
+        default=False,
+    )
 
     add_finetune_arguments(parser)
     add_model_arguments(parser)
@@ -1038,10 +1044,14 @@ def compute_loss(
         mixed_cb_indexes = mixed_cb_indexes.to(device)
         
     # get the loss scale
-    replacement_probs = batch["replacement_probs"].to(device)
-    replacement_probs[replacement_probs == 0.0] = 0.5
-    scale_orig = 1 - replacement_probs
-    scale_mixed = replacement_probs
+    if params.snr_weighted_loss:
+        replacement_probs = batch["replacement_probs"].to(device)
+        replacement_probs[replacement_probs == 0.0] = 0.5
+        scale_orig = 1 - replacement_probs
+        scale_mixed = replacement_probs
+    else:
+        scale_orig = torch.ones(len(cuts), device=device) * 0.5
+        scale_mixed = torch.ones(len(cuts), device=device) * 0.5
     
     # audio tagging label
     if params.do_audio_tagging:
@@ -1065,14 +1075,17 @@ def compute_loss(
         # MVQ loss 
         mvq_loss = 0.0
         if params.do_mvq:
-            for cur_mvq_loss in mvq_losses:
-                if params.mvq_loss_by_task:
-                    mask = task_ids == 1 # ASR=1
-                    cur_mvq_loss = (cur_mvq_loss * mask).sum() * 0.5
-                else:
-                    cur_mvq_loss = cur_mvq_loss.sum() * 0.5
-                loss += cur_mvq_loss
-                mvq_loss += cur_mvq_loss
+            orig_mvq_loss, mix_mvq_loss = mvq_losses
+            if params.mvq_loss_by_task:    
+                mask = task_ids == 1 # ASR=1
+                orig_mvq_loss = (orig_mvq_loss * mask * scale_orig).sum()
+                mix_mvq_loss = (mix_mvq_loss * mask * scale_mixed).sum()
+            else:
+                orig_mvq_loss = (orig_mvq_loss * scale_orig).sum() 
+                mix_mvq_loss = (mix_mvq_loss * scale_mixed).sum()
+                
+            loss += orig_mvq_loss + mix_mvq_loss
+            mvq_loss += orig_mvq_loss + mix_mvq_loss
             
         # AT loss
         if params.do_audio_tagging:
@@ -1092,8 +1105,8 @@ def compute_loss(
     info["loss"] = loss.detach().cpu().item()
     if params.do_mvq:
         info["mvq_loss"] = mvq_loss.detach().cpu().item()
-        info["mvq_loss_main"] = mvq_losses[0].sum().detach().cpu().item()
-        info["mvq_loss_mix"] = mvq_losses[1].sum().detach().cpu().item()
+        info["mvq_loss_main"] = orig_mvq_loss.detach().cpu().item()
+        info["mvq_loss_mix"] = mix_mvq_loss.detach().cpu().item()
     if params.do_audio_tagging:
         info["audio_tagging_loss"] = audio_tagging_loss.detach().cpu().item()
 

@@ -455,6 +455,11 @@ class MultiTaskDataModule:
             default="en_v2",
         )
         group.add_argument(
+            "--use-commonvoice",
+            type=str2bool,
+            default=False,
+        )
+        group.add_argument(
             "--use-yodas",
             type=str2bool,
             default=False,
@@ -634,10 +639,11 @@ class MultiTaskDataModule:
             logging.info(f"Setting world_size=1 and rank=0 because we will be using shar!")
         
         transforms = []
+        
         if self.args.enable_musan:
             logging.info(f"Enable MUSAN with minimum SNR={self.args.min_snr}, mixing prob: {self.args.mixing_prob}")
             logging.info("About to get Musan cuts")
-            cuts_musan = load_manifest("data/fbank/musan_cuts.jsonl.gz").drop_features()
+            cuts_musan = load_manifest("data/musan/musan_cuts.jsonl.gz").drop_features()
             transforms.append(
                 CutMix(
                     cuts=cuts_musan, p=0.5, snr=(self.args.min_snr, self.args.max_snr), preserve_id=True, pad_to_longest=False
@@ -660,6 +666,8 @@ class MultiTaskDataModule:
                 min_noise_snr=self.args.min_noise_snr,
                 p_noise=self.args.p_noise,
                 noise_cuts=noise_cuts,
+                batch_mix_mode=self.args.batch_mix_mode,
+                mix_delay_max=self.args.mix_delay_max,
             )
             transforms.append(t)
             logging.info(f"Performing batch mixing: {t}")
@@ -879,8 +887,9 @@ class MultiTaskDataModule:
             train_dl = DataLoader(
                 train_iter_dataset,
                 batch_size=None,
-                prefetch_factor=4,
                 num_workers=self.args.num_workers,
+                prefetch_factor=16 if self.args.on_the_fly_feats else 2,
+                pin_memory=True,
                 worker_init_fn=make_worker_init_fn(seed=0, rank=rank, world_size=world_size),
             )
 
@@ -936,7 +945,7 @@ class MultiTaskDataModule:
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=2,
+            num_workers=8,
             persistent_workers=False,
         )
 
@@ -1130,6 +1139,17 @@ class MultiTaskDataModule:
         logging.info("About to get Fisher cuts")
         # part1: 1016 hrs, 1055801 cuts
         # part2: 1025 hrs, 1057637 cuts
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/Fisher/",
+                "s3://yangxiaoyu/Fisher/"
+            )
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            
+            return c
+        
         parts = ["part1", "part2"]
         if self.args.use_shar:
             all_cuts = []
@@ -1140,12 +1160,13 @@ class MultiTaskDataModule:
                     stateful_shuffle=True,
                     seed="randomized",
                 ).repeat()
-                all_cuts.append(cuts)
-            return CutSet.mux(
+                all_cuts.append(cuts)    
+            all_cuts = CutSet.mux(
                 *all_cuts,
                 weights=[1016, 1025],
                 stop_early=False,
             )
+            
         else:
             part1_cuts = load_manifest_lazy(
                 self.args.manifest_dir / "fisher_cuts_part1.jsonl.gz"
@@ -1153,7 +1174,10 @@ class MultiTaskDataModule:
             part2_cuts = load_manifest_lazy(
                 self.args.manifest_dir / "fisher_cuts_part2.jsonl.gz"
             )
-            return part1_cuts + part2_cuts
+            all_cuts =  part1_cuts + part2_cuts
+        
+        all_cuts = all_cuts.map(change_source)
+        return all_cuts
         
     @lru_cache()
     def voxpopuli_asr_train_cuts(self) -> CutSet:
@@ -1268,6 +1292,20 @@ class MultiTaskDataModule:
             weights=weights,
             stop_early=False,
         ).drop_features()
+        
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "/cpfs02/shared/speechllm/xiaoyu/librilight/",
+                "s3://yangxiaoyu/librilight_split/"
+            )
+            c.recording.sources[0].source = source
+            c.recording.sources[0].type = "url"
+            
+            return c   
+        
+        all_cuts = all_cuts.map(change_source) 
+        
         return all_cuts
     
     @lru_cache()
@@ -1305,11 +1343,11 @@ class MultiTaskDataModule:
         def change_recording_root(c):
             source = c.recording.sources[0].source
             source = source.replace(
-                "brainllm-h:s3://yangxiaoyu/yodas-granary-timmed/",
                 "download/yodas-granary-trimmed/", 
+                "s3://yangxiaoyu/yodas-granary-timmed/",
             )
             c.recording.sources[0].source = source
-            c.recording.sources[0].type = "file"
+            c.recording.sources[0].type = "url"
             c.supervisions[0].id = c.id
             c.supervisions[0].recording_id = c.id
             return c
@@ -1370,6 +1408,23 @@ class MultiTaskDataModule:
     def wenetspeech_test_meeting_cuts(self) -> CutSet:
         logging.info("About to get TEST_MEETING cuts")
         return load_manifest_lazy(self.args.manifest_dir / "wenetspeech_cuts_TEST_MEETING.jsonl.gz")
+    
+    @lru_cache()
+    def commonvoice_en_train_cuts(self) -> CutSet:
+        logging.info("About to get CommonVoice English train cuts")
+        if self.args.use_shar:
+            cuts = CutSet.from_shar(
+                in_dir=f"{str(self.args.speech_shar_dir)}/commonvoice/en/train",
+                shuffle_shards=True,
+                stateful_shuffle=True,
+                seed="randomized",
+            ).repeat()
+            cuts = cuts.resample(16000)
+            return cuts
+        else:
+            return load_manifest_lazy(
+                self.args.manifest_dir / "commonvoice_en_cuts_train.jsonl.gz"
+            ).resample(16000)
     
     @lru_cache()
     def mls_train_cuts(self) -> CutSet:
@@ -1568,11 +1623,12 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
-            return cuts
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "vggsound_cuts_train.jsonl.gz"
             )
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
     
     @lru_cache()
     def vggsound_test_cuts(self) -> CutSet:
@@ -1583,11 +1639,12 @@ class MultiTaskDataModule:
                 in_dir=f"{str(self.args.audio_shar_dir)}/vggsound/test",
                 shuffle_shards=False,
             )
-            return cuts
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "vggsound_cuts_test.jsonl.gz"
             )
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
 
     @lru_cache()
     def mtg_cuts(self) -> CutSet:
@@ -1601,11 +1658,12 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
-            return cuts
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "mtg_wav_cuts_10s.jsonl.gz"
             )
+
+        return cuts
             
     @lru_cache()
     def music4all_cuts(self) -> CutSet:
@@ -1618,11 +1676,13 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
-            return cuts
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "music4all_cuts_all.jsonl.gz"
             )
+            
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
             
     @lru_cache()
     def bbc_soundeffect_train_cuts(self) -> CutSet:
@@ -1635,6 +1695,7 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            cuts = cuts.map(change_to_s3_audio)
             return cuts
         else:
             return load_manifest_lazy(
@@ -1646,14 +1707,16 @@ class MultiTaskDataModule:
         logging.info("About to get BBC sound effect test cuts")
         if self.args.use_shar:
             logging.info(f"Use shard for BBC cuts")
-            return CutSet.from_shar(
+            cuts = CutSet.from_shar(
                 in_dir=f"{str(self.args.audio_shar_dir)}/bbc_soundeffect/test_10s",
                 shuffle_shards=False,
             )
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "bbc_soundeffect_cuts_test_10s.jsonl.gz"
             )
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
             
     @lru_cache()
     def freesound_train_cuts(self) -> CutSet:
@@ -1666,25 +1729,30 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
-            return cuts
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "freesound_cuts_train_10s.jsonl.gz"
             )
+        
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
         
     @lru_cache()
     def freesound_test_cuts(self) -> CutSet:
         logging.info("About to get freesound test cuts")
         if self.args.use_shar:
             logging.info(f"Use shard for freesound cuts")
-            return CutSet.from_shar(
+            cuts = CutSet.from_shar(
                 in_dir=f"{str(self.args.audio_shar_dir)}/freesound/test_10s",
                 shuffle_shards=False,
             )
         else:
-            return load_manifest_lazy(
+            cuts = load_manifest_lazy(
                 self.args.manifest_dir / "freesound_cuts_test_10s.jsonl.gz"
             )
+        
+        cuts = cuts.map(change_to_s3_audio)
+        return cuts
     
     @lru_cache()
     def voxceleb_cuts(self) -> CutSet:
@@ -1768,14 +1836,14 @@ class MultiTaskDataModule:
         logging.info("About to get msp podcast training cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.speech_shar_dir)}/msp_podcast/Train",
+                in_dir=f"{str(self.args.speech_shar_dir)}/msp_podcast_2/Train",
                 shuffle_shards=True,
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "msp_podcast_cuts_Train.jsonl.gz"
+                self.args.manifest_dir / "msp_podcast_2_cuts_Train.jsonl.gz"
             )
             
     @lru_cache()
@@ -1783,12 +1851,12 @@ class MultiTaskDataModule:
         logging.info("About to get msp podcast development cuts")
         if self.args.use_shar:
             return CutSet.from_shar(
-                in_dir=f"{str(self.args.speech_shar_dir)}/msp_podcast/Development",
+                in_dir=f"{str(self.args.speech_shar_dir)}/msp_podcast_2/Development",
                 shuffle_shards=False,
             )
         else:
             return load_manifest_lazy(
-                self.args.manifest_dir / "msp_podcast_cuts_Development.jsonl.gz"
+                self.args.manifest_dir / "msp_podcast_2_cuts_Development.jsonl.gz"
             )
 def fix_supervisions(cut):
     supervision = cut.supervisions[0]
@@ -1799,7 +1867,13 @@ def filter_supervisions_start(c):
     if c.supervisions[0].start != 0.0:
         return False
     return True
-    
+
+def change_to_s3_audio(cut):
+    source = cut.recording.sources[0].source
+    new_source = source.replace("download/", "s3://yangxiaoyu/audio-dataset/")
+    cut.recording.sources[0].source = new_source
+    cut.recording.sources[0].type = "url"
+    return cut
 
 if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"

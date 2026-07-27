@@ -19,7 +19,7 @@
 # limitations under the License.
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import random
 
 import numpy as np
@@ -108,12 +108,15 @@ class MultiKDModel(nn.Module):
         self.distillation_delta = distillation_delta
         
         if num_codebooks > 0:
-            self.codebook_loss_net = JointCodebookLoss(
-                predictor_channels=encoder_dim,
-                num_codebooks=num_codebooks * self.teacher_frame_ratio,
-                is_joint=False,
-                reduction="none",
-            )
+            self.codebook_loss_heads = nn.ModuleList()
+            for i in range(2):
+                codebook_loss_net = JointCodebookLoss(
+                    predictor_channels=encoder_dim,
+                    num_codebooks=num_codebooks * self.teacher_frame_ratio,
+                    is_joint=False,
+                    reduction="none",
+                )
+                self.codebook_loss_heads.append(codebook_loss_net)
         else:
             self.codebook_loss_net = None
         
@@ -248,9 +251,14 @@ class MultiKDModel(nn.Module):
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
-        if codebook_indexes is not None and self.codebook_loss_net is not None:
+        cb_losses = []
+        for i, cb_loss_net in enumerate(self.codebook_loss_heads):
             codebook_loss = self.forward_codebook_loss(
-                encoder_out, encoder_out_lens, codebook_indexes, reduction="none"
+                encoder_out, 
+                encoder_out_lens,
+                codebook_indexes[i],
+                cb_loss_net,
+                reduction="none"
             )
             if self.loss_only_mask and mask_indices is not None:
                 # downsample the mask 
@@ -259,21 +267,21 @@ class MultiKDModel(nn.Module):
                 mask_indices = mask_indices[:, :codebook_loss.size(1)].float()
                 codebook_loss = codebook_loss * mask_indices
             codebook_loss = codebook_loss.sum(dim=1) # (B,)    
-        else:
-            codebook_loss = None
+            cb_losses.append(codebook_loss)
         
         if at_targets is not None:
             at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
             at_loss = None
         
-        return codebook_loss, at_loss
+        return *cb_losses, at_loss
 
     def forward_codebook_loss(
         self,
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
+        cb_loss_net: torch.nn.Module,
         reduction: str = "sum",
     ):
         # align the encoder features with the codebook indexes
@@ -297,7 +305,7 @@ class MultiKDModel(nn.Module):
             codebook_indexes = codebook_indexes.masked_fill(truncated_padding_mask.unsqueeze(-1), value=-100)
             
         N,T,_ = encoder_out.shape
-        codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
+        codebook_loss = cb_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
         num_cb = codebook_loss.size(-1)
         # normalize the loss by the number of codebooks
@@ -737,7 +745,7 @@ def _test_w2v2_channel_mask():
             )
             ratio = mask_channel_indices.sum() / mask_channel_indices.numel()
             ratios.append(ratio)
-        import pdb; pdb.set_trace()
+        
         avg_ratio = sum(ratios) / len(ratios)
         print(f"Current config: mask_channel_prob = {mask_channel_prob}, mask_channel_length = {mask_channel_length}")
         print(f"Averaged masking ratio: {avg_ratio}")

@@ -1,9 +1,12 @@
 import random
 import time
 
+import torch
+
 from lhotse.cut import CutSet, MonoCut, Cut
 from lhotse.cut.set import mix
 from lhotse.utils import fastcopy
+from lhotse.dataset import CutMix
 
 def _mix_with_offset_deprecated_(
     reference_cut: Cut,
@@ -35,6 +38,7 @@ def _mix_with_offset_deprecated_(
     )
     
     return mixed_cut
+
 
 def mix_with_offset(
     reference_cut: Cut,
@@ -86,6 +90,85 @@ def mix_with_offset(
     )
     return mixed_cut
 
+def mix_with_delay_max(
+    reference_cut: Cut,
+    mixed_in_cut: Cut,
+    snr: float = 10.0,
+    delay: float = 10.0,
+    drop_mixed_in_supervision: bool = True,
+):
+    """
+    Mix two cuts with a random delay offset. The mixed_in_cut is not truncated,
+    so the resulting cut can be longer than the reference_cut.
+    
+    Args:
+        reference_cut: The reference cut to mix into
+        mixed_in_cut: The cut to mix in with a delay
+        snr: Signal-to-noise ratio for mixing
+        delay: Maximum delay in seconds (actual delay will be sampled from [0, min(delay, reference_cut.duration)])
+        drop_mixed_in_supervision: Whether to drop supervisions from the mixed_in_cut
+    
+    Returns:
+        A mixed cut that may be longer than the reference_cut
+    """
+    if drop_mixed_in_supervision and hasattr(mixed_in_cut, "drop_supervisions"):
+        mixed_in_cut = mixed_in_cut.drop_supervisions()
+    
+    ref_duration = float(reference_cut.duration)
+    
+    # Sample delay from [0, min(delay, ref_duration)]
+    max_delay = min(delay, ref_duration)
+    offset = random.uniform(0.0, max_delay)
+    
+    # Mix without truncating mixed_in_cut
+    mixed_cut = mix(
+        reference_cut=reference_cut,
+        mixed_in_cut=mixed_in_cut,
+        offset=offset,
+        snr=snr,
+        preserve_id="left",
+    )
+    return mixed_cut
+
+
+def mix_with_delay_random_proportion(
+    reference_cut: Cut,
+    mixed_in_cut: Cut,
+    snr: float = 10.0,
+    delay: float = 10.0,
+    drop_mixed_in_supervision: bool = True,
+):
+    """
+    Mixes two cuts. The overlap duration is sampled uniformly from
+    (0.2 * reference_cut.duration, reference_cut.duration).
+    The mixed_in_cut is NOT truncated, so the resulting cut can be longer.
+    """
+    if drop_mixed_in_supervision and hasattr(mixed_in_cut, "drop_supervisions"):
+        mixed_in_cut = mixed_in_cut.drop_supervisions()
+
+    ref_duration = reference_cut.duration
+    mix_in_duration = mixed_in_cut.duration
+
+    # Sample target overlap duration from (0.2 * ref_duration, ref_duration)
+    min_overlap = 0.2 * ref_duration
+    max_overlap = ref_duration
+    target_overlap_duration = random.uniform(min_overlap, max_overlap)
+
+    # The overlap duration is at most the duration of the shorter cut
+    actual_overlap_duration = min(target_overlap_duration, ref_duration, mix_in_duration)
+    offset = ref_duration - actual_overlap_duration
+    
+    # the offset cannot exceed the longest allowed delay
+    offset = min(offset, delay)
+
+    mixed_cut = mix(
+        reference_cut=reference_cut,
+        mixed_in_cut=mixed_in_cut,
+        offset=offset,
+        snr=snr,
+        preserve_id="left",
+    )
+    return mixed_cut
 
 class BatchMixingWithTask:
     def __init__(
@@ -96,6 +179,8 @@ class BatchMixingWithTask:
         p: float = 0.2,
         p_noise: float = 0.1,
         noise_cuts: CutSet = None,
+        batch_mix_mode: str = "wavlm",
+        mix_delay_max: float = 10.0,
         drop_mixed_in_supervision: bool = True,
         seed: int = 42,
         stateful: bool = True,
@@ -122,10 +207,19 @@ class BatchMixingWithTask:
         self.max_snr = max_snr
         self.p = p
         self.min_noise_snr = min_noise_snr
+        
+        # whether apply wavlm style mixing or max style mixing to speech data
+        assert batch_mix_mode in ["wavlm", "max"], f"Unsupported batch mix mode {batch_mix_mode}"
+        self.batch_mix_mode = batch_mix_mode
+        self.mix_delay_max = mix_delay_max
+        
         self.p_noise = p_noise
         if p_noise > 0:
             assert noise_cuts is not None, "If p_noise > 0, noise_cuts must be provided"
         self.noise_cuts = noise_cuts
+        self.noise_transform = CutMix(
+            cuts=noise_cuts, p=1.0, snr=(10, 20)
+        )
         self.drop_mixed_in_supervision = drop_mixed_in_supervision
         
         self.seed = seed
@@ -133,7 +227,12 @@ class BatchMixingWithTask:
         self.num_times_iterated = 0
     
     def __str__(self):
-        return f"BatchMixing with Task: p={self.p}, snr=({self.min_snr}, {self.max_snr}), p_n={self.p_noise}, min_noise_snr={self.min_noise_snr}, drop_supervision={self.drop_mixed_in_supervision}" 
+        return f"""
+            BatchMixing with Task: p={self.p}, snr=({self.min_snr}, {self.max_snr}), 
+            p_n={self.p_noise}, min_noise_snr={self.min_noise_snr}, drop_supervision={self.drop_mixed_in_supervision},
+            max_delay={self.mix_delay_max},
+            batch_mix_model={self.batch_mix_mode}
+        """
         
     def __call__(self, reference_cuts: CutSet) -> CutSet:
         from lhotse.dataset.dataloading import resolve_seed
@@ -166,49 +265,67 @@ class BatchMixingWithTask:
             c.custom = None
             return c
         # filter out the speech data, for speech in-batch mixing
-        speech_cuts = CutSet.from_cuts([fastcopy(c) for c in reference_cuts if c.task_id == 1]).map(remove_custom)
+        speech_cuts = CutSet.from_cuts([fastcopy(c) for c in reference_cuts if c.task_id == 1]) # .map(remove_custom)
         noise_cuts = iter(noise_gen())
         
         results = []
         for cut in reference_cuts:
             # perform augmentation
+            # For speech data (task_id = 1), we do both speech mixing and noise mixing
             if cut.task_id == 1:
                 if rng.random() < self.p:
                     # use noise mixing
                     if self.p_noise > 0 and rng.random() < self.p_noise:
                         snr = rng.uniform(self.min_noise_snr, 20) # the max snr for noise mixing is 20dB
-                        mixed_in_cut = next(noise_cuts)
-                        mixed_cut = mix_with_offset(
-                            cut,
-                            mixed_in_cut,
-                            snr=snr,
-                            max_overlap_ratio=0.8,  # noise 可以覆盖更多
-                        )
-                    else: # same-batch speech mixing
+                        # mixed_in_cut = next(noise_cuts)
+                        # mixed_cut = mix_with_offset(
+                        #     cut,
+                        #     mixed_in_cut,
+                        #     snr=snr,
+                        #     max_overlap_ratio=0.8,  # noise 可以覆盖更多
+                        # )
+                        mixed_cut = self.noise_transform(CutSet.from_cuts([cut]))[0] # TODO: make this more efficient
+                        mixed_cut.mix_type = "noise"
+                    else:
+                        # same-batch speech mixing, with a smaller SNR range
                         snr = rng.uniform(self.min_snr, self.max_snr)
                         mixed_in_cut = speech_cuts.sample(n_cuts=1) # this should be rather quick
                         while mixed_in_cut.id == cut.id and len(speech_cuts) > 1:
                             mixed_in_cut = speech_cuts.sample(n_cuts=1)
-                        mixed_cut = mix_with_offset(
-                            cut,
-                            mixed_in_cut,
-                            snr=snr,
-                            min_overlap_ratio=0.2,
-                            max_overlap_ratio=0.5,
-                        )
+                        if self.batch_mix_mode == "wavlm":
+                            mixed_cut = mix_with_offset(
+                                cut,
+                                mixed_in_cut,
+                                snr=snr,
+                                min_overlap_ratio=0.2,
+                                max_overlap_ratio=0.5,
+                            )
+                        elif self.batch_mix_mode == "max":
+                            mixed_cut = mix_with_delay_max(
+                                cut,
+                                mixed_in_cut,
+                                snr=snr,
+                                delay=self.mix_delay_max,
+                            )
+                        else:
+                            raise ValueError(f"Unsupported batch mix mode {self.batch_mix_mode}")
+                        mixed_cut.mix_type = "speech"
                     results.append(mixed_cut)
                 else:
                     results.append(cut)
             elif cut.task_id == 2:
+                # For audio data (task_id = 2), we only do noise mixing 
                 if rng.random() < 0.5:
                     snr = rng.uniform(self.min_noise_snr, 20)
-                    mixed_in_cut = next(noise_cuts)
-                    mixed_cut = mix_with_offset(
-                        cut,
-                        mixed_in_cut,
-                        snr=snr,
-                        max_overlap_ratio=0.99,
-                    )
+                    # mixed_in_cut = next(noise_cuts)
+                    # mixed_cut = mix_with_offset(
+                    #     cut,
+                    #     mixed_in_cut,
+                    #     snr=snr,
+                    #     max_overlap_ratio=0.99,
+                    # )
+                    mixed_cut = self.noise_transform(CutSet.from_cuts([cut]))[0] # TODO: make this more efficient
+                    mixed_cut.mix_type = "noise"
                     results.append(mixed_cut)
                 else:
                     results.append(cut)
@@ -223,6 +340,8 @@ class BatchMixing:
         max_snr: float = 5,
         min_noise_snr: float = -5,
         p: float = 0.2,
+        batch_mix_mode: str = "wavlm",
+        mix_delay_max: float = 10.0,
         p_noise: float = 0.1,
         noise_cuts: CutSet = None,
         drop_mixed_in_supervision: bool = True,
@@ -244,10 +363,20 @@ class BatchMixing:
         self.max_snr = max_snr
         self.p = p
         self.min_noise_snr = min_noise_snr
+        
+        # whether apply wavlm style mixing or max style mixing to speech data
+        assert batch_mix_mode in ["wavlm", "max", "random_proportion"], f"Unsupported batch mix mode {batch_mix_mode}"
+        self.batch_mix_mode = batch_mix_mode
+        self.mix_delay_max = mix_delay_max
+        
+        
         self.p_noise = p_noise
         if p_noise > 0:
             assert noise_cuts is not None, "If p_noise > 0, noise_cuts must be provided"
         self.noise_cuts = noise_cuts
+        self.noise_transform = CutMix(
+            cuts=noise_cuts, p=1.0, snr=(10, 20)
+        )
         self.drop_mixed_in_supervision = drop_mixed_in_supervision
         
         self.seed = seed
@@ -290,31 +419,83 @@ class BatchMixing:
             if rng.random() < self.p:
                 if self.p_noise > 0 and rng.random() < self.p_noise:
                     snr = rng.uniform(self.min_noise_snr, 20) # the max snr for noise mixing is 20dB
-                    mixed_in_cut = next(noise_cuts)
-                    mixed_cut = mix_with_offset(
-                        cut,
-                        mixed_in_cut,
-                        snr=snr,
-                        max_overlap_ratio=0.8,  # noise 可以覆盖更多
-                    )
+                    # mixed_in_cut = next(noise_cuts)
+                    # mixed_cut = mix_with_offset(
+                    #     cut,
+                    #     mixed_in_cut,
+                    #     snr=snr,
+                    #     max_overlap_ratio=0.8,  # noise 可以覆盖更多
+                    # )
+                    mixed_cut = self.noise_transform(CutSet.from_cuts([cut]))[0] # TODO: make this more efficient
+                    mixed_cut.mix_type = "noise"
                     # mixed_in_cut = self.noise_cuts.sample(n_cuts=1) # this should be rather quick
-                else: # same batch mixing
+                else: 
+                    # same batch mixing
                     snr = rng.uniform(self.min_snr, self.max_snr)
                     mixed_in_cut = reference_cuts.sample(n_cuts=1) # this should be rather quick
-                    while mixed_in_cut.id == cut.id:
+                    while mixed_in_cut.id == cut.id and len(reference_cuts) > 1:
                         mixed_in_cut = reference_cuts.sample(n_cuts=1)
-                    mixed_cut = mix_with_offset(
-                        cut,
-                        mixed_in_cut,
-                        snr=snr,
-                        min_overlap_ratio=0.2,
-                        max_overlap_ratio=0.5,
-                    )
+                    if self.batch_mix_mode == "wavlm":
+                        mixed_cut = mix_with_offset(
+                            cut,
+                            mixed_in_cut,
+                            snr=snr,
+                            min_overlap_ratio=0.2,
+                            max_overlap_ratio=0.5,
+                        )
+                    elif self.batch_mix_mode == "max":
+                        mixed_cut = mix_with_delay_max(
+                            cut,
+                            mixed_in_cut,
+                            snr=snr,
+                            delay=self.mix_delay_max,
+                        )
+                    elif self.batch_mix_mode == "random_proportion":
+                        mixed_cut = mix_with_delay_random_proportion(
+                            cut,
+                            mixed_in_cut,
+                            snr=snr,
+                            delay=self.mix_delay_max,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported batch mix mode {self.batch_mix_mode}")
+                    mixed_cut.mix_type = "speech"
                 results.append(mixed_cut)
             else:
                 results.append(cut)
         return CutSet.from_cuts(results)
     
+class RollTimeAugment:
+    """Callable augmentation that performs circular time-roll on log-mel features.
+
+    It is compatible with the dataset's `input_transforms` and will be called as
+    `transform(inputs, supervision_segments=...)`.
+    """
+
+    def __init__(self, p: float = 0.5, min_frac: float = 0.1, max_frac: float = 0.2):
+        self.p = p
+        self.min_frac = min_frac
+        self.max_frac = max_frac
+
+    def __str__(self):
+        return f"Roll Augmentation: p={self.p}, min_frac={self.min_frac}, max_frac={self.max_frac}"
+
+    def __call__(self, inputs: torch.Tensor, supervision_segments=None) -> torch.Tensor:
+        if not isinstance(inputs, torch.Tensor):
+            return inputs
+        # inputs: (B, T, C)
+        B, T, C = inputs.shape
+        out = inputs.clone()
+        
+        for i in range(B):
+            if random.random() < self.p:
+                frac = random.uniform(self.min_frac, self.max_frac)
+                direction = random.choice([-1, 1])
+                shift = int(round(frac * T)) * direction
+                out[i] = torch.roll(out[i], shifts=shift, dims=0)
+        return out
+
+
 def _test_mix():
     from lhotse import load_manifest_lazy
     from lhotse import load_manifest
@@ -334,7 +515,6 @@ def _test_mix():
         noise_cuts=noise_cuts,
         drop_mixed_in_supervision=True
     )
-    # import pdb; pdb.set_trace()
     num_noise_mix = 0
     num_speech_mix = 0
     start = time.time()

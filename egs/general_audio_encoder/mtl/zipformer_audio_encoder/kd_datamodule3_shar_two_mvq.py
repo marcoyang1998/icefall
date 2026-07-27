@@ -48,7 +48,7 @@ from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
 from augmentations import BatchMixing
-from dataset2_npy_cache import MultiTaskKDDataset
+from dataset2_two_mvq import MultiTaskKDDataset
 from icefall.utils import str2bool
 
 
@@ -535,30 +535,6 @@ class MultiTaskDataModule:
         
         group.add_argument(
             "--repeat-vggsound",
-            type=int,
-            default=1,
-        )
-        
-        group.add_argument(
-            "--use-soundnet",
-            type=str2bool,
-            default=False,
-        )
-        
-        group.add_argument(
-            "--repeat-soundnet",
-            type=int,
-            default=1,
-        )
-        
-        group.add_argument(
-            "--use-acavcaps",
-            type=str2bool,
-            default=False,
-        )
-        
-        group.add_argument(
-            "--repeat-acavcaps",
             type=int,
             default=1,
         )
@@ -1589,13 +1565,11 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            return cuts
         else:
-            cuts = load_manifest_lazy(
+            return load_manifest_lazy(
                 self.args.manifest_dir / "music4all_cuts_all.jsonl.gz"
             )
-            
-        cuts = cuts.map(change_to_s3_audio)
-        return cuts
     
     @lru_cache()
     def vggsound_train_cuts(self) -> CutSet:
@@ -1608,13 +1582,11 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            return cuts
         else:
-            cuts = load_manifest_lazy(
+            return load_manifest_lazy(
                 self.args.manifest_dir / "vggsound_cuts_train.jsonl.gz"
             )
-        cuts = cuts.map(change_to_s3_audio)
-        return cuts
-    
     
     @lru_cache()
     def vggsound_test_cuts(self) -> CutSet:
@@ -1625,126 +1597,11 @@ class MultiTaskDataModule:
                 in_dir=f"{str(self.args.shar_dir)}/vggsound/test",
                 shuffle_shards=False,
             )
+            return cuts
         else:
-            cuts = load_manifest_lazy(
+            return load_manifest_lazy(
                 self.args.manifest_dir / "vggsound_cuts_test.jsonl.gz"
             )
-        return cuts
-            
-    @lru_cache()
-    def soundnet_train_cuts(self) -> CutSet:
-        logging.info("About to get soundnet training cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/soundnet/train",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_train.jsonl.gz"
-            )
-            
-    @lru_cache()
-    def soundnet_test_cuts(self) -> CutSet:
-        logging.info("About to get soundnet test cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"{self.args.shar_dir}/soundnet/test",
-                shuffle_shards=False,
-            )
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_test.jsonl.gz"
-            )
-    
-    @lru_cache()
-    def soundnet_raw_train_cuts(self) -> CutSet:
-        logging.info("About to get soundnet training cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"data-shar/soundnet/train",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_train.jsonl.gz"
-            )
-            
-    @lru_cache()
-    def soundnet_raw_test_cuts(self) -> CutSet:
-        logging.info("About to get soundnet test cuts")
-        if self.args.use_shar:
-            logging.info(f"Use shard for soundnet")
-            cuts = CutSet.from_shar(
-                in_dir=f"data-shar/soundnet/test",
-                shuffle_shards=False,
-            )
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "soundnet_cuts_test.jsonl.gz"
-            )
-            
-    @lru_cache()
-    def acavcaps_cuts(self) -> CutSet:
-        logging.info("About to get acavcaps cuts. Full version 1.0.")
-        logging.info(f"Use shard for acavcaps")
-        subsets = ["00A", "0MA", "SM0", "0M0", "S0A", "SMA", "S00"]
-        # durations = [126, 59, 2589, 1332, 958, 186, 6160]
-        durations = [162, 78, 3373, 1737, 1246, 245, 6160] # total 13000 hours, 4680000 cuts
-        
-        all_cuts = []
-        weights = []
-        for i, subset in enumerate(subsets):
-            logging.info(f"Getting acavcaps subset {subset}")
-            if self.args.use_shar:
-                cuts = CutSet.from_shar(
-                    in_dir=f"{self.args.shar_dir}/acavcaps/{subset}",
-                    shuffle_shards=True,
-                    stateful_shuffle=True,
-                    seed="randomized",
-                ).repeat()
-            else:
-                cuts = load_manifest_lazy(self.args.manifest_dir / f"acavcaps_cuts_{subset}.jsonl.gz")
-            all_cuts.append(cuts)
-            weights.append(durations[i])
-            
-        all_cuts = CutSet.mux(
-            *all_cuts,
-            weights=weights,
-            stop_early=False,
-        )
-        return all_cuts
-    
-    @lru_cache()
-    def acavcaps_raw_all_cuts(self) -> CutSet:
-        logging.info("About to get acavcaps all cuts. Download version 1.0.")
-        # 5250 hours
-        # 1887735 cuts
-        if self.args.use_shar:
-            logging.info(f"Use shard for acavcaps")
-            cuts = CutSet.from_shar(
-                in_dir="data-shar/acavcaps/all",
-                shuffle_shards=True,
-                stateful_shuffle=True,
-                seed="randomized",
-            ).repeat()
-            return cuts
-        else:
-            return load_manifest_lazy(
-                self.args.manifest_dir / "acavcaps_cuts_all.jsonl.gz"
-            )
-            
             
     @lru_cache()
     def mtg_cuts(self) -> CutSet:
@@ -1758,13 +1615,11 @@ class MultiTaskDataModule:
                 stateful_shuffle=True,
                 seed="randomized",
             ).repeat()
+            return cuts
         else:
-            cuts = load_manifest_lazy(
+            return load_manifest_lazy(
                 self.args.manifest_dir / "mtg_wav_cuts_10s.jsonl.gz"
             )
-            
-        # cuts = cuts.map(change_to_s3_audio)
-        return cuts
         
     @lru_cache()
     def bbc_soundeffect_train_cuts(self) -> CutSet:
@@ -1979,12 +1834,7 @@ def _test():
         print(f"Number of cuts from task1: {num1}")
         print(f"Number of cuts from task2: {num2}")
      
-def change_to_s3_audio(cut):
-    source = cut.recording.sources[0].source
-    new_source = source.replace("download/", "s3://yangxiaoyu/audio-dataset/")
-    cut.recording.sources[0].source = new_source
-    cut.recording.sources[0].type = "url"
-    return cut 
+     
        
 def _test_bucketing_sampler():
     parser = argparse.ArgumentParser()

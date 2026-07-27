@@ -1666,6 +1666,16 @@ def run(rank, world_size, args):
             "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5244,
         }
         audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download2/"
+            )
+            c.recording.sources[0].source = source
+            return c
+        audioset_cuts = audioset_cuts.map(change_source)
+            
         num_audio_cuts = audioset_cuts_lens[params.audioset_subset] * params.repeat_audioset
         audio_training_cuts.append(audioset_cuts)
         audio_training_cuts_lens.append(num_audio_cuts)
@@ -1812,6 +1822,15 @@ def run(rank, world_size, args):
      
     if params.use_audioset:
         as_eval_cuts = librispeech.audioset_eval_cuts()
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download2/"
+            )
+            c.recording.sources[0].source = source
+            return c
+        as_eval_cuts = as_eval_cuts.map(change_source)
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
@@ -1846,7 +1865,6 @@ def run(rank, world_size, args):
         scaler.load_state_dict(checkpoints["grad_scaler"])
 
     for epoch in range(params.start_epoch, params.num_epochs + 1):
-        # scheduler.step_epoch(epoch - 1)
         fix_random_seed(params.seed + epoch - 1)
         if not params.use_shar:
             train_dl.sampler.set_epoch(epoch - 1)

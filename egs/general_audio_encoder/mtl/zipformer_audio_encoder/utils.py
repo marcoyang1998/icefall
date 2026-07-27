@@ -233,13 +233,15 @@ def _save_checkpoint(
         torch.save(checkpoint, filename)
 
 class MetricsTracker(collections.defaultdict):
-    def __init__(self, normalize: bool = True):
+    def __init__(self, normalize: bool = True, norm_by: str = "frames"):
         # Passing the type 'int' to the base-class constructor
         # makes undefined items default to int() which is zero.
         # This class will play a role as metrics tracker.
         # It can record many metrics, including but not limited to loss.
         super(MetricsTracker, self).__init__(int)
         self.normalize = normalize
+        assert norm_by in ["frames", "utterances", "tokens"]
+        self.norm_by = norm_by
 
     def __add__(self, other: "MetricsTracker") -> "MetricsTracker":
         ans = MetricsTracker()
@@ -271,8 +273,15 @@ class MetricsTracker(collections.defaultdict):
                     ans_utterances += ", "
                 else:
                     raise ValueError(f"Unexpected key: {k}")
-        frames = "%.2f" % self["frames"]
-        ans_frames += "over " + str(frames) + " frames. "
+        if self.norm_by == "frames":
+            norm_by_values = "%.2f" % self["frames"]
+        elif self.norm_by == "utterances":
+            norm_by_values = "%.2f" % self["utterances"]
+        elif self.norm_by == "tokens":
+            norm_by_values = "%.2f" % self["tokens"]
+        else:
+            raise ValueError(f"Unsupported norm_by: {self.norm_by}")
+        ans_frames += "over " + str(norm_by_values) + f" {self.norm_by}. "
         if ans_utterances != "":
             utterances = "%.2f" % self["utterances"]
             ans_utterances += "over " + str(utterances) + " utterances."
@@ -286,9 +295,10 @@ class MetricsTracker(collections.defaultdict):
         """
         num_frames = self["frames"] if "frames" in self else 1
         num_utterances = self["utterances"] if "utterances" in self else 1
+        num_tokens = self["tokens"] if "tokens" in self else 1
         ans = []
         for k, v in self.items():
-            if k == "frames" or k == "utterances":
+            if k in ["frames", "utterances", "tokens"]:
                 continue
             if not self.normalize:
                 ans.append((k, float(v)))
@@ -296,6 +306,10 @@ class MetricsTracker(collections.defaultdict):
             if ("audio_tagging" in k) or ("speaker_verification" in k):
                 norm_value = (
                     float(v) / num_utterances
+                )
+            if "attention_decoder" in k:
+                norm_value = (
+                    float(v) / num_tokens
                 )
             else:
                 norm_value = (

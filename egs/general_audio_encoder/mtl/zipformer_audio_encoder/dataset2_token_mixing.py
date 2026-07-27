@@ -1,121 +1,21 @@
 import math
 import random
-from threading import Lock
 from typing import Callable, Dict, List, Optional, Union, Tuple
 
 import torch
-from torch.utils.data.dataloader import DataLoader, default_collate
+from torch.utils.data.dataloader import default_collate
 import numpy as np
 
 from lhotse import validate
 from lhotse import Fbank, FbankConfig
 from lhotse.cut import CutSet, MonoCut, Cut, MixedCut
 from lhotse.dataset.input_strategies import BatchIO, PrecomputedFeatures
-from lhotse.dataset.collation import collate_custom_field, collate_matrices
-from lhotse.utils import compute_num_frames, ifnone, LOG_EPSILON
+from lhotse.dataset.collation import collate_matrices
+from lhotse.utils import compute_num_frames, compute_num_samples, ifnone, LOG_EPSILON
 from lhotse.workarounds import Hdf5MemoryIssueFix
 
 from lhotse.cut.set import mix
 
-class CodebookCache:
-    """
-    Cache of 'bytes' objects with audio data.
-    It is used to cache the "command" type audio inputs.
-
-    By default it is disabled, to enable call `set_caching_enabled(True)`
-    or `AudioCache.enable()`.
-
-    The cache size is limited to max 100 elements and 500MB of audio.
-
-    A global dict `__cache_dict` (static member variable of class AudioCache)
-    is holding the codebooks as np.array.
-    The key is the supervision ID, we avoid using cut.id because the cut IDs could be ruined by repeat
-
-    Thread-safety is ensured by a threading.Lock guard.
-    """
-
-    __enabled: bool = False
-
-    max_cache_memory: int = 500 * 1e6  # 500 MB
-    max_cache_elements: int = 10000  # number audio files
-
-    __cache_dict: Dict[str, np.array] = {}
-    __lock: Lock = Lock()
-
-    @classmethod
-    def enable(cls, enabled=True):
-        cls.__enabled = enabled
-        if not enabled:
-            cls.__clear_cache()
-
-    @classmethod
-    def enabled(cls) -> bool:
-        return cls.__enabled
-
-    @classmethod
-    def try_cache(cls, key: str) -> Optional[bytes]:
-        """
-        Test if 'key' is in the chache. If yes return the bytes array,
-        otherwise return None.
-        """
-
-        if not cls.__enabled:
-            return None
-
-        with cls.__lock:
-            if key in cls.__cache_dict:
-                return cls.__cache_dict[key]
-            else:
-                return None
-
-    @classmethod
-    def add_to_cache(cls, key: str, value: np.array):
-        """
-        Add the new (key,value) pair to cache.
-        Possibly free some elements before adding the new pair.
-        The oldest elements are removed first.
-        """
-
-        if not cls.__enabled:
-            return None
-
-        if value.itemsize * value.size > cls.max_cache_memory:
-            return
-
-        with cls.__lock:
-            # limit cache elements
-            while len(cls.__cache_dict) > cls.max_cache_elements:
-                # remove oldest elements from cache
-                # (dict pairs are sorted according to insertion order)
-                cls.__cache_dict.pop(next(iter(cls.__cache_dict)))
-
-            # limit cache memory
-            while value.itemsize * value.size + CodebookCache.__cache_memory() > cls.max_cache_memory:
-                # remove oldest elements from cache
-                # (dict pairs are sorted according to insertion order)
-                cls.__cache_dict.pop(next(iter(cls.__cache_dict)))
-
-            # store the new (key,value) pair
-            cls.__cache_dict[key] = value
-
-    @classmethod
-    def __cache_memory(cls) -> int:
-        """
-        Return size of CodebookCache values in bytes.
-        (internal, not to be called from outside)
-        """
-        ans = 0
-        for key, value in cls.__cache_dict.items():
-            ans += value.itemsize * value.size
-        return ans
-
-    @classmethod
-    def __clear_cache(cls) -> None:
-        """
-        Clear the cache, remove the data.
-        """
-        with cls.__lock:
-            cls.__cache_dict.clear()
 
 def str2multihot(events: List[str], n_classes=527, id_mapping=None):
     # generate multi-hot class labels
@@ -224,9 +124,6 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.dummy_audio_logits = torch.ones(527) * 0.5
         
         self.enable_cache = enable_cache
-        if self.enable_cache:
-            CodebookCache.enable()
-            assert CodebookCache.enabled()
 
         # This attribute is a workaround to constantly growing HDF5 memory
         # throughout the epoch. It regularly closes open file handles to
@@ -257,11 +154,15 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
 
         # Get a tensor with batched feature matrices, shape (B, T, F)
         # Collation performs auto-padding, if necessary.
-        inputs, input_lens, mix_ratios = self.load_audio_and_compute_fbank(cuts)
+        audio, audio_lens = read_audio(cuts)
+        inputs, input_lens, mix_gains, replacement_prob = self.load_audio_and_compute_fbank(cuts)
 
         # Get a dict of tensors that encode the positional information about supervisions
         # in the batch of feature matrices. The tensors are named "sequence_idx",
         # "start_frame/sample" and "num_frames/samples".
+        
+        # Fix the duration of the supervision after mixing
+        cuts = cuts.map(fix_supervision_duration)
         supervision_intervals = self.input_strategy.supervision_intervals(cuts)
 
         # Apply all available transforms on the inputs, i.e. either audio or features.
@@ -285,7 +186,12 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         # perform token mixing
         if self.token_mixing:
-            mvq_tokens = self.mix_mvq_tokens(mvq_tokens, cuts, mix_ratios)
+            mvq_tokens, mvq_token_lens = self.mix_mvq_tokens(
+                mvq_tokens,
+                mvq_token_lens,
+                cuts,
+                replacement_prob,
+            )
         
         if self.at_KD:
             # at_targets = collate_custom_field(
@@ -309,6 +215,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         batch = {
             "inputs": inputs,
+            "audio": audio,
+            "audio_lens": audio_lens,
             "cb_indexes": mvq_tokens,
             "cb_indexes_len": mvq_token_lens,
             "supervisions": default_collate(
@@ -336,45 +244,104 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
     def load_audio_and_compute_fbank(self, cuts: CutSet):
         audios = []
         mix_ratios = []
+        replacement_probs = []
         for cut in cuts:
             if isinstance(cut, MixedCut):
-                audio, mix_ratio = _load_mixed_cut_single(cut)
+                mix_type = getattr(cut, "mix_type", "noise")
+                if mix_type == "speech":
+                    # audio, mix_ratio, replacement_prob = _load_mixed_cut_single(cut)
+                    audio, mix_ratio, replacement_prob = _load_mixed_cut_single2(cut)
+                elif mix_type == "noise":
+                    audio = cut.load_audio()
+                    mix_ratio = 0.0
+                    replacement_prob = 0.0
+                else:
+                    raise ValueError()
             else:
                 audio = cut.load_audio()
                 mix_ratio = 0.0
+                replacement_prob = 0.0
             audios.append(audio)
             mix_ratios.append(mix_ratio)
+            replacement_probs.append(replacement_prob)
         
         inputs, input_lens = compute_feature(audios, cuts, self.extractor)
         
-        return inputs, input_lens, mix_ratios
-    
-    def load_codebook_indexes(self, cuts: CutSet, field_name: str = "codebook_indexes"):
-        cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
-        cuts_pre_mixed = fix_start(cuts_pre_mixed)
-        
-        mvq_tokens, mvq_token_lens = _collate_custom_field(
-            cuts_pre_mixed,
-            field_name,
-            dummy=self.dummy_codebook_indexes,
-            temporal_array=True,
-            target_frame_rate=self.target_frame_rate,
-            pad_value=-100,
-        )
-        if self.mix_codebook_indexes:
-            for i,c in enumerate(cuts):
-                if not isinstance(c, MixedCut):
-                    continue
-                orig_track, mix_track = c.tracks # get the two tracks
-                mixed_in_cb = mix_track.load_custom(field_name) # should be only within the mix region
-                offset = compute_num_frames(mix_track.start, 1 / self.target_frame_rate)
-        return mvq_tokens, mvq_token_lens
+        return inputs, input_lens, mix_ratios, replacement_probs
     
     def mix_mvq_tokens(
         self,
         mvq_tokens: torch.Tensor,
+        mvq_token_lens: torch.Tensor,
         cuts: CutSet,
-        mix_ratios: List[float],
+        mix_probs: List[float],
+        field_name: str = "codebook_indexes"
+    ):
+        from torch.nn.utils.rnn import pad_sequence
+        
+        processed_tokens = []
+        new_token_lens = []
+        for i, c in enumerate(cuts):
+            # Start with the original tokens for this cut, removing padding
+            orig_len = mvq_token_lens[i]
+            current_tokens = mvq_tokens[i, :orig_len]
+
+            if isinstance(c, MixedCut) and c.mix_type == "speech":
+                orig_track, mix_track = c.tracks
+                
+                # Load the codebook for the mixed-in track
+                mixed_in_cb = torch.from_numpy(mix_track.cut.load_custom(field_name)).to(current_tokens.device)
+                mix_length = mixed_in_cb.shape[0]
+                
+                # Compute the mixing region
+                offset = int(mix_track.offset * self.target_frame_rate)
+                
+                # Determine the required length after mixing
+                required_length = offset + mix_length
+                
+                # Pad the original tokens if they are shorter than the mixed result
+                if required_length > current_tokens.shape[0]:
+                    pad_length = required_length - current_tokens.shape[0]
+                    padding = torch.full((pad_length, current_tokens.shape[1]), 
+                                         -100, dtype=current_tokens.dtype, device=current_tokens.device)
+                    current_tokens = torch.cat([current_tokens, padding], dim=0)
+
+                # Mix the overlapping region
+                overlap_end = min(offset + mix_length, orig_len)
+                overlap_length = overlap_end - offset
+                
+                if overlap_length > 0:
+                    mixed_in_cb_overlap = mixed_in_cb[:overlap_length, :]
+                    cur_cb_slice = current_tokens[offset:overlap_end, :]
+                    mixed_cb = _mix_tokens_single(cur_cb_slice, mixed_in_cb_overlap, mix_probs[i])
+                    current_tokens[offset:overlap_end] = mixed_cb
+
+                # Handle the part of the mixed-in audio that extends beyond the original
+                if offset + mix_length > orig_len:
+                    # This part of the mixed_in_cb goes into the padded area of current_tokens
+                    remaining_start_in_mixed_cb = max(0, orig_len - offset)
+                    remaining_tokens = mixed_in_cb[remaining_start_in_mixed_cb:]
+                    
+                    # Determine where to place these remaining tokens in the target
+                    paste_start_in_current = offset + remaining_start_in_mixed_cb
+                    paste_end_in_current = paste_start_in_current + remaining_tokens.shape[0]
+
+                    if remaining_tokens.shape[0] > 0:
+                        current_tokens[paste_start_in_current:paste_end_in_current] = remaining_tokens
+
+            processed_tokens.append(current_tokens)
+            new_token_lens.append(current_tokens.shape[0])
+
+        # Pad all processed tensors to the same length
+        padded_tokens = pad_sequence(processed_tokens, batch_first=True, padding_value=-100)
+        
+        return padded_tokens, torch.tensor(new_token_lens, dtype=torch.int32)
+    
+    def _mix_mvq_tokens_deprecated(
+        self,
+        mvq_tokens: torch.Tensor,
+        cuts: CutSet,
+        mix_probs: List[float],
         field_name: str = "codebook_indexes"
     ):
         # Randomly replace a proportion of the original codebook indexes
@@ -382,6 +349,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         # by the gain of the mixed audio
         for i,c in enumerate(cuts):
             if not isinstance(c, MixedCut):
+                continue
+            if c.mix_type != "speech":
                 continue
             orig_track, mix_track = c.tracks # get the two tracks
             
@@ -393,46 +362,194 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
                 mix_length = mvq_tokens.size(1) - offset
                 mixed_in_cb = mixed_in_cb[:, :mix_length]
             cur_cb_slice = mvq_tokens[i, offset:offset + mix_length, :]
-            p = gain2prob(mix_ratios[i])
-            mixed_cb = _mix_tokens_single(cur_cb_slice, mixed_in_cb, p)
+            mixed_cb = _mix_tokens_single(cur_cb_slice, mixed_in_cb, mix_probs[i])
             mvq_tokens[i, offset:offset + mix_length] = mixed_cb
         return mvq_tokens
 
-def gain2prob(gain: float, alpha: float=2.0):
-    # x**alpha/(1+x**alpha), x is gain, alpha is empirically tuned
-    return gain ** alpha / (1 + gain**alpha)
+def fix_supervision_duration(c):
+    # after the mixing, the cut may become longer, which causes a mismatch
+    # between the cut duration and the supervision duration.
+    # Therefore, we modify the duration of the supervision to match the cut duration.
+    if isinstance(c, MixedCut):
+        if c.supervisions[0].duration != c.duration:
+            sup = c.tracks[0].cut.supervisions[0]
+            sup.duration = c.duration
+            c.tracks[0].cut.supervisions = [sup]
+    return c
+
+def compute_prob_from_energies(gain: float, energy_main: float, energy_mixin: float) -> float:
+    """
+    Computes the probability of selecting the mix-in token based on the 
+    actual energy contribution of the mix-in signal to the total mixture.
+    
+    Args:
+        gain: The linear gain applied to the mix-in signal (amplitude).
+        energy_main: The energy (mean squared) of the main signal (A).
+        energy_mixin: The energy (mean squared) of the mix-in signal (B) BEFORE gain.
+        
+    Returns:
+        float: Probability between 0.0 and 1.0 representing the mix-in's dominance.
+    """
+    # 1. Calculate the energy of the mix-in signal AFTER the gain is applied.
+    # Since Energy ~ Amplitude^2, we square the gain.
+    energy_mixin_effective = (gain ** 2) * energy_mixin
+    
+    # 2. Compute total energy (assuming signals are uncorrelated).
+    energy_total = energy_main + energy_mixin_effective
+    
+    # 3. Compute the ratio of the mix-in energy to the total energy.
+    # Add epsilon to prevent division by zero.
+    prob = energy_mixin_effective / (energy_total + 1e-8)
+    
+    return float(prob)
+
+def read_audio(cuts: CutSet):
+    audios = []
+    audio_lens = []
+    for cut in cuts:
+        audio = torch.from_numpy(cut.load_audio())
+        audio_len = audio.shape[1]
+        audios.append(audio[0])
+        audio_lens.append(audio_len)
+    audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True)
+    audio_lens = torch.tensor(audio_lens)
+    return audios, audio_lens
+
 
 def audio_energy(audio: np.ndarray):
+    # return the average energy of the audio
     return float(np.average(audio**2))
 
-def _load_mixed_cut_single(cut: MixedCut) -> Tuple[np.ndarray, float]:
-    # we only deal with the first channel
+def _load_mixed_cut_single2(cut: MixedCut):
+    # ---------------------------------------------------------
+    # 1. Load Components & Safety Checks
+    # ---------------------------------------------------------
     sample_rate = cut.sampling_rate
-    orig_cut = cut.tracks[0].cut
-    mix_in_cut = cut.tracks[1].cut
-    snr = cut.tracks[1].snr
+    track_sig = cut.tracks[0]
+    track_noise = cut.tracks[1]
     
-    # compute some numbers
-    mix_offset = cut.tracks[1].offset
-    mix_offset_frames = int(sample_rate * mix_offset) # compute the frame shift for mixing
+    # 强制转换为 float32 以避免 int16 溢出或精度丢失
+    orig_audio = track_sig.cut.load_audio()
+    mix_in_audio = track_noise.cut.load_audio()
     
-    # we take the first channel
-    orig_audio = orig_cut.load_audio() 
-    mix_in_audio = mix_in_cut.load_audio()
-    mix_in_frames = mix_in_audio.shape[1]
+    # get the power and compute the gain
+    power_sig = audio_energy(orig_audio)
+    power_noise = audio_energy(mix_in_audio)
+    target_noise_power = power_sig * (10.0 ** (-track_noise.snr / 10))
     
-    energy_orig = audio_energy(orig_audio[0, mix_offset_frames:mix_offset_frames + mix_in_frames])
-    target_energy = energy_orig * (10.0 ** (-snr / 10))
-    energy_mix_in = audio_energy(mix_in_audio)
-    gain = math.sqrt(target_energy / (energy_mix_in + 1e-8))
-    
-    if mix_in_frames + mix_offset_frames <= orig_audio.shape[1]:
-        orig_audio[0, mix_offset_frames:mix_offset_frames + mix_in_frames] += gain * mix_in_audio[0]
+    if power_noise > 1e-12:
+        # Gain = sqrt(Target / Source)
+        gain = math.sqrt(target_noise_power / power_noise)
     else:
-        mix_in_frames = orig_audio.shape[1] - mix_offset_frames
-        orig_audio[0, mix_offset_frames:mix_offset_frames+mix_in_frames] += gain * mix_in_audio[0, :mix_in_frames]
+        # 噪音文件是静音
+        gain = 0.0
+        
+    # compute the replacement probability
+    replacement_prob = compute_prob_from_energies(gain, power_sig, power_noise)
     
-    return orig_audio, gain
+    # compute the resulting audio
+    result_audio = cut.load_audio()
+    
+    return result_audio, gain, replacement_prob
+
+def _load_mixed_cut_single(cut: MixedCut):
+    """
+    Loads a mixed cut (Signal + Interference).
+    
+    Improvements:
+    1. Uses Global Power (Mean Square) for stable SNR calculation.
+    2. Uses float32 to prevent overflow during mixing.
+    3. Handles variable lengths correctly.
+    """
+    assert len(cut.tracks) == 2, "Only support mixing two cuts (Signal + Interference)"
+    
+    # ---------------------------------------------------------
+    # 1. Load Components & Safety Checks
+    # ---------------------------------------------------------
+    sample_rate = cut.sampling_rate
+    track_sig = cut.tracks[0]
+    track_noise = cut.tracks[1]
+    
+    # 强制转换为 float32 以避免 int16 溢出或精度丢失
+    orig_audio = track_sig.cut.load_audio().astype(np.float32)
+    mix_in_audio = track_noise.cut.load_audio().astype(np.float32)
+    
+    # 获取维度信息
+    num_channels = orig_audio.shape[0]
+    sig_frames = orig_audio.shape[1]
+    mix_in_frames = mix_in_audio.shape[1]
+
+    # ---------------------------------------------------------
+    # 2. Calculate Offsets & Dimensions
+    # ---------------------------------------------------------
+    # 计算噪音相对于信号的偏移量
+    offset_seconds = track_noise.offset - track_sig.offset
+    mix_offset_frames = compute_num_samples(offset_seconds, sample_rate)
+    
+    # 计算总时长：因为你提到第二个音频永远在第一个之后(或中间)，
+    # 所以总长度是 max(信号长, 偏移量 + 噪音长)
+    total_frames = max(sig_frames, mix_offset_frames + mix_in_frames)
+    
+    # 初始化输出音频
+    if total_frames > sig_frames:
+        # 需要扩展长度
+        result_audio = np.zeros((num_channels, total_frames), dtype=np.float32)
+        result_audio[:, :sig_frames] = orig_audio
+    else:
+        # 长度足够，直接拷贝副本
+        result_audio = orig_audio.copy()
+
+    # ---------------------------------------------------------
+    # 3. Calculate Gain using GLOBAL POWER (Stability Fix)
+    # ---------------------------------------------------------
+    # 使用整段音频的平均功率计算 SNR，避免局部静音导致的 Gain 跳变
+    power_sig = audio_energy(orig_audio)
+    power_noise = audio_energy(mix_in_audio)
+    
+    # 计算目标噪音功率
+    # Target Power = Signal Power * 10^(-SNR/10)
+    target_noise_power = power_sig * (10.0 ** (-track_noise.snr / 10))
+    
+    if power_noise > 1e-12:
+        # Gain = sqrt(Target / Source)
+        gain = math.sqrt(target_noise_power / power_noise)
+    else:
+        # 噪音文件是静音
+        gain = 0.0
+
+    # ---------------------------------------------------------
+    # 4. Calculate Replacement Probability (Local Context)
+    # ---------------------------------------------------------
+    # 虽然 Gain 是全局定的，但在计算 Mask 概率时，通常需要参考“重叠区域”的能量
+    overlap_start = max(0, mix_offset_frames)
+    overlap_end = min(sig_frames, mix_offset_frames + mix_in_frames)
+    
+    if overlap_end > overlap_start:
+        sig_slice = orig_audio[:, overlap_start:overlap_end]
+        energy_sig_local = audio_energy(sig_slice)
+    else:
+        # 没有重叠（噪音在信号结束后才开始）
+        energy_sig_local = 0.0 # 或者根据业务逻辑处理
+        
+    # 注意：这里传入的是 mix_in_audio 的原始功率/能量
+    # 具体的 compute_prob_from_energies 内部逻辑需要与 audio_energy 的定义(Power)匹配
+    replacement_prob = compute_prob_from_energies(gain, energy_sig_local, power_noise)
+
+    # ---------------------------------------------------------
+    # 5. Mix Audio
+    # ---------------------------------------------------------
+    mix_start_sample = max(0, mix_offset_frames)
+    
+    # 计算需要混合的帧数
+    noise_frames_to_mix = min(mix_in_frames, total_frames - mix_start_sample)
+    
+    if noise_frames_to_mix > 0 and gain > 0:
+        # 执行混合：Result = Signal + Gain * Noise
+        # 假设通道数匹配，或者利用 numpy 的广播机制
+        result_audio[:, mix_start_sample:mix_start_sample + noise_frames_to_mix] += \
+            gain * mix_in_audio[:, :noise_frames_to_mix]
+            
+    return result_audio, gain, replacement_prob
         
 def mix_audio_with_offset(
     reference_cut: Cut,
@@ -509,6 +626,10 @@ def compute_feature(audios, cuts, extractor):
     out = (features_batch, feature_lens)
     return out
 
+def gain2prob(gain: float, alpha: float=2.0):
+    # x**alpha/(1+x**alpha), x is gain, alpha is empirically tuned
+    return gain ** alpha / (1 + gain**alpha)
+
 def fix_start(cuts):
     # make the start of codebook indexes the same as the cut
     new_cuts = []
@@ -533,21 +654,16 @@ def validate_multi_kd(cuts: CutSet) -> None:
 
 def load_codebook_indexes(c):
     info = c.codebook_indexes
-    cached_cb = CodebookCache.try_cache(c.supervisions[0].id) # we use supervision ID rather than cut id because cuts.repeat() ruins the cut id
-    if cached_cb is not None:
-        return cached_cb
-    else:
-        if isinstance(info, dict):
-            filename = info["path"]
-            with open(filename, "rb") as f:
-                cb_indexes = np.load(f)
-            # return np.load(filename, mmap_mode="r")
-        else:
-            cb_indexes = c.load_custom("codebook_indexes")
     
-        CodebookCache.add_to_cache(c.supervisions[0].id, cb_indexes)
-        return cb_indexes
-       
+    if isinstance(info, dict):
+        filename = info["path"]
+        with open(filename, "rb") as f:
+            cb_indexes = np.load(f)
+        # return np.load(filename, mmap_mode="r")
+    else:
+        cb_indexes = c.load_custom("codebook_indexes")
+    return cb_indexes
+    
 def _collate_custom_field(
     cuts: CutSet, 
     field: str,
@@ -615,7 +731,6 @@ if __name__=="__main__":
     _test_mix()
     
     # enable the cache
-    CodebookCache.enable()
     
     dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
     dummy_audio_logits = torch.ones(527) * 0.5
@@ -636,7 +751,6 @@ if __name__=="__main__":
         temporal_array=True,
         pad_value=-100
     )
-    print(f"Cache: {CodebookCache.enabled()}, Time elapsed: {time.time() - start}")
     # print(gt_mvq_tokens)
     
     # gt_beats_embed = collate_custom_field(augmented_cuts, "beats_embedding")

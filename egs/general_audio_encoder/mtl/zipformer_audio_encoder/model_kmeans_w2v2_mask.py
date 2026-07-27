@@ -19,7 +19,7 @@
 # limitations under the License.
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 import random
 
 import numpy as np
@@ -29,6 +29,7 @@ import torch.nn.functional as F
 from multi_quantization.prediction import JointCodebookLoss
 
 from icefall.utils import make_pad_mask
+
 
 class MultiCodebookLoss(torch.nn.Module):
     def __init__(
@@ -88,7 +89,7 @@ class MultiKDModel(nn.Module):
         encoder_embed: nn.Module,
         encoder: nn.Module,
         encoder_dim: int,
-        num_codebooks: int=8,
+        num_codebooks: int=1,
         distillation_layer: int=9,
         distillation_delta: int=0,
         teacher_frame_ratio: int = 2,
@@ -107,8 +108,6 @@ class MultiKDModel(nn.Module):
         mask_channel_other: float = 0.0,
         loss_only_mask: bool = False,
         normalize_fbank: bool = False,
-        intermediate_cb: bool = False,
-        intermediate_block_idx: int = -1,
     ):
         """A model that performs MVQ KD pre-training .
 
@@ -143,8 +142,6 @@ class MultiKDModel(nn.Module):
             How to determine the length of the mask, see ``compute_mask_indices''
           normalize_fbank:
             If true, the input fbank features is normalized to zero mean and unit variance
-          intermediate_kl:
-            Perform an extra intermediate codebook distillation based on KL-div
         """
         super().__init__()
 
@@ -162,34 +159,25 @@ class MultiKDModel(nn.Module):
         self.interpolate_teacher = interpolate_teacher
         self.distillation_delta = distillation_delta
         
-        self.intermediate_cb = intermediate_cb
-        self.intermediate_block_idx = intermediate_block_idx
-        assert intermediate_block_idx >= 0, "intermediate_block_idx should be a positive number"
         if num_codebooks > 0:
             self.codebook_loss_net = MultiCodebookLoss(
                 input_dim=encoder_dim,
+                codebook_size=2000, # fixed
                 num_codebooks=num_codebooks * self.teacher_frame_ratio,
                 reduction="none",
             )
-            if intermediate_cb:
-                # add an extra soft codebook loss for the intermediate representations
-                # NOTE: we only support uniform dimension encoder so far
-                self.codebook_loss_net_inter = MultiCodebookLoss(
-                    input_dim=encoder_dim,
-                    num_codebooks=num_codebooks * self.teacher_frame_ratio,
-                    reduction="none",
-                )
-            else:
-                self.codebook_loss_net_inter = None
         else:
             self.codebook_loss_net = None
-            self.codebook_loss_net_inter = None
+        
+        self.audio_tagging_proj = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Linear(encoder_dim, num_events),
+        ) # 527 classes
         
         # masking related
         assert mask_mode in ["w2v2", "block"], f"Unseen mask mode: {mask_mode}"
         self.mask_mode = mask_mode
         
-        # mask related
         self.mask_emb = nn.Parameter(torch.FloatTensor(n_mels).normal_()) 
         self.mask_prob = mask_prob
         self.mask_length = mask_length
@@ -207,7 +195,7 @@ class MultiKDModel(nn.Module):
 
     def forward_encoder(
         self, x: torch.Tensor, x_lens: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute encoder outputs.
         Args:
           x:
@@ -222,6 +210,10 @@ class MultiKDModel(nn.Module):
           encoder_out_lens:
             Encoder output lengths, of shape (N,).
         """
+        # normalise fbank (utterance level)
+        if self.normalize_fbank:
+            x = self._normalize_fbank(x, x_lens)
+            
         # logging.info(f"Memory allocated at entry: {torch.cuda.memory_allocated() // 1000000}M")
         x, x_lens = self.encoder_embed(x, x_lens)
         # logging.info(f"Memory allocated after encoder_embed: {torch.cuda.memory_allocated() // 1000000}M")
@@ -229,12 +221,12 @@ class MultiKDModel(nn.Module):
         src_key_padding_mask = make_pad_mask(x_lens)
         x = x.permute(1, 0, 2)  # (N, T, C) -> (T, N, C)
 
-        encoder_out, encoder_out_lens, middle_out = self.encoder(x, x_lens, src_key_padding_mask, return_middle_out=True)        
+        encoder_out, encoder_out_lens = self.encoder(x, x_lens, src_key_padding_mask)
 
         encoder_out = encoder_out.permute(1, 0, 2)  # (T, N, C) ->(N, T, C)
         assert torch.all(encoder_out_lens > 0), (x_lens, encoder_out_lens)
 
-        return encoder_out, encoder_out_lens, middle_out
+        return encoder_out, encoder_out_lens
 
     @staticmethod
     def _normalize_fbank(x: torch.Tensor, x_lens: torch.Tensor, eps: float=1e-9):
@@ -292,10 +284,6 @@ class MultiKDModel(nn.Module):
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
         assert codebook_indexes is not None or at_targets is not None
-
-        # normalise fbank (utterance level)
-        if self.normalize_fbank:
-            x = self._normalize_fbank(x, x_lens)
         
         # apply masking
         if self.training and mask:
@@ -310,67 +298,37 @@ class MultiKDModel(nn.Module):
             mask_indices = None
         
         # Compute encoder outputs
-        encoder_out, encoder_out_lens, middle_out = self.forward_encoder(x, x_lens)
+        encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
         if codebook_indexes is not None and self.codebook_loss_net is not None:
-            codebook_loss, log_probs = self.forward_codebook_loss(
-                encoder_out,
-                encoder_out_lens,
-                codebook_indexes,
-                self.codebook_loss_net,
-                teacher_frame_ratio=self.teacher_frame_ratio,
-                reduction="none"
-            ) # (N,T), (N,T,num_codebooks, 256)
+            codebook_loss = self.forward_codebook_loss(
+                encoder_out, encoder_out_lens, codebook_indexes, reduction="none"
+            )
             if self.loss_only_mask and mask_indices is not None:
                 # downsample the mask 
-                ds_mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
-                assert ds_mask_indices.size(1) >= codebook_loss.size(1)
-                ds_mask_indices = ds_mask_indices[:, :codebook_loss.size(1)].float()
-                codebook_loss = codebook_loss * ds_mask_indices
-            codebook_loss = codebook_loss.sum(dim=1) # (N,)
+                mask_indices = nn.functional.avg_pool1d(mask_indices, 2) >= 0.5
+                assert mask_indices.size(1) >= codebook_loss.size(1)
+                mask_indices = mask_indices[:, :codebook_loss.size(1)].float()
+                codebook_loss = codebook_loss * mask_indices
+            codebook_loss = codebook_loss.sum(dim=1) # (B,)    
         else:
-            log_probs = None
             codebook_loss = None
         
-        # compute the soft co-training loss for the intermediate representations
-        if codebook_indexes is not None and self.intermediate_cb and self.codebook_loss_net_inter is not None:
-            assert log_probs is not None, "The log prob should be pre-computed"
-            middle_out = middle_out[self.intermediate_block_idx].permute(1,0,2) # (N,T,C)
-            codebook_loss_inter = self.forward_soft_co_training_loss(
-                middle_out,
-                encoder_out_lens,
-                target=log_probs.detach(), # we need to detach to prevent gradient from back-prop
-                loss_net=self.codebook_loss_net_inter,
-            ) # (N,T)
-            if self.loss_only_mask and mask_indices is not None:
-                ds_mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
-                assert ds_mask_indices.size(1) >= codebook_loss_inter.size(1)
-                ds_mask_indices = ds_mask_indices[:, :codebook_loss_inter.size(1)].float()
-                codebook_loss_inter = codebook_loss_inter * ds_mask_indices
-            codebook_loss_inter = codebook_loss_inter.sum(dim=1)
+        if at_targets is not None:
+            at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
-            codebook_loss_inter = None
+            at_loss = None
         
-        at_loss = None
-        
-        return codebook_loss, at_loss, codebook_loss_inter
+        return codebook_loss, at_loss
 
     def forward_codebook_loss(
         self,
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
-        codebook_loss_net: nn.Module,
-        teacher_frame_ratio: int,
         reduction: str = "sum",
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ):
         # align the encoder features with the codebook indexes
-        
-        # check if we need to upsample the targets to match the encoder output length
-        if round(encoder_out.shape[1] / codebook_indexes.shape[1]) > teacher_frame_ratio:
-            upsample_ratio = round(encoder_out.shape[1] / codebook_indexes.shape[1])
-            codebook_indexes = codebook_indexes.repeat_interleave(upsample_ratio, dim=1)
-
         if self.interpolate_teacher:
             codebook_indexes = self.interpolate_codebook_indexes(
                 encoder_out, codebook_indexes
@@ -391,76 +349,19 @@ class MultiKDModel(nn.Module):
             codebook_indexes = codebook_indexes.masked_fill(truncated_padding_mask.unsqueeze(-1), value=-100)
             
         N,T,_ = encoder_out.shape
-        codebook_loss, logprobs = codebook_loss_net(
-            encoder_out.float(),
-            codebook_indexes,
-            return_log_probs=True,
-        ) # (N,T,num_codebooks), (N,T,num_codebooks, codebook_size)
-
+        codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
+        codebook_loss = codebook_loss.reshape(N,T,-1)
         num_cb = codebook_loss.size(-1)
         # normalize the loss by the number of codebooks
         if reduction == "sum":
-            codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb # (N,)
+            codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb # (B,)
         elif reduction == "none":
-            codebook_loss = codebook_loss.sum(dim=2) / num_cb # (N,T)
+            codebook_loss = codebook_loss.sum(dim=2) / num_cb # (B,T)
         else:
             raise NotImplementedError()
         
-        return codebook_loss, logprobs
+        return codebook_loss
 
-    def forward_soft_co_training_loss(
-        self,
-        encoder_out: torch.Tensor,
-        encoder_out_lens: torch.Tensor,
-        target: torch.Tensor,
-        loss_net: MultiCodebookLoss,
-    ):
-        """Compute the KL-divergence between the distribution predicted by the 
-        intermediate representations and the final layer
-
-        Args:
-            encoder_out (torch.Tensor): The intermediate representations (N,T,C)
-            encoder_out_lens (torch.Tensor): The length of intermediate representations
-            target (torch.Tensor): The log-probabilities as target (N,T,num_codebooks, codebook_size)
-            loss_net (MultiCodebookLoss): A loss net module
-        """
-        # check if we need to upsample the targets to match the encoder output length
-        if round(encoder_out.shape[1] / target.shape[1]) > 1:
-            upsample_ratio = round(encoder_out.shape[1] / target.shape[1])
-            target = target.repeat_interleave(upsample_ratio, dim=1)
-        else:
-            upsample_ratio = 1
-
-        if self.interpolate_teacher:
-            target = self.interpolate_codebook_indexes(
-                encoder_out, target
-            )
-        else:
-            if target.shape[1] != encoder_out.shape[1]:
-                assert target.shape[1] > encoder_out.shape[1]
-                assert (target.shape[1] - encoder_out.shape[1]) <= 1
-                # align the codebook indexes to the frame rate of the student encoder out
-                target = target[:, :encoder_out.shape[1]]
-        logprobs = loss_net.forward_logprobs(
-            encoder_out.float(),
-        ) # (N,T,num_codebooks, codebook_size)
-        loss = F.kl_div(
-            input=logprobs, # log prob
-            target=target, # log prob
-            log_target=True, # both input and target are log probs
-            reduction="none",
-        ) # （N,T,num_codebooks, codebook_size）
-        
-        num_cb = loss.shape[-1]
-        
-        # compute the approximate encoder out length
-        encoder_out_lens = encoder_out_lens * upsample_ratio
-        encoder_out_lens = torch.clamp(encoder_out_lens, max=encoder_out.shape[1])
-        loss_mask = make_pad_mask(encoder_out_lens).unsqueeze(-1).unsqueeze(-1)
-        loss = loss.masked_fill(loss_mask, value=0.0) 
-        loss = loss.sum(dim=(2,3)) / num_cb / upsample_ratio # (N, T) NOTE: we further divide it by upsample_ratio for consistency
-        return loss
-    
     def forward_audio_tagging(
         self,
         encoder_out: torch.Tensor,
@@ -888,7 +789,6 @@ def _test_w2v2_channel_mask():
             )
             ratio = mask_channel_indices.sum() / mask_channel_indices.numel()
             ratios.append(ratio)
-        import pdb; pdb.set_trace()
         avg_ratio = sum(ratios) / len(ratios)
         print(f"Current config: mask_channel_prob = {mask_channel_prob}, mask_channel_length = {mask_channel_length}")
         print(f"Averaged masking ratio: {avg_ratio}")
