@@ -25,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from wav2vec2_module import Fp32GroupNorm, Fp32LayerNorm, TransposeLast
+from wav2vec2_utils import Fp32GroupNorm, Fp32LayerNorm, TransposeLast
 
 
 class ConvFeatureExtractionModel(nn.Module):
@@ -35,6 +35,7 @@ class ConvFeatureExtractionModel(nn.Module):
         dropout: float = 0.0,
         mode: str = "default",
         conv_bias: bool = False,
+        output_dim: int = 256,
     ):
         super().__init__()
 
@@ -97,12 +98,46 @@ class ConvFeatureExtractionModel(nn.Module):
                 )
             )
             in_d = dim
+            
+        conv_output_dim = conv_layers[-1][0]
+        self.output_proj = nn.Linear(conv_output_dim, output_dim)
+        self.downsample_rate = np.prod([cl[2] for cl in conv_layers])
+        
+        # Store conv_layers config for output length computation
+        self.conv_layers_config = conv_layers
 
-    def forward(self, x):
-        # BxT -> BxCxT
+    def get_downsample_rate(self):
+        return self.downsample_rate
+    
+    def get_output_lengths(self, input_lengths):
+        """
+        Compute the output length after passing through all conv layers.
+        
+        Args:
+            input_lengths: torch.Tensor of shape (N,) containing input lengths
+            
+        Returns:
+            torch.Tensor of shape (N,) containing output lengths
+        """
+        lengths = input_lengths.clone()
+        
+        for i, (dim, k, stride) in enumerate(self.conv_layers_config):
+            # For Conv1d with no padding and dilation=1:
+            # output_length = floor((input_length - kernel_size) / stride) + 1
+            lengths = torch.div(lengths - k, stride, rounding_mode='floor') + 1
+            
+        return lengths
+    
+    def forward(self, x, x_lens = None):
+        # BxT -> BxTxC
         x = x.unsqueeze(1)
 
         for conv in self.conv_layers:
             x = conv(x)
+        x = x.transpose(1, 2)
+        x = self.output_proj(x)
+        
+        if x_lens is not None:
+            x_lens = self.get_output_lengths(x_lens)
 
-        return x
+        return x, x_lens

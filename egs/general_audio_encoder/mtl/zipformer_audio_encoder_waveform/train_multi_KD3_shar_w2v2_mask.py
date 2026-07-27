@@ -63,15 +63,14 @@ import sentencepiece as spm
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from kd_datamodule3_shar import MultiTaskDataModule
+from kd_waveform_datamodule import MultiTaskDataModule
 from lhotse import CutSet
 from lhotse.cut import Cut, MonoCut
 from lhotse.dataset.sampling.base import CutSampler
 from lhotse.utils import fix_random_seed
-from model_multi_kd_w2v2_mask import MultiKDModel
+from model import MultiKDModel
 from optim import Eden, ScaledAdam
 from scaling import ScheduledFloat
-from subsampling import Conv2dSubsampling
 from torch import Tensor
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -274,13 +273,13 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--conv-bias", type=bool, default=False, help="include bias in conv encoder"
+        "--conv-bias", type=str2bool, default=False, help="include bias in conv encoder"
     )
 
     parser.add_argument(
         "--feature-grad-mult",
         type=float,
-        default=1.0,
+        default=0.1,
         help="multiply feature extractor var grads by this",
     )
     
@@ -422,14 +421,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=float,
         default=0.0,
         help="probability of replacing a channel with mask",
-    )
-    
-    # normalization
-    parser.add_argument(
-        "--normalize-fbank",
-        type=str2bool,
-        default=False,
-        help="If perform normalization to the input fbank features"
     )
 
 
@@ -751,7 +742,7 @@ def get_params() -> AttributeDict:
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 128, # for better audio capability 
-            "subsampling_factor": 4,  # not passed in, this is fixed.
+            "subsampling_factor": 320,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
             # parameters for multitask
@@ -766,22 +757,15 @@ def _to_int_tuple(s: str):
     return tuple(map(int, s.split(",")))
 
 def get_encoder_embed(params: AttributeDict) -> nn.Module:
-    # encoder_embed converts the input of shape (N, T, num_features)
-    # to the shape (N, (T - 7) // 2, encoder_dims).
-    # That is, it does two things simultaneously:
-    #   (1) subsampling: T -> (T - 7) // 2
-    #   (2) embedding: num_features -> encoder_dims
-    # In the normal configuration, we will downsample once more at the end
-    # by a factor of 2, and most of the encoder stacks will run at a lower
-    # sampling rate.
     from wav2vec2_module import ConvFeatureExtractionModel
-    feature_enc_layers = eval(params.conv_feature_layers)
     
+    feature_enc_layers = eval(params.conv_feature_layers)
     encoder_embed = ConvFeatureExtractionModel(
-        conv_layers=params.feature_enc_layers,
+        conv_layers=feature_enc_layers,
         dropout=0.0,
         mode=params.extractor_mode,
         conv_bias=params.conv_bias,
+        output_dim=_to_int_tuple(params.encoder_dim)[0],
     )
     return encoder_embed
 
@@ -825,28 +809,27 @@ def get_model(params: AttributeDict) -> nn.Module:
                 f"You are using teacher_frame_ratio={params.teacher_frame_ratio}. "
                 "However, the output downsampling factor is 1. This could be wrong!"
             )
-        params.subsampling_factor = 2
+    params.subsampling_factor *= params.output_downsampling_factor
         
     if params.distillation_delta > 0:
         assert params.causal
         logging.info(f"Using delta={params.distillation_delta} during for MVQ-KD pre-training.")
         
-    assert params.enable_spec_aug == False, "Should not use specaug when using w2v2 style masking"
     if params.loss_only_mask:
         logging.info("Only computing loss on the masked positions")
-    if params.normalize_fbank:
-        logging.info("Normalizing the input fbank features")
     
     model = MultiKDModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
+        conv_dim=_to_int_tuple(params.encoder_dim)[0],
+        feature_grad_mult=params.feature_grad_mult,
+        output_downsampling_factor=params.output_downsampling_factor,
         num_codebooks=params.num_codebooks,
         distillation_layer=params.distillation_layer,
         distillation_delta=params.distillation_delta,
         interpolate_teacher=params.interpolate_teacher,
         teacher_frame_ratio=params.teacher_frame_ratio,
-        n_mels=params.feature_dim,
         mask_mode=params.mask_mode,
         mask_prob=params.mask_prob,
         mask_length=params.mask_length,
@@ -855,7 +838,6 @@ def get_model(params: AttributeDict) -> nn.Module:
         mask_channel_prob=params.mask_channel_prob,
         mask_channel_length=params.mask_channel_length,
         loss_only_mask=params.loss_only_mask,
-        normalize_fbank=params.normalize_fbank,
     )
     return model
 
@@ -1055,7 +1037,6 @@ def compute_loss(
     supervisions = batch["supervisions"]
     cuts = supervisions["cut"]
         
-    feature_lens = supervisions["num_frames"].to(device)
     task_ids = batch["task_ids"].int().to(device)
     
     if random.random() < 0.01 and is_training:
@@ -1080,10 +1061,10 @@ def compute_loss(
             x_lens=audio_lens,
             codebook_indexes=mvq_tokens,
             at_targets=at_targets,
+            apply_mask=is_training, # only apply mask when training
         )
 
         loss = 0.0
-
         # task_id=1: ASR data
         # task_id=2: AT data
 
@@ -1107,7 +1088,7 @@ def compute_loss(
     info = MetricsTracker()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        info["frames"] = (feature_lens // params.subsampling_factor).sum().item()
+        info["frames"] = (audio_lens // params.subsampling_factor).sum().item()
         info["utterances"] = task_ids.size(0)
 
     # Note: We use reduction=sum while computing the loss.
@@ -1975,9 +1956,9 @@ def display_and_save_batch(
     torch.save(batch, filename)
 
     supervisions = batch["supervisions"]
-    features = batch["inputs"]
+    audio_waveform = batch["audio"]
 
-    logging.info(f"features shape: {features.shape}")
+    logging.info(f"audio_waveform shape: {audio_waveform.shape}")
 
     # y = sp.encode(supervisions["text"], out_type=int)
     # num_tokens = sum(len(i) for i in y)

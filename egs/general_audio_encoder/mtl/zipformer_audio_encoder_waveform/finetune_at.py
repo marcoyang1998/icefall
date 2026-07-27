@@ -296,23 +296,35 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         "a single int or comma-separated list.",
     )
 
+    # conv feature extractor
     parser.add_argument(
-        "--decoder-dim",
-        type=int,
-        default=512,
-        help="Embedding dimension in the decoder model.",
+        "--extractor-mode",
+        type=str,
+        default="default",
+        help="""mode for feature extractor, should in EXTRACTOR_MODE_CHOICES. default has a single group 
+            norm with d groups in the first conv block, whereas layer_norm 
+            has layer norms in every block (meant to use with normalize=True)""",
+    )
+    
+    parser.add_argument(
+        "--conv-feature-layers",
+        type=str,
+        default="[(512,10,5)] + [(512,3,2)] * 4 + [(512,2,2)] * 2",
+        help="string describing convolutional feature extraction layers in form of a python list that contains [(dim, kernel_size, stride), ...]",
     )
 
     parser.add_argument(
-        "--joiner-dim",
-        type=int,
-        default=512,
-        help="""Dimension used in the joiner model.
-        Outputs from the encoder and decoder model are projected
-        to this dimension before adding.
-        """,
+        "--conv-bias", type=str2bool, default=False, help="include bias in conv encoder"
     )
 
+    parser.add_argument(
+        "--feature-grad-mult",
+        type=float,
+        default=0.1,
+        help="multiply feature extractor var grads by this",
+    )
+    
+    # streaming related
     parser.add_argument(
         "--causal",
         type=str2bool,
@@ -338,21 +350,9 @@ def add_model_arguments(parser: argparse.ArgumentParser):
     )
     
     parser.add_argument(
-        "--do-asr",
-        type=str2bool,
-        default=True,
-    )
-
-    parser.add_argument(
         "--do-audio-tagging",
         type=str2bool,
         default=True,
-    )
-    
-    parser.add_argument(
-        "--audio-tagging-loss-scale",
-        type=float,
-        default=1.0,
     )
     
     parser.add_argument(
@@ -366,7 +366,6 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=int,
         default=527,
     )
-    
     
     parser.add_argument(
         "--mask-mode",
@@ -726,7 +725,7 @@ def get_params() -> AttributeDict:
             "valid_interval": 3000,  # For the 100h subset, use 800
             # parameters for zipformer
             "feature_dim": 128,
-            "subsampling_factor": 4,  # not passed in, this is fixed.
+            "subsampling_factor": 320,  # not passed in, this is fixed.
             "warm_step": 2000,
             "env_info": get_env_info(),
             "num_tasks": 2,
@@ -757,8 +756,7 @@ def get_encoder_embed(params: AttributeDict) -> nn.Module:
 def get_encoder_model(params: AttributeDict) -> nn.Module:
     if params.output_downsampling_factor == 2:
         assert params.post_encoder_downsampling_factor == 1, "CANNOT perform double output downsample!"
-    elif params.output_downsampling_factor == 1:
-        params.subsampling_factor = 2
+        params.subsampling_factor *= 2
         
     encoder = Zipformer2(
         output_downsampling_factor=params.output_downsampling_factor,
@@ -800,11 +798,11 @@ def get_model(params: AttributeDict) -> nn.Module:
     if params.linear_softmax:
         logging.info(f"Use linear softmax for audio tagging")
         
-    import pdb; pdb.set_trace()
     model = AudioTaggingModel(
         encoder_embed=encoder_embed,
         encoder=encoder,
         encoder_downsample=post_encoder_downsample,
+        feature_grad_mult=params.feature_grad_mult,
         encoder_dim=max(_to_int_tuple(params.encoder_dim)),
         num_events=params.num_events,
         linear_softmax=params.linear_softmax,
@@ -1048,6 +1046,7 @@ def compute_loss(
             x_lens=audio_lens,
             at_targets=at_targets,
             freeze_encoder=freeze_encoder,
+            apply_mask=is_training,
         )
 
         loss = 0.0
@@ -1057,7 +1056,7 @@ def compute_loss(
 
     assert loss.requires_grad == is_training
 
-    info = MetricsTracker()
+    info = MetricsTracker(norm_by="utterances")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         info["frames"] = (audio_lens // params.subsampling_factor).sum().item()
@@ -1080,7 +1079,7 @@ def compute_validation_loss(
     """Run the validation process."""
     model.eval()
 
-    tot_loss = MetricsTracker()
+    tot_loss = MetricsTracker(norm_by="utterances")
 
     for batch_idx, batch in enumerate(valid_dl):
         loss, loss_info = compute_loss(
@@ -1152,7 +1151,7 @@ def train_one_epoch(
     """
     model.train()
 
-    tot_loss = MetricsTracker()
+    tot_loss = MetricsTracker(norm_by="utterances")
 
     saved_bad_model = False
 
@@ -1366,15 +1365,7 @@ def run(rank, world_size, args):
         device = torch.device("cuda", rank)
     logging.info(f"Device: {device}")
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(params.bpe_model)
-
-    # <blk> is defined in local/train_bpe_model.py
-    params.blank_id = sp.piece_to_id("<blk>")
-    params.vocab_size = sp.get_piece_size()
-
-    if not params.use_transducer:
-        params.ctc_loss_scale = 1.0
+    sp = None
 
     logging.info(params)
 
