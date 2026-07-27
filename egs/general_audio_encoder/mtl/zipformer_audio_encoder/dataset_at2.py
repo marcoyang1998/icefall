@@ -31,6 +31,7 @@ def str2multihot(events: List[str], n_classes=527, id_mapping=None):
 
     return out, labels
 
+
 class MultiTaskDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -42,7 +43,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         mixup_prob: float = 0.5,
         mvq_KD: bool = False,
         at_KD: bool = False,
-        sv_KD: bool = False
+        sv_KD: bool = False,
     ):
         super().__init__()
         # Initialize the fields
@@ -55,7 +56,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         self.mvq_KD = mvq_KD
         self.at_KD = at_KD
         self.sv_KD = sv_KD
-        
+
         self.mixup_cuts = mixup_cuts
         self.mixup_prob = mixup_prob
         self.dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
@@ -65,7 +66,7 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         # throughout the epoch. It regularly closes open file handles to
         # reset the internal HDF5 caches.
         self.hdf5_fix = Hdf5MemoryIssueFix(reset_interval=100)
-        
+
     def __getitem__(self, cuts: CutSet) -> Dict[str, Union[torch.Tensor, List[str]]]:
         self.hdf5_fix.update()
 
@@ -74,9 +75,9 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         audios, cuts, mix_labels = self.read_and_mix_audio(cuts, p=self.mixup_prob)
         
         inputs, input_lens = compute_feature(audios, cuts, self.extractor)
-        
+
         supervision_intervals = self.input_strategy.supervision_intervals(cuts)
-        
+
         # Apply all available transforms on the inputs, i.e. either audio or features.
         # This could be feature extraction, global MVN, SpecAugment, etc.
         segments = torch.stack(list(supervision_intervals.values()), dim=1)
@@ -162,27 +163,6 @@ class MultiTaskDataset(torch.utils.data.Dataset):
         labels = torch.cat(labels, dim=0) # (B,num_classes)
                 
         return audios, CutSet.from_cuts(out_cuts), labels
-    
-def _read_and_mix_audio_single(cut, mix_cut):
-    mix_lambda = np.random.beta(10,10)
-    audio1 = cut.load_audio()
-    audio2 = mix_cut.load_audio()
-    if audio1.shape[1] > audio2.shape[1]:
-        diff = audio1.shape[1] - audio2.shape[1]
-        padding = np.zeros((1, diff), dtype=np.float32)
-        audio2 = np.concatenate((audio2, padding), axis=1)
-    else:
-        audio2 = audio2[:, :audio1.shape[1]]
-    
-    # mix the audio waveform
-    mix_audio = audio1 * mix_lambda + audio2 * (1 - mix_lambda)
-    
-    # mix the label
-    label1, _ = str2multihot(cut.supervisions[0].audio_event)
-    label2, _ = str2multihot(mix_cut.supervisions[0].audio_event)
-    mix_label = label1 * mix_lambda + label2 * (1 - mix_lambda)
-    
-    return mix_audio, mix_label
 
 def compute_feature(audios, cuts, extractor):
     # compute features given the audios

@@ -641,6 +641,13 @@ def get_parser():
         default=True,
         help="Whether to use half precision training.",
     )
+    
+    parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+        help="Whether to use half precision training.",
+    )
 
     add_model_arguments(parser)
     add_finetune_arguments(parser)
@@ -1275,7 +1282,7 @@ def train_one_epoch(
                 logging.info(f"Estimated epoch is {max_epoch}")
                 logging.info(count)
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_autocast, dtype=params.dtype):
                 loss, loss_info = compute_loss(
                     params=params,
                     model=model,
@@ -1295,7 +1302,7 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad()
         except:  # noqa
-            save_bad_model()
+            # save_bad_model()
             display_and_save_batch(batch, params=params, sp=sp)
             raise
 
@@ -1335,7 +1342,7 @@ def train_one_epoch(
                 rank=rank,
             )
 
-        if batch_idx % 100 == 0 and params.use_fp16:
+        if batch_idx % 100 == 0 and params.use_autocast:
             # If the grad scale was less than 1, try increasing it.    The _growth_interval
             # of the grad scaler is configurable, but we can't configure it to have different
             # behavior depending on the current grad scale.
@@ -1356,7 +1363,7 @@ def train_one_epoch(
 
         if batch_idx % params.log_interval == 0:
             cur_lr = max(scheduler.get_last_lr())
-            cur_grad_scale = scaler._scale.item() if params.use_fp16 else 1.0
+            cur_grad_scale = scaler._scale.item() if params.use_autocast else 1.0
 
             if params.use_shar:
                 cur_batch_idx = params.batch_idx_train
@@ -1368,7 +1375,7 @@ def train_one_epoch(
                 f"batch {cur_batch_idx}, loss[{loss_info}], "
                 f"tot_loss[{tot_loss}], batch size: {batch_size}, "
                 f"lr: {cur_lr:.2e}, "
-                + (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
+                + (f"grad_scale: {scaler._scale.item()}" if params.use_autocast else "")
             )
 
             if tb_writer is not None:
@@ -1380,7 +1387,7 @@ def train_one_epoch(
                     tb_writer, "train/current_", params.batch_idx_train
                 )
                 tot_loss.write_summary(tb_writer, "train/tot_", params.batch_idx_train)
-                if params.use_fp16:
+                if params.use_autocast:
                     tb_writer.add_scalar(
                         "train/grad_scale", cur_grad_scale, params.batch_idx_train
                     )
@@ -1457,7 +1464,22 @@ def run(rank, world_size, args):
 
     if not params.use_transducer:
         params.ctc_loss_scale = 1.0
-
+        
+    if params.use_bf16:  # amp + bf16
+        assert torch.cuda.is_bf16_supported(), "Your GPU does not support bf16!"
+        assert not params.use_fp16, "You can only use either fp16 or bf16"
+        params.dtype = torch.bfloat16
+        params.use_autocast = True
+    elif params.use_fp16:  # amp + fp16
+        params.dtype = torch.float16
+        params.use_autocast = True
+    else:  # fp32
+        params.dtype = torch.float32
+        params.use_autocast = False
+    
+    logging.info(f"Using dtype={params.dtype}")
+    logging.info(f"Use AMP={params.use_autocast}")
+    
     logging.info(params)
 
     logging.info("About to create model")
@@ -1702,7 +1724,16 @@ def run(rank, world_size, args):
                 "balanced": 50,
                 "full": params.at_num_samples * 10 / 3600 if params.at_weighted_sampler else 5000,
             }
+            def change_source(c):
+                source = c.recording.sources[0].source
+                source = source.replace(
+                    "download/",
+                    "download3/"
+                )
+                c.recording.sources[0].source = source
+                return c
             audioset_cuts = audioset_cuts.map(partial(_add_task_id, 2))
+            audioset_cuts = audioset_cuts.map(change_source)
             if params.on_the_fly_feats:
                 audioset_cuts = audioset_cuts.drop_features()
             train_cuts["cuts_audioset"] = audioset_cuts
@@ -1796,11 +1827,12 @@ def run(rank, world_size, args):
     if params.use_audioset and params.do_audio_tagging:
         as_eval_cuts = librispeech.audioset_eval_cuts()
         as_eval_cuts = as_eval_cuts.map(partial(_add_task_id, 2))
+        as_eval_cuts = as_eval_cuts.map(change_source)
         at_valid_dl = librispeech.valid_dataloaders(as_eval_cuts, world_size=world_size, rank=rank,)
         valid_sets.append("AT_as")
         valid_dls.append(at_valid_dl)
 
-    scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
+    scaler = GradScaler(enabled=params.use_autocast, init_scale=1.0)
     if checkpoints and "grad_scaler" in checkpoints:
         logging.info("Loading grad scaler state dict")
         scaler.load_state_dict(checkpoints["grad_scaler"])
@@ -1906,7 +1938,7 @@ def scan_pessimistic_batches_for_oom(
     for criterion, cuts in batches.items():
         batch = train_dl.dataset[cuts]
         try:
-            with torch.cuda.amp.autocast(enabled=params.use_fp16):
+            with torch.cuda.amp.autocast(enabled=params.use_autocast, dtype=params.dtype):
                 loss, _ = compute_loss(
                     params=params,
                     model=model,

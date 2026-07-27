@@ -157,6 +157,75 @@ class AttentionDecoderModel(nn.Module):
         nll = nll.view(batch_size, -1)
         return nll
 
+    def greedy_decode(
+        self,
+        encoder_out: torch.Tensor,
+        encoder_out_lens: torch.Tensor,
+        max_len: int = 100,
+    ) -> List[List[int]]:
+        """Greedy decoding from attention-decoder.
+        
+        Args:
+          encoder_out: (batch, num_frames, encoder_dim)
+          encoder_out_lens: (batch,)
+          max_len: maximum length of generated sequences
+          
+        Return: A list of decoded token id sequences, one per batch element.
+        """
+        batch_size = encoder_out.size(0)
+        device = encoder_out.device
+        
+        # Start with SOS token for each batch element
+        # Shape: (batch, 1)
+        ys = torch.full((batch_size, 1), self.sos_id, dtype=torch.long, device=device)
+        
+        # Track which sequences have finished (encountered EOS)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        
+        for _ in range(max_len):
+            # Current sequence lengths (all same length during greedy decoding)
+            ys_lens = torch.full((batch_size,), ys.size(1), dtype=torch.long, device=device)
+            
+            # Decoder forward pass
+            decoder_out = self.decoder(
+                x=ys,
+                x_lens=ys_lens,
+                memory=encoder_out,
+                memory_lens=encoder_out_lens,
+            )
+            
+            # Get logits for the last token: (batch, vocab_size)
+            next_token_logits = decoder_out[:, -1, :]
+            
+            # Greedy selection: take argmax
+            next_tokens = next_token_logits.argmax(dim=-1)  # (batch,)
+            
+            # For finished sequences, keep generating padding (or keep the sequence as is)
+            # For simplicity, we'll just append the next token and mark EOS
+            next_tokens = next_tokens.unsqueeze(1)  # (batch, 1)
+            ys = torch.cat([ys, next_tokens], dim=1)  # (batch, seq_len+1)
+            
+            # Check which sequences generated EOS
+            finished = finished | (next_tokens.squeeze(1) == self.eos_id)
+            
+            # If all sequences are finished, stop
+            if finished.all():
+                break
+        
+        # Convert to list of lists, removing SOS and EOS tokens
+        results = []
+        for i in range(batch_size):
+            seq = ys[i].tolist()
+            # Remove SOS at the beginning
+            seq = seq[1:]
+            # Remove EOS and everything after it
+            if self.eos_id in seq:
+                eos_idx = seq.index(self.eos_id)
+                seq = seq[:eos_idx]
+            results.append(seq)
+        
+        return results
+
 
 class TransformerDecoder(nn.Module):
     """Transfomer decoder module.
@@ -575,8 +644,16 @@ def _test_attention_decoder_model():
     encoder_out_lens = torch.full((2,), 50)
     token_ids = [[1, 2, 3, 4], [2, 3, 10]]
 
+    # Test NLL computation
     nll = m.nll(encoder_out, encoder_out_lens, token_ids)
-    print(nll)
+    print(f"NLL shape: {nll.shape}")
+    print(f"NLL values:\n{nll}")
+    
+    # Test greedy decoding
+    print("\nTesting greedy decoding...")
+    with torch.no_grad():
+        decoded_sequences = m.greedy_decode(encoder_out, encoder_out_lens, max_len=20)
+    print(f"Decoded sequences: {decoded_sequences}")
 
 
 if __name__ == "__main__":

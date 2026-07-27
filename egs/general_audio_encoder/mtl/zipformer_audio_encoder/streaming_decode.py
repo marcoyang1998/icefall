@@ -473,7 +473,6 @@ def decode_one_chunk(
 
     states = stack_states(states)
 
-    # import pdb; pdb.set_trace()
     encoder_out, encoder_out_lens, new_states = streaming_forward(
         features=features,
         feature_lens=feature_lens,
@@ -483,8 +482,6 @@ def decode_one_chunk(
         left_context_len=left_context_len,
     )
 
-    # import pdb; pdb.set_trace()
-    tmp_encoder_out = encoder_out.detach().clone()
     encoder_out = model.joiner.encoder_proj(encoder_out)
 
     if params.decoding_method == "greedy_search":
@@ -520,7 +517,7 @@ def decode_one_chunk(
         if decode_streams[i].done:
             finished_streams.append(i)
 
-    return finished_streams, tmp_encoder_out
+    return finished_streams
 
 
 def decode_dataset(
@@ -595,14 +592,11 @@ def decode_dataset(
         decode_stream.ground_truth = cut.supervisions[0].text
 
         decode_streams.append(decode_stream)
-        encoder_outs = []
 
         while len(decode_streams) >= params.num_decode_streams:
-            # import pdb; pdb.set_trace()
-            finished_streams, encoder_out = decode_one_chunk(
+            finished_streams = decode_one_chunk(
                 params=params, model=model, decode_streams=decode_streams
             )
-            encoder_outs.append(encoder_out)
             for i in sorted(finished_streams, reverse=True):
                 decode_results.append(
                     (
@@ -617,12 +611,10 @@ def decode_dataset(
             logging.info(f"Cuts processed until now is {num}.")
 
     # decode final chunks of last sequences
-    import pdb; pdb.set_trace()
     while len(decode_streams):
-        finished_streams, encoder_out = decode_one_chunk(
+        finished_streams = decode_one_chunk(
             params=params, model=model, decode_streams=decode_streams
         )
-        encoder_outs.append(encoder_out)
         for i in sorted(finished_streams, reverse=True):
             decode_results.append(
                 (

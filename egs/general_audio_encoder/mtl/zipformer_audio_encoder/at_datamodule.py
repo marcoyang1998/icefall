@@ -45,6 +45,7 @@ from lhotse.dataset.input_strategies import (  # noqa F401 For AudioSamples
 from lhotse.utils import fix_random_seed
 from torch.utils.data import DataLoader
 
+from augmentations import RollTimeAugment
 from dataset_at import MultiTaskDataset
 from icefall.utils import str2bool
 
@@ -206,12 +207,47 @@ class MultiTaskDataModule:
             help="The number of training dataloader workers that "
             "collect the batches.",
         )
+        
+        group.add_argument(
+            "--enable-roll-augment",
+            type=str2bool,
+            default=False,
+            help="When enabled, use RollTimeAugment for training dataset. "
+        )
+        
+        group.add_argument(
+            "--min-roll",
+            type=float,
+            default=0.1,
+            help="The minimum roll fraction for RollTimeAugment."
+        )
+        
+        group.add_argument(
+            "--max-roll",
+            type=float,
+            default=0.2,
+            help="The maximum roll fraction for RollTimeAugment."
+        )
+        
+        group.add_argument(
+            "--roll-augment-prob",
+            type=float,
+            default=0.3,
+            help="The probability of applying RollTimeAugment to a cut"
+        )
 
         group.add_argument(
             "--enable-spec-aug",
             type=str2bool,
             default=True,
             help="When enabled, use SpecAugment for training dataset.",
+        )
+        
+        group.add_argument(
+            "--spec-aug-prob",
+            type=float,
+            default=0.9,
+            help="The probability of applying specaug"
         )
         
         group.add_argument(
@@ -475,7 +511,19 @@ class MultiTaskDataModule:
             ] + transforms
 
         input_transforms = []
-        if self.args.enable_spec_aug:
+
+
+        if self.args.enable_roll_augment and self.args.roll_augment_prob > 0.0:
+            logging.info("Enable RollTimeAugment")
+            aug = RollTimeAugment(
+                p=self.args.roll_augment_prob,
+                min_frac=self.args.min_roll,
+                max_frac=self.args.max_roll,
+            )
+            input_transforms.append(aug)
+            logging.info(aug)
+        
+        if self.args.enable_spec_aug and self.args.spec_aug_prob > 0.0:
             logging.info("Enable SpecAugment")
             logging.info(f"Time warp factor: {self.args.spec_aug_time_warp_factor}")
             # Set the value of num_frame_masks according to Lhotse's version.
@@ -497,6 +545,7 @@ class MultiTaskDataModule:
                     num_feature_masks=2,
                     frames_mask_size=self.args.frames_mask_size,
                     max_frames_mask_fraction=max_frames_mask_fraction,
+                    p=self.args.spec_aug_prob,
                 )
             )
             logging.info(
@@ -504,6 +553,7 @@ class MultiTaskDataModule:
                 f"max_frames_mask_fraction: {max_frames_mask_fraction}, "
                 f"frames_mask_size: {self.args.frames_mask_size}, "
                 f"features_mask_size: {self.args.features_mask_size}"
+                f"specaug prob: {self.args.spec_aug_prob}"
             )
         else:
             logging.info("Disable SpecAugment")
@@ -1189,6 +1239,16 @@ class MultiTaskDataModule:
                 cuts = load_manifest_lazy(
                     self.args.manifest_dir / "audioset_cuts_balanced.jsonl.gz"
                 )
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download3/"
+            )
+            c.recording.sources[0].source = source
+            return c        
+        cuts = cuts.map(change_source)
+        
         return cuts.drop_features()
 
     @lru_cache()
@@ -1200,10 +1260,20 @@ class MultiTaskDataModule:
                 in_dir=f"{str(self.args.shar_dir)}/audioset/eval",
                 shuffle_shards=False,
             )
-            return cuts
-        return load_manifest_lazy(
-            self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
-        )
+        else:
+            cuts = load_manifest_lazy(
+                self.args.manifest_dir / "audioset_cuts_eval.jsonl.gz"
+            )
+        def change_source(c):
+            source = c.recording.sources[0].source
+            source = source.replace(
+                "download/",
+                "download3/"
+            )
+            c.recording.sources[0].source = source
+            return c        
+        cuts = cuts.map(change_source)
+        return cuts
         
     @lru_cache()
     def audioset_sampling_weights(self):

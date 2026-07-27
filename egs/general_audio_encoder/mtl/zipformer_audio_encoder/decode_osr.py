@@ -103,6 +103,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from functools import partial
 
+import editdistance
 import k2
 import sentencepiece as spm
 import torch
@@ -123,7 +124,7 @@ from beam_search import (
     modified_beam_search_LODR,
 )
 from lhotse import set_caching_enabled
-from finetune_mtl import add_model_arguments, get_model, get_params
+from finetune_osr import add_model_arguments, get_model, get_params
 
 from icefall import ContextGraph, LmScorer, NgramLm
 from icefall.checkpoint import (
@@ -577,6 +578,22 @@ def decode_one_batch(
             sp=sp,
             lm_scale_list=lm_scale_list,
         )    
+    elif params.decoding_method == "attention_decoder":
+        results = model.attention_decoder.greedy_decode(
+            encoder_out, encoder_out_lens, max_len=400,
+        )
+        hyps = []
+        for res in results:
+            if params.vocab_size - 1 not in res:
+                logging.info("Warning: <sc> is not in the hypothesis.")
+            hyp = []
+            for token in res:
+                if token == params.vocab_size - 1:
+                    hyp.append(" <sc> ")
+                else:
+                    hyp.append(sp.id_to_piece(token))
+            hyp = "".join(hyp).replace("▁", " ").strip()
+            hyps.append(hyp.split())
     else:
         batch_size = encoder_out.size(0)
 
@@ -637,6 +654,56 @@ def decode_one_batch(
         prefix += f"_beam-size-{params.beam_size}"
         return {prefix: hyps}
 
+def get_best_permutation_sot(sot_hyp_list, ref_list):
+    """
+    输入SOT识别结果和参考文本列表，返回与参考文本顺序对齐的最佳假设排列。
+    
+    Args:
+        sot_hyp_list (list[str]): SOT模型的输出列表 (e.g. ["hello world", "hi"]) 
+                                  或者 ["hello world hi"] (漏了<sc>)
+        ref_list (list[str]): GroundTruth列表 (e.g. ["hello world", "hi"])
+        
+    Returns:
+        list[str]: 重新排序后的预测文本列表，使其与 ref_list 的顺序一一对应。
+    """
+    
+    # 1. 列表补齐 (Padding)
+    # 确保 hypothesis 至少有2个元素。如果SOT漏了<sc>，hyp只有1个元素，补一个空字符串。
+    # 使用切片 [:] 复制列表，避免修改原始输入
+    hyps = sot_hyp_list[:]
+    refs = ref_list[:]
+    
+    while len(hyps) < 2:
+        hyps.append("")
+        
+    # 这里的保护逻辑是防止GT少于2个的情况，虽然题目假设是2个说话人
+    while len(refs) < 2:
+        refs.append("")
+
+    # 2. 预处理：分词 (Tokenization)
+    # editdistance.eval 需要输入 list 才能计算 Word Level Distance
+    # 如果输入 str，它会计算 Character Level Distance
+    h_tokens = [h.strip().split() for h in hyps]
+    r_tokens = [r.strip().split() for r in refs]
+    
+    # 3. 计算两种排列的距离
+    # 排列 1 (Direct): h[0] <-> r[0], h[1] <-> r[1]
+    # 假设 SOT 输出的顺序就是 GT 的顺序
+    dist_direct = (editdistance.eval(h_tokens[0], r_tokens[0]) + 
+                   editdistance.eval(h_tokens[1], r_tokens[1]))
+    
+    # 排列 2 (Cross): h[0] <-> r[1], h[1] <-> r[0]
+    # 假设 SOT 输出的顺序跟 GT 是反的
+    dist_cross = (editdistance.eval(h_tokens[0], r_tokens[1]) + 
+                  editdistance.eval(h_tokens[1], r_tokens[0]))
+    
+    # 4. 选择最小距离并返回对应的文本
+    if dist_direct <= dist_cross:
+        # 顺序匹配：直接返回 [h0, h1]
+        return [hyps[0], hyps[1]]
+    else:
+        # 交叉匹配：为了配合 ref 的顺序 [r0, r1]，我们需要返回 [h1, h0]
+        return [hyps[1], hyps[0]]
 
 def decode_dataset(
     dl: torch.utils.data.DataLoader,
@@ -708,7 +775,17 @@ def decode_dataset(
             this_batch = []
             assert len(hyps) == len(texts)
             for cut_id, hyp_words, ref_text in zip(cut_ids, hyps, texts):
-                ref_words = ref_text.split()
+                # prepare the data for cpWER
+                hyp_text_by_speaker = " ".join(hyp_words).split("<sc>")
+                hyp_text_by_speaker = [text.strip() for text in hyp_text_by_speaker]
+                ref_text_by_speaker = ref_text.split("<sc>")
+                ref_text_by_speaker = [text.strip() for text in ref_text_by_speaker]
+                
+                # get the best permutation for hyps
+                hyp_text_permuted = get_best_permutation_sot(hyp_text_by_speaker, ref_text_by_speaker)
+                
+                hyp_words = " ".join(hyp_text_permuted).strip().split(" ")
+                ref_words = ref_text.replace("<sc>", " ").strip().split()
                 this_batch.append((cut_id, ref_words, hyp_words))
 
             results[name].extend(this_batch)
@@ -805,6 +882,7 @@ def main():
         "modified_beam_search_lm_shallow_fusion",
         "modified_beam_search_lm_rescore",
         "modified_beam_search_lm_rescore_LODR",
+        "attention_decoder",
     )
     params.res_dir = params.exp_dir / params.decoding_method
 
@@ -875,7 +953,8 @@ def main():
     # <blk> and <unk> are defined in local/train_bpe_model.py
     params.blank_id = sp.piece_to_id("<blk>")
     params.unk_id = sp.piece_to_id("<unk>")
-    params.vocab_size = sp.get_piece_size()
+    params.sos_id = params.eos_id = sp.piece_to_id("<sos/eos>")
+    params.vocab_size = sp.get_piece_size() + 1 # we need a token for <sc>
 
     logging.info(params)
 
@@ -1046,18 +1125,14 @@ def main():
     args.return_cuts = True
     librispeech = MultiTaskDataModule(args)
 
-    test_clean_cuts = librispeech.test_clean_cuts()
-    test_clean_cuts = test_clean_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
-    test_other_cuts = librispeech.test_other_cuts()
-    test_other_cuts = test_other_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+    test_cuts = librispeech.librimix_test_cuts()
+    test_cuts = test_cuts.map(partial(_add_task_id, 1)) # ASR task ID=0
+    test_dl = librispeech.test_dataloaders(test_cuts)
 
-    test_clean_dl = librispeech.test_dataloaders(test_clean_cuts)
-    test_other_dl = librispeech.test_dataloaders(test_other_cuts)
+    test_sets = ["testr"]
+    test_dls = [test_dl]
 
-    test_sets = ["test-clean", "test-other"]
-    test_dl = [test_clean_dl, test_other_dl]
-
-    for test_set, test_dl in zip(test_sets, test_dl):
+    for test_set, test_dl in zip(test_sets, test_dls):
         results_dict = decode_dataset(
             dl=test_dl,
             params=params,
