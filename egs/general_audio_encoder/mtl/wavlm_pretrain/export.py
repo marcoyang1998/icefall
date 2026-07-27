@@ -245,7 +245,7 @@ def main():
                 f" from {filename_start} (excluded) to {filename_end}"
             )
             model.to(device)
-            model.load_state_dict(
+            info = model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
@@ -253,6 +253,7 @@ def main():
                 ),
                 strict=False,
             )
+            logging.info(f"Load info: {info}")
         else:
             assert params.avg > 0, params.avg
             start = params.epoch - params.avg

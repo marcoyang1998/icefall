@@ -218,7 +218,7 @@ def extract_embeddings(
     new_cuts = []
     num_cuts = 0
     
-    logging.info(f"Writing zipformer indexes")
+    logging.info(f"Writing wavlm indexes")
     with NumpyHdf5Writer(embedding_path) as writer:
         for i, batch in enumerate(dl):
             cuts = batch["cuts"]
@@ -256,7 +256,10 @@ def extract_embeddings(
                 )
                 new_cut = fastcopy(
                     cut,
-                    custom={"codebook_indexes": cb_index}
+                    custom={
+                        "wavlm_codebook_indexes": cb_index,
+                        "dasheng_codebook_indexes": cut.codebook_indexes,
+                    },
                 )
                 new_cuts.append(new_cut)
                 num_cuts += 1
@@ -282,7 +285,8 @@ def join_manifests(
     embedding_cuts = embedding_cuts.sort_like(input_cuts)
     for cut_idx, (ori_cut, embed_cut) in enumerate(zip(input_cuts, embedding_cuts)):
         assert ori_cut.id == embed_cut.id
-        ori_cut.codebook_indexes = embed_cut.codebook_indexes
+        ori_cut.wavlm_codebook_indexes = embed_cut.wavlm_codebook_indexes
+        ori_cut.dasheng_codebook_indexes = embed_cut.dasheng_codebook_indexes
     
     input_cuts.to_jsonl(output_dir)
     logging.info(f"Saved the joined manifest to {output_dir}")
@@ -313,22 +317,13 @@ def change_yodas_recording_root(c):
     source = c.recording.sources[0].source
     source = source.replace(
         "download/yodas-granary-trimmed/", 
-        "s3://yangxiaoyu/yodas-granary-timmed/",
+        "brainllm:s3://yangxiaoyu/yodas-granary-timmed/",
     )
     c.recording.sources[0].source = source
     c.recording.sources[0].type = "url"
     c.supervisions[0].id = c.id
     c.supervisions[0].recording_id = c.id
     return c
-
-def remove_overlength(c):
-    # fisher
-    if c.start + c.duration > c.recording.duration:
-        return False
-    # Voxpopuli exception
-    if c.id == "20180116-1600-SPECIAL-UNKN2_en_47":
-        return False
-    return True
 
 if __name__=="__main__":
     parser = get_parser()
@@ -342,12 +337,10 @@ if __name__=="__main__":
     cuts = load_manifest(params.input_manifest)
     cuts = cuts.filter(remove_short_and_long_utt) # remove audio longer than 30s
     cuts = cuts.filter(remove_sp) # remove speed perturb
-    cuts = cuts.filter(remove_overlength)
     if "libriheavy" in params.input_manifest:
         cuts = cuts.map(change_lh_manifest)
     elif "yodas" in params.input_manifest:
         cuts = cuts.map(change_yodas_recording_root)
-    cuts = cuts.resample(16000)
     print(f"Finished loading manifest")
     print(cuts)
     

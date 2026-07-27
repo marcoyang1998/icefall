@@ -75,7 +75,6 @@ def prepare_data(manifest_list, split=True):
     for manifest in manifest_list:
         manifest = load_manifest_lazy(manifest)
         for cut in tqdm(manifest):
-            assert cut.start == 0.0
             feature = cut.load_custom("embedding").astype(np.float16)
             num_frames += feature.shape[0]
             all_data.append(feature)
@@ -205,9 +204,10 @@ def main(args):
     
 if __name__=="__main__":
     formatter = "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
-    setup_logger(f"data/quantizer/log-mvq")
-    
     args = get_parser()
+    quantizer_name = os.path.basename(args.quantizer_path)
+    
+    setup_logger(f"data/quantizer/log-mvq-{quantizer_name}")
     logging.info(vars(args))
     
     main(args)
