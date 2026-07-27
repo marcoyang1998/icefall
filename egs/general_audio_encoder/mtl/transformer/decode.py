@@ -380,6 +380,18 @@ def get_parser():
         default=False,
         help="""Skip scoring, but still save the ASR output (for eval sets).""",
     )
+    
+    parser.add_argument(
+        "--use-bf16",
+        type=str2bool,
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--use-fp16",
+        type=str2bool,
+        default=True,
+    )
 
     add_model_arguments(parser)
 
@@ -692,7 +704,7 @@ def decode_dataset(
         texts = batch["supervisions"]["text"]
         cut_ids = [cut.id for cut in batch["supervisions"]["cut"]]
 
-        with torch.cuda.amp.autocast(enabled=True):
+        with torch.cuda.amp.autocast(enabled=True, dtype=params.dtype):
             hyps_dict = decode_one_batch(
                 params=params,
                 model=model,
@@ -852,6 +864,15 @@ def main():
         params.suffix += "_use-averaged-model"
 
     setup_logger(f"{params.res_dir}/log-decode-{params.suffix}")
+    
+    if params.use_bf16:
+        assert not params.use_fp16
+        params.dtype = torch.bfloat16
+    elif params.use_fp16:
+        params.dtype = torch.float16
+    else:
+        params.dtype = torch.float32
+    
     logging.info("Decoding started")
 
     device = torch.device("cpu")

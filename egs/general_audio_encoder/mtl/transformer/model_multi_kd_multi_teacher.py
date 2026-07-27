@@ -22,12 +22,12 @@ import logging
 import random
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from multi_quantization.prediction import JointCodebookLoss
 
+from model_multi_kd_w2v2_mask import compute_mask_indices, compute_mask_indices_block, index_put
 from icefall.utils import make_pad_mask
 
 
@@ -37,14 +37,13 @@ class MultiKDModel(nn.Module):
         encoder_embed: nn.Module,
         encoder: nn.Module,
         encoder_dim: int,
-        num_codebooks: int=8,
-        distillation_layer: int=9,
-        distillation_delta: int=0,
-        teacher_frame_ratio: int = 2,
+        num_codebooks: list[int]=None,
+        distillation_layer: list[int]=None,
+        distillation_delta: list[int]=None,
+        teacher_frame_ratio: list[int]=None,
         interpolate_teacher: bool = False,
-        n_mels: int = 128,
-        do_audio_tagging: bool = False,
         num_events: int = 527,
+        n_mels: int = 128,
         mask_mode: str = "w2v2",
         mask_prob: float = 0.65,
         mask_length: int = 10,
@@ -73,20 +72,18 @@ class MultiKDModel(nn.Module):
             two inputs: `x` of (N, T, encoder_dim) and `x_lens` of shape (N,).
             It returns two tensors: `logits` of shape (N, T, encoder_dim) and
             `logit_lens` of shape (N,).
-          decoder:
-            It is the prediction network in the paper. Its input shape
-            is (N, U) and its output shape is (N, U, decoder_dim).
-            It should contain one attribute: `blank_id`.
-            It is used when use_transducer is True.
-          joiner:
-            It has two inputs with shapes: (N, T, encoder_dim) and (N, U, decoder_dim).
-            Its output shape is (N, T, U, vocab_size). Note that its output contains
-            unnormalized probs, i.e., not processed by log-softmax.
-            It is used when use_transducer is True.
-          use_transducer:
-            Whether use transducer head. Default: True.
-          use_ctc:
-            Whether use CTC head. Default: False.
+          num_codebooks:
+            A list of integers, how many codebooks for each target
+          mask_mode:
+            The masking mode.
+                w2v2: the wav2vec2 style of masking, allows overlap
+                custom: no overlap, therefore bigger masking ratio 
+          mask_prob:
+            The probability of selecting choosing one frame as the start index
+          mask_length:
+            The length of each mask
+          mask_selection:
+            How to determine the length of the mask, see ``compute_mask_indices''
         """
         super().__init__()
 
@@ -104,25 +101,27 @@ class MultiKDModel(nn.Module):
         self.interpolate_teacher = interpolate_teacher
         self.distillation_delta = distillation_delta
         
-        if num_codebooks > 0:
-            self.codebook_loss_net = JointCodebookLoss(
-                predictor_channels=encoder_dim,
-                num_codebooks=num_codebooks * self.teacher_frame_ratio,
-                is_joint=False,
-                reduction="none",
-            )
-        else:
-            self.codebook_loss_net = None
+        self.codebook_loss_heads = nn.ModuleList()
+        for cb, frame_ratio in zip(num_codebooks, teacher_frame_ratio):
+            if cb > 0:
+                codebook_loss_net = JointCodebookLoss(
+                    predictor_channels=encoder_dim,
+                    num_codebooks=cb * frame_ratio,
+                    is_joint=False,
+                    reduction="none",
+                )
+            else:
+                codebook_loss_net = None
+            self.codebook_loss_heads.append(codebook_loss_net)
         
-        self.do_audio_tagging = do_audio_tagging
-        if do_audio_tagging:
-            self.audio_tagging_proj = nn.Sequential(
-                nn.Dropout(0.1),
-                nn.Linear(encoder_dim, num_events),
-            ) # 527 classes
-        else:
-            self.audio_tagging_proj = None
-            
+        if len(self.codebook_loss_heads) == 0:
+            self.codebook_loss_heads = None
+        
+        self.audio_tagging_proj = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Linear(encoder_dim, num_events),
+        ) # 527 classes
+        
         # masking related
         assert mask_mode in ["w2v2", "block"], f"Unseen mask mode: {mask_mode}"
         self.mask_mode = mask_mode
@@ -163,14 +162,19 @@ class MultiKDModel(nn.Module):
 
         output = self.encoder(x, x_lens)
         encoder_out = output.last_hidden_state
+        
+        if self.encoder.output_downsampling_factor == 2:
+            encoder_out_lens = (x_lens + 1) // 2
+        else:
+            encoder_out_lens = x_lens
 
-        return encoder_out, x_lens
+        return encoder_out, encoder_out_lens
 
     def forward(
         self,
         x: torch.Tensor,
         x_lens: torch.Tensor,
-        codebook_indexes: torch.Tensor = None,
+        codebook_indexes: list[torch.Tensor] = None,
         at_targets: torch.Tensor = None,
         mask: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -184,17 +188,10 @@ class MultiKDModel(nn.Module):
           codebook_indexes:
             Codebook indexes of teacher embeddings
           mask:
-            Apply mask to the input features during training
+            If we perform w2v2 style of masking over the fbank frames
             
         Returns:
-          Return the transducer losses and CTC loss,
-          in form of (simple_loss, pruned_loss, ctc_loss)
-
-        Note:
-           Regarding am_scale & lm_scale, it will make the loss-function one of
-           the form:
-              lm_scale * lm_probs + am_scale * am_probs +
-              (1-lm_scale-am_scale) * combined_probs
+          Return the codebook loss
         """
         assert x.ndim == 3, x.shape
         assert x_lens.ndim == 1, x_lens.shape
@@ -215,66 +212,82 @@ class MultiKDModel(nn.Module):
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens)
             
-        # TODO: support loss only on masked positions
-        if codebook_indexes is not None and self.codebook_loss_net is not None:
-            codebook_loss = self.forward_codebook_loss(
-                encoder_out, encoder_out_lens, codebook_indexes, reduction="none"
-            )
-            if self.loss_only_mask and mask_indices is not None:
-                # downsample the mask 
-                mask_indices = nn.functional.avg_pool1d(mask_indices, 4) >= 0.5
-                assert mask_indices.size(1) >= codebook_loss.size(1)
-                mask_indices = mask_indices[:, :codebook_loss.size(1)].float()
-                codebook_loss = codebook_loss * mask_indices
-            codebook_loss = codebook_loss.sum(dim=1) # (B,)  
-        else:
-            codebook_loss = None
+        cb_losses = []
+        if self.codebook_loss_heads is not None:
+            for i, cb_loss_net in enumerate(self.codebook_loss_heads):
+                cb_indexes = codebook_indexes[i]
+                if cb_indexes is not None and cb_loss_net is not None:
+                    codebook_loss = self.forward_codebook_loss(
+                        encoder_out,
+                        encoder_out_lens,
+                        cb_indexes,
+                        cb_loss_net=cb_loss_net,
+                        teacher_frame_ratio=self.teacher_frame_ratio[i],
+                        distillation_delta=self.distillation_delta[i],
+                        reduction="none"
+                    )
+                    if self.loss_only_mask and mask_indices is not None:
+                        # downsample the mask 
+                        ds_mask_indices = nn.functional.avg_pool1d(mask_indices, 2) >= 0.5
+                        assert ds_mask_indices.size(1) >= codebook_loss.size(1), (ds_mask_indices.shape, codebook_loss.shape)
+                        ds_mask_indices = ds_mask_indices[:, :codebook_loss.size(1)].float()
+                        codebook_loss = codebook_loss * ds_mask_indices
+                    codebook_loss = codebook_loss.sum(dim=1) # (B,)    
+                else:
+                    codebook_loss = 0.0
+                cb_losses.append(codebook_loss)
         
-        if at_targets is not None and self.do_audio_tagging:
+        if at_targets is not None:
             at_loss = self.forward_audio_tagging(encoder_out, encoder_out_lens, at_targets, return_logits=False)
         else:
             at_loss = None
         
-        return codebook_loss, at_loss
+        return *cb_losses, at_loss
 
     def forward_codebook_loss(
         self,
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
         codebook_indexes: torch.Tensor,
+        cb_loss_net: torch.nn.Module,
+        teacher_frame_ratio: int,
+        distillation_delta: int,
         reduction: str = "sum",
     ):
         # align the encoder features with the codebook indexes
+        
+        # check if we need to upsample the targets to match the encoder output length
+        # if round(encoder_out.shape[1] / codebook_indexes.shape[1]) > teacher_frame_ratio:
+        #     upsample_ratio = round(encoder_out.shape[1] / codebook_indexes.shape[1])
+        #     # codebook_indexes = codebook_indexes.repeat_interleave(upsample_ratio, dim=1)
+        #     encoder_out = F.avg_pool1d(encoder_out.transpose(1,2), kernel_size=upsample_ratio, stride=upsample_ratio).transpose(1,2)
+        #     encoder_out_lens = encoder_out_lens // upsample_ratio
+
         if self.interpolate_teacher:
             codebook_indexes = self.interpolate_codebook_indexes(
                 encoder_out, codebook_indexes
             )
         else:
-            if codebook_indexes.shape[1] > encoder_out.shape[1]:
+            if codebook_indexes.shape[1] != encoder_out.shape[1]:
                 # align the codebook indexes to the frame rate of the student encoder out
                 codebook_indexes = self.concat_successive_codebook_indexes(
-                    encoder_out, codebook_indexes, ratio=self.teacher_frame_ratio
+                    encoder_out, codebook_indexes, ratio=teacher_frame_ratio
                 )
-            elif codebook_indexes.shape[1] < encoder_out.shape[1]:
-                # Make codebook indexes the same length of encoder_out by repeating the last few frames
-                diff = encoder_out.shape[1] - codebook_indexes.shape[1] 
-                assert diff <= 5, "The length mismatch between student encoder out and teacher is too large!"
-                codebook_indexes = torch.cat([codebook_indexes, codebook_indexes[:, -diff:, :]], dim=1)
-        assert codebook_indexes.shape[1] == encoder_out.shape[1]
                 
-        # the delta is associated with the frame-rate of the encoder
+        # the delta is associated with the frame-rate of the student encoder
         # so a bigger delta maybe necessary for 50Hz student encoder
-        if self.distillation_delta > 0:
-            codebook_indexes = codebook_indexes[:,:-self.distillation_delta, :]
-            encoder_out = encoder_out[:, self.distillation_delta:, :]
-            truncated_padding_mask = make_pad_mask(encoder_out_lens - self.distillation_delta)
+        if distillation_delta > 0:
+            codebook_indexes = codebook_indexes[:,:-distillation_delta, :]
+            encoder_out = encoder_out[:, distillation_delta:, :]
+            truncated_padding_mask = make_pad_mask(encoder_out_lens - distillation_delta)
             codebook_indexes = codebook_indexes.masked_fill(truncated_padding_mask.unsqueeze(-1), value=-100)
             
+        # compute the loss
         N,T,_ = encoder_out.shape
-        codebook_loss = self.codebook_loss_net(encoder_out.float(), codebook_indexes)
+        codebook_loss = cb_loss_net(encoder_out.float(), codebook_indexes)
         codebook_loss = codebook_loss.reshape(N,T,-1)
-        num_cb = codebook_loss.size(-1)  # TODO: ugly way to keep the value comparable, need to change
-        # normalize the loss by the number of codebooks
+        num_cb = codebook_loss.size(-1) # this is the equivalent number of codebooks
+        
         # normalize the loss by the number of codebooks
         if reduction == "sum":
             codebook_loss = codebook_loss.sum(dim=(1,2)) / num_cb # (B,)
@@ -331,6 +344,26 @@ class MultiKDModel(nn.Module):
             logging.info(f"Apply {self.mask_mode} masking. A proportion of {masked_indices.sum()/masked_indices.numel():.2f} frames are masked")
         return x, masked_indices
     
+    def apply_mask_block(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor = None
+    ):
+        B,T,C = x.shape
+        assert self.mask_prob > 0.0
+
+        mask_indices = compute_mask_indices_block(
+            shape=(B,T),
+            padding_mask=padding_mask,
+            mask_prob=self.mask_prob,
+            mask_length=self.mask_length,
+            min_masks=self.min_masks,
+        ).to(x.device)
+        
+        x = index_put(x, mask_indices.bool(), self.mask_emb)
+
+        return x, mask_indices
+    
     def apply_mask_w2v2(
         self,
         x: torch.Tensor,
@@ -384,26 +417,6 @@ class MultiKDModel(nn.Module):
 
         return x, mask_indices
     
-    def apply_mask_block(
-        self,
-        x: torch.Tensor,
-        padding_mask: torch.Tensor = None
-    ):
-        B,T,C = x.shape
-        assert self.mask_prob > 0.0
-
-        mask_indices = compute_mask_indices_block(
-            shape=(B,T),
-            padding_mask=padding_mask,
-            mask_prob=self.mask_prob,
-            mask_length=self.mask_length,
-            min_masks=self.min_masks,
-        ).to(x.device)
-        
-        x = index_put(x, mask_indices.bool(), self.mask_emb)
-
-        return x, mask_indices
-    
     @staticmethod
     def interpolate_codebook_indexes(middle_layer_output, codebook_indexes):
         # This function addresses the case where the teacher has a lower frame rate
@@ -446,7 +459,8 @@ class MultiKDModel(nn.Module):
                 [
                     codebook_indexes,
                     torch.full((N,diff,C), -100).to(codebook_indexes.device).to(codebook_indexes.dtype)
-                ]
+                ], 
+                dim=1
             )
         assert codebook_indexes.size(1) == middle_layer_output.size(1) * ratio
         
@@ -454,201 +468,3 @@ class MultiKDModel(nn.Module):
         codebook_indexes = codebook_indexes.reshape(N, t_expected, C * ratio)
         assert middle_layer_output.shape[1] == codebook_indexes.shape[1]
         return codebook_indexes
-
-def index_put(tensor, indices, value):
-    tensor[indices] = value
-    return tensor    
-
-def compute_mask_indices(
-    shape: Tuple[int, int],
-    padding_mask: Optional[torch.Tensor],
-    mask_prob: float,
-    mask_length: int,
-    mask_type: str = "static",
-    mask_other: float = 0.0,
-    min_masks: int = 0,
-    no_overlap: bool = False,
-    min_space: int = 0,
-    require_same_masks: bool = True,
-    mask_dropout: float = 0.0,
-    add_masks: bool = False,
-    seed: Optional[int] = None,
-    epoch: Optional[int] = None,
-    indices: Optional[torch.Tensor] = None,
-    idc_select_ver: int = 1,  # 2 to reproduce mask_tokens_dataset
-    num_mask_ver: int = 2,  # 2 to reproduce mask_tokens_dataset
-) -> np.ndarray:
-    """
-    Computes random mask spans for a given shape
-
-    Args:
-        shape: the the shape for which to compute masks.
-            should be of size 2 where first element is batch size and 2nd is timesteps
-        padding_mask: optional padding mask of the same size as shape, which will prevent masking padded elements
-        mask_prob: probability for each token to be chosen as start of the span to be masked. this will be multiplied by
-            number of timesteps divided by length of mask span to mask approximately this percentage of all elements.
-            however due to overlaps, the actual number will be smaller (unless no_overlap is True)
-        mask_type: how to compute mask lengths
-            static = fixed size
-            uniform = sample from uniform distribution [mask_other, mask_length*2]
-            normal = sample from normal distribution with mean mask_length and stdev mask_other. mask is min 1 element
-            poisson = sample from possion distribution with lambda = mask length
-        min_masks: minimum number of masked spans
-        no_overlap: if false, will switch to an alternative recursive algorithm that prevents spans from overlapping
-        min_space: only used if no_overlap is True, this is how many elements to keep unmasked between spans
-        require_same_masks: if true, will randomly drop out masks until same amount of masks remains in each sample
-        mask_dropout: randomly dropout this percentage of masks in each example
-    """
-
-    bsz, all_sz = shape
-    mask = np.full((bsz, all_sz), False)
-
-    if num_mask_ver == 1:
-        all_num_mask = int(
-            # add a random number for probabilistic rounding
-            mask_prob * all_sz / float(mask_length)
-            + np.random.rand()
-        )
-        all_num_mask = max(min_masks, all_num_mask)
-
-    mask_idcs = []
-    for i in range(bsz):
-        if seed is not None and epoch is not None and indices is not None:
-            seed_i = int(hash((seed, epoch, indices[i].item())) % 1e6)
-        else:
-            seed_i = None
-
-        rng = np.random.default_rng(seed_i)
-
-        if padding_mask is not None:
-            sz = all_sz - padding_mask[i].long().sum().item()
-            assert sz >= 0, sz
-        else:
-            sz = all_sz
-
-        if num_mask_ver == 1:
-            if padding_mask is not None:
-                num_mask = int(
-                    # add a random number for probabilistic rounding
-                    mask_prob * sz / float(mask_length)
-                    + np.random.rand()
-                )
-                num_mask = max(min_masks, num_mask)
-            else:
-                num_mask = all_num_mask
-        elif num_mask_ver == 2:
-            num_mask = int(
-                # add a random number for probabilistic rounding
-                mask_prob * sz / float(mask_length)
-                + rng.random()
-            )
-            num_mask = max(min_masks, num_mask)
-            hard_max = sz // mask_length
-            num_mask = min(hard_max, num_mask) # prevent whole sequence being masked
-        else:
-            raise ValueError()
-
-        if mask_type == "static":
-            lengths = np.full(num_mask, mask_length)
-        elif mask_type == "uniform":
-            lengths = rng.randint(mask_other, mask_length * 2 + 1, size=num_mask)
-        elif mask_type == "normal":
-            lengths = rng.normal(mask_length, mask_other, size=num_mask)
-            lengths = [max(1, int(round(x))) for x in lengths]
-        elif mask_type == "poisson":
-            lengths = rng.poisson(mask_length, size=num_mask)
-            lengths = [int(round(x)) for x in lengths]
-        else:
-            raise Exception("unknown mask selection " + mask_type)
-
-        if sum(lengths) == 0:
-            if mask_type == "static":
-                raise ValueError("this should never happens")
-            else:
-                lengths = [min(mask_length, sz - 1)]
-
-        if no_overlap:
-            mask_idc = []
-
-            def arrange(s, e, length, keep_length):
-                span_start = rng.randint(s, e - length)
-                mask_idc.extend(span_start + i for i in range(length))
-
-                new_parts = []
-                if span_start - s - min_space >= keep_length:
-                    new_parts.append((s, span_start - min_space + 1))
-                if e - span_start - length - min_space > keep_length:
-                    new_parts.append((span_start + length + min_space, e))
-                return new_parts
-
-            parts = [(0, sz)]
-            min_length = min(lengths)
-            for length in sorted(lengths, reverse=True):
-                lens = np.fromiter(
-                    (e - s if e - s >= length + min_space else 0 for s, e in parts),
-                    np.int,
-                )
-                l_sum = np.sum(lens)
-                if l_sum == 0:
-                    break
-                probs = lens / np.sum(lens)
-                c = rng.choice(len(parts), p=probs)
-                s, e = parts.pop(c)
-                parts.extend(arrange(s, e, length, min_length))
-            mask_idc = np.asarray(mask_idc)
-        else:
-            if idc_select_ver == 1:
-                min_len = min(lengths)
-                if sz - min_len <= num_mask:
-                    min_len = sz - num_mask - 1
-                mask_idc = rng.choice(sz - min_len, num_mask, replace=False)
-            elif idc_select_ver == 2:
-                mask_idc = rng.choice(sz, num_mask, replace=False)
-            else:
-                raise ValueError()
-
-            mask_idc = np.asarray(
-                [
-                    mask_idc[j] + offset
-                    for j in range(len(mask_idc))
-                    for offset in range(lengths[j])
-                ]
-            )
-
-        mask_idc = np.unique(mask_idc[mask_idc < sz])
-        if len(mask_idc) >= sz:
-            
-            raise ValueError(
-                (
-                    f"the entire sequence is masked. "
-                    f"sz={sz}; mask_idc[mask_idc]; "
-                    f"index={indices[i] if indices is not None else None}"
-                )
-            )
-        mask_idcs.append(mask_idc)
-
-    target_len = None
-    if require_same_masks:
-        if add_masks:
-            target_len = max([len(m) for m in mask_idcs])
-        else:
-            target_len = min([len(m) for m in mask_idcs])
-
-    for i, mask_idc in enumerate(mask_idcs):
-        if target_len is not None and len(mask_idc) > target_len:
-            mask_idc = rng.choice(mask_idc, target_len, replace=False)
-
-        mask[i, mask_idc] = True
-
-        if target_len is not None and len(mask_idc) < target_len:
-            unmasked = np.flatnonzero(~mask[i])
-            to_mask = rng.choice(unmasked, target_len - len(mask_idc), replace=False)
-            mask[i, to_mask] = True
-
-        if mask_dropout > 0:
-            masked = np.flatnonzero(mask[i])
-            num_holes = np.rint(len(masked) * mask_dropout).astype(int)
-            to_drop = rng.choice(masked, num_holes, replace=False)
-            mask[i, to_drop] = False
-
-    return mask

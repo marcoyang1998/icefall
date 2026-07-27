@@ -32,7 +32,7 @@ from pathlib import Path
 
 import torch
 
-from train_multi_KD3_shar import add_model_arguments, get_model, get_params
+from train_multi_KD3_shar_speech_audio_multi_mvq2_token_mixing import add_model_arguments, get_model, get_params
 
 from icefall.checkpoint import (
     average_checkpoints,
@@ -188,7 +188,7 @@ def main():
                 f" from {filename_start} (excluded) to {filename_end}"
             )
             model.to(device)
-            model.load_state_dict(
+            info = model.load_state_dict(
                 average_checkpoints_with_averaged_model(
                     filename_start=filename_start,
                     filename_end=filename_end,
@@ -196,6 +196,8 @@ def main():
                 ),
                 strict=False,
             )
+            logging.info(f"Missing keys: {info.missing_keys}")
+            logging.info(f"Unexpected keys: {info.unexpected_keys}")
         else:
             assert params.avg > 0, params.avg
             start = params.epoch - params.avg
@@ -215,6 +217,23 @@ def main():
                 ),
             )
 
+    # import torchaudio
+    
+    # import pdb; pdb.set_trace()
+    # wavs = torchaudio.load("1284-1180-0027.flac")[0]
+    # device = torch.device("cuda")
+    # model = model.to(device)
+    # model.eval()
+    
+    # from lhotse import Fbank, FbankConfig
+    # fbank_extractor = Fbank(FbankConfig(num_mel_bins=128))
+    # fbank = fbank_extractor.extract(wavs, sampling_rate=16000)
+    # fbank = fbank.unsqueeze(0).to(device)
+    # fbank_lens = torch.tensor([fbank.shape[1]]).to(device)
+    # import pdb; pdb.set_trace()
+    # with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+    #     x, x_lens = model.forward_encoder(fbank, fbank_lens)
+    
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of model parameters: {num_param}")
     if params.iter > 0:

@@ -16,6 +16,47 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from icefall.utils import make_pad_mask
 
+class SimpleDownsample(torch.nn.Module):
+    """
+    Does downsampling with attention, by weighted sum, and a projection..
+    """
+
+    def __init__(self, channels: int, downsample: int):
+        super(SimpleDownsample, self).__init__()
+
+        self.bias = nn.Parameter(torch.zeros(downsample))
+
+        self.name = None  # will be set from training code
+
+        self.downsample = downsample
+
+    def forward(self, src: torch.Tensor) -> torch.Tensor:
+        """
+        x: (seq_len, batch_size, in_channels)
+        Returns a tensor of shape
+           ( (seq_len+downsample-1)//downsample, batch_size, channels)
+        """
+        (seq_len, batch_size, in_channels) = src.shape
+        ds = self.downsample
+        d_seq_len = (seq_len + ds - 1) // ds
+
+        # Pad to an exact multiple of self.downsample
+        # right-pad src, repeating the last element.
+        pad = d_seq_len * ds - seq_len
+        src_extra = src[src.shape[0] - 1 :].expand(pad, src.shape[1], src.shape[2])
+        src = torch.cat((src, src_extra), dim=0)
+        assert src.shape[0] == d_seq_len * ds
+
+        src = src.reshape(d_seq_len, ds, batch_size, in_channels)
+
+        weights = self.bias.softmax(dim=0)
+        # weights: (downsample, 1, 1)
+        weights = weights.unsqueeze(-1).unsqueeze(-1)
+
+        # ans1 is the first `in_channels` channels of the output
+        ans = (src * weights).sum(dim=1)
+
+        return ans
 class LlamaAudioEncoder(nn.Module):
     def __init__(
         self,
@@ -29,6 +70,7 @@ class LlamaAudioEncoder(nn.Module):
         gated_mlp: bool = True,
         use_flash_attention: bool = True,
         is_causal: bool = False,
+        output_downsampling_factor: int = 1,
     ):
         # a Llama Audio Encoder model with rotary positional embedding (ROPE)
         # supports both streaming and non-streaming by specifying is_causal
@@ -70,6 +112,15 @@ class LlamaAudioEncoder(nn.Module):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         
+        # output downsampling
+        self.output_downsampling_factor = output_downsampling_factor  # int
+        if output_downsampling_factor >= 2:
+            self.downsample_output = SimpleDownsample(
+                encoder_dim, downsample=output_downsampling_factor
+            )
+        else:
+            self.downsample_output = None
+        
     def forward(
         self, 
         inputs_embeds: torch.Tensor,
@@ -106,6 +157,11 @@ class LlamaAudioEncoder(nn.Module):
             hidden_states = layer_outputs[0]
         
         hidden_states = self.norm(hidden_states)
+        
+        if self.output_downsampling_factor >= 2:
+            hidden_states = hidden_states.transpose(0, 1) # (batch_size, T, dim) -> (T, batch_size, dim)
+            hidden_states = self.downsample_output(hidden_states)
+            hidden_states = hidden_states.transpose(0, 1) # (T, batch_size, dim) -> (batch_size, T, dim)
         
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -144,6 +200,21 @@ class LlamaAttention(nn.Module):
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
 
+    def _build_chunkwise_causal_mask(self, seq_len, chunk_size, device):
+        """
+        Build chunk-wise causal mask:
+        - Each chunk attends to all previous chunks and itself (fully visible)
+        - Cannot see future chunks.
+        """
+        mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+        chunk_idx = torch.arange(seq_len, device=device) // chunk_size
+
+        for i in range(seq_len):
+            current_chunk = chunk_idx[i]
+            visible = chunk_idx <= current_chunk
+            mask[i] = ~visible  # mask == True means blocked
+        return mask
+    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -308,7 +379,7 @@ class LlamaEncoderLayer(nn.Module):
 
         return outputs
     
-def _test_padding_mask():
+def _test_padding_mask_non_causal():
     device = torch.device("cuda")
     
     model = LlamaAudioEncoder(
@@ -425,7 +496,6 @@ def _test_padding_mask():
         )
     feat2 = output2.last_hidden_state
     
-    import pdb; pdb.set_trace()
     print(feat, feat2)
     
     
