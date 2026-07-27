@@ -943,7 +943,7 @@ def compute_loss(
             lm_scale=params.lm_scale,
             freeze_encoder=freeze_encoder,
         )
-        simple_loss, pruned_loss, ctc_loss = losses
+        simple_loss, pruned_loss, ctc_loss, attention_decoder_loss = losses
 
         loss = 0.0
 

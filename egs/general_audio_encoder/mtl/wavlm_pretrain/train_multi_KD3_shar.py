@@ -896,7 +896,6 @@ def compute_loss(
             logging.info(f"Total duration of task {t}: {duration}")
 
     # mvq tokens
-    import pdb; pdb.set_trace()
     mvq_tokens = batch["cb_indexes"].to(device)
     
     # audio tagging label
@@ -1378,7 +1377,6 @@ def run(rank, world_size, args):
         asr_training_cuts_duration.append(librispeech_cuts_duration * params.repeat_librispeech)
         
     if params.use_gigaspeech:
-        import pdb; pdb.set_trace()
         gigaspeech_cuts = librispeech.gigaspeech_train_cuts()
         gigaspeech_cuts_len = {
             "xs": 9389,

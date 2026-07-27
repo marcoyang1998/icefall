@@ -70,7 +70,7 @@ class AsrModel(nn.Module):
         super().__init__()
 
         assert (
-            use_transducer or use_ctc
+            use_transducer or use_ctc or use_attention_decoder
         ), f"At least one of them should be True, but got use_transducer={use_transducer}, use_ctc={use_ctc}"
 
         self.encoder = encoder
@@ -100,6 +100,7 @@ class AsrModel(nn.Module):
                 nn.Linear(encoder_dim, vocab_size),
                 nn.LogSoftmax(dim=-1),
             )
+        
         self.use_attention_decoder = use_attention_decoder
         self.attention_decoder = attention_decoder
 
@@ -309,6 +310,7 @@ class AsrModel(nn.Module):
         assert y.num_axes == 2, y.num_axes
 
         assert x.size(0) == x_lens.size(0) == y.dim0, (x.shape, x_lens.shape, y.dim0)
+        device = x.device
 
         # Compute encoder outputs
         encoder_out, encoder_out_lens = self.forward_encoder(x, x_lens, freeze_encoder=freeze_encoder)
@@ -343,7 +345,17 @@ class AsrModel(nn.Module):
         else:
             ctc_loss = torch.empty(0)
         
-        return simple_loss, pruned_loss, ctc_loss
+        if self.use_attention_decoder:
+            attention_decoder_loss = self.attention_decoder.calc_att_loss(
+                encoder_out=encoder_out,
+                encoder_out_lens=encoder_out_lens,
+                ys=y.to(device),
+                ys_lens=y_lens.to(device),
+            )
+        else:
+            attention_decoder_loss = torch.empty(0)
+        
+        return simple_loss, pruned_loss, ctc_loss, attention_decoder_loss
     
     
 class MultiTaskModel(nn.Module):

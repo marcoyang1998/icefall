@@ -1,5 +1,5 @@
+import logging
 import math
-from threading import Lock
 from typing import Callable, Dict, List, Optional, Union
 
 import torch
@@ -86,7 +86,10 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         input_strategy: BatchIO = PrecomputedFeatures(),
         at_KD: bool = False,
         sv_KD: bool = False,
-        enable_cache: bool = True,
+        speech_target_frame_rate: int = 50,
+        num_cb_speech: int = 16,
+        audio_target_frame_rate: int = 25,
+        num_cb_audio: int = 16,
     ):
         """
         IterableDataset constructor.
@@ -112,7 +115,10 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         self.at_KD = at_KD
         self.sv_KD = sv_KD
         
-        self.dummy_codebook_indexes = torch.ones(1510, 16) * (-100)
+        self.speech_target_frame_rate = speech_target_frame_rate
+        self.audio_target_frame_rate = audio_target_frame_rate
+        self.dummy_codebook_indexes = torch.ones(1510, num_cb_speech) * (-100)
+        self.dummy_audio_codebook_indexes = torch.ones(1510, num_cb_audio) * (-100)
         self.dummy_audio_logits = torch.ones(527) * 0.5
 
         # This attribute is a workaround to constantly growing HDF5 memory
@@ -125,7 +131,7 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         Return a new batch, with the batch size automatically determined using the constraints
         of max_duration and max_cuts.
         """
-        # validate_multi_kd(cuts)
+        validate_multi_kd(cuts)
 
         self.hdf5_fix.update()
 
@@ -153,27 +159,30 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         
         # MVQ tokens
         cuts_pre_mixed = [c if isinstance(c, MonoCut) else c.tracks[0].cut for c in cuts]
-        # cuts_pre_mixed = fix_start(cuts_pre_mixed)
+        cuts_pre_mixed = fix_start(cuts_pre_mixed)
+        assert len(cuts_pre_mixed) == len(cuts)
         
+        # load wavlm cb indexes
         mvq_tokens, mvq_token_lens = _collate_custom_field(
             cuts_pre_mixed,
-            "codebook_indexes",
+            "wavlm_codebook_indexes",
             dummy=self.dummy_codebook_indexes,
             temporal_array=True,
             pad_value=-100,
+            frame_rate=self.speech_target_frame_rate,
         )
         
-        if self.at_KD:
-            # at_targets = collate_custom_field(
-            #     cuts_pre_mixed, "beats_embedding", pad_value=-100
-            # ) # (N,C)
-            at_targets = _collate_custom_field(
-                cuts_pre_mixed, "beats_embedding", dummy=self.dummy_audio_logits, temporal_array=False
-            ) # (N,C)
-        else:        
-            audio_events = [getattr(c.supervisions[0], "audio_event", "0") for c in cuts_pre_mixed] # the label indices are in CED format
-            at_targets, _ = str2multihot(audio_events) # (N, num_events)
+        # load dasheng cb indexes
+        audio_mvq_tokens, audio_mvq_token_lens = _collate_custom_field(
+            cuts_pre_mixed,
+            "dasheng_codebook_indexes",
+            dummy=self.dummy_audio_codebook_indexes,
+            temporal_array=True,
+            pad_value=-100,
+            frame_rate=self.audio_target_frame_rate,
+        )
             
+        at_targets = None
         sv_targets = None
         
         # task ids
@@ -185,8 +194,8 @@ class MultiTaskKDDataset(torch.utils.data.Dataset):
         batch = {
             "audio": audio,
             "audio_lens": audio_lens,
-            "cb_indexes": mvq_tokens,
-            "cb_indexes_len": mvq_token_lens,
+            "cb_indexes": [mvq_tokens, audio_mvq_tokens],
+            "cb_indexes_len": [mvq_token_lens, audio_mvq_token_lens],
             "supervisions": default_collate(
                 [
                     {
@@ -213,9 +222,11 @@ def fix_start(cuts):
     new_cuts = []
     for cut in cuts:
         if cut.has_custom("codebook_indexes"):
-            cut.codebook_indexes.start = cut.start
-        if cut.has_custom("firered_codebook_indexes"):
-            cut.firered_codebook_indexes.start = cut.start
+            if not isinstance(cut.codebook_indexes, dict):
+                cut.codebook_indexes.start = cut.start
+        if cut.has_custom("audio_codebook_indexes"):
+            if not isinstance(cut.audio_codebook_indexes, dict):
+                cut.audio_codebook_indexes.start = cut.start
         new_cuts.append(cut)
     return new_cuts
 
@@ -223,40 +234,51 @@ def validate_multi_kd(cuts: CutSet) -> None:
     for cut in cuts:
         # assert cut.has_features, cut
         assert cut.has_custom("task_id")
-        if cut.task_id == 1: 
-            # speech cuts, should have codebook indexes
-            assert cut.codebook_indexes.array.storage_key != "dummy_whisper_codebook_indexes_1510"
+        if cut.task_id == 1:
+            assert cut.has_custom("wavlm_codebook_indexes")
         elif cut.task_id == 2:
-            # audio cuts, should have audio logits
-            assert cut.beats_embedding.storage_key != "dummy_beats_embedding"
+            assert cut.has_custom("wavlm_codebook_indexes")
+            assert cut.has_custom("dasheng_codebook_indexes")
 
-def load_codebook_indexes(c):
-    info = c.codebook_indexes
+def load_codebook_indexes(c, field: str = "codebook_indexes"):
+    info = getattr(c, field)
     if isinstance(info, dict):
         filename = info["path"]
-        cb_indexes = np.load(filename)
+        return np.load(filename)
     else:
-        cb_indexes = c.load_custom("codebook_indexes")
-    return cb_indexes
-    
-       
+        return c.load_custom(field)
+
 def _collate_custom_field(
     cuts: CutSet, 
     field: str,
     dummy: np.array = None,
     temporal_array: bool = True,
     pad_value=None,
+    frame_rate: int = 50,
 ):
     
     # by default, we assert the frame_shift is 0.02
     if temporal_array:
-        max_frames = [int(c.duration * 50) for c in cuts]
+        max_frames = [int(c.duration * frame_rate) for c in cuts]
         
         temporal_dim = 0
         pad_value = -100
-        arrs = [
-            torch.from_numpy(load_codebook_indexes(c)) if c.has_custom(field) else dummy for c in cuts # load the numpy codebook indexes
-        ]
+        # arrs = [
+        #     torch.from_numpy(load_codebook_indexes(c, field)) if c.has_custom(field) else dummy for c in cuts
+        # ]
+        arrs = []
+        for c in cuts:
+            if c.has_custom(field):
+                try:
+                    arr  = torch.from_numpy(load_codebook_indexes(c, field))
+                except:
+                    logging.info(f"Error when loading codebookes for {c}")
+                    arr = dummy
+                    # raise ValueError(f"Error when loading {field} for cut {c.id}")
+            else:
+                arr = dummy
+            arrs.append(arr)
+            
         for i, arr in enumerate(arrs):
             arrs[i] = arr[:max_frames[i],:]
         
@@ -285,9 +307,8 @@ def _collate_custom_field(
         return tensors, arr_lens
     else:
         all_arrays = [torch.from_numpy(c.load_custom(field)) if c.has_custom(field) else dummy for c in cuts]
-        return torch.stack(all_arrays)
-            
-        
+        return torch.stack(all_arrays)        
+
 if __name__=="__main__":
     from functools import partial
     from utils import _add_dummy_embeddings_and_taskIDs
